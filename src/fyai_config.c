@@ -2147,12 +2147,36 @@ int fyai_config_rederive(struct fyai_ctx *ctx)
 	return config_rederive_doc(ctx, doc);
 }
 
+int fyai_config_adopt_catalog(struct fyai_ctx *ctx)
+{
+	struct fyai_cfg *cfg = ctx->cfg;
+	fy_generic catalog;
+
+	if (!cfg || !cfg->gb || ctx->arena_catalog.v == cfg->catalog_src)
+		return 0;
+	catalog = fy_invalid;
+	if (fy_is_valid(ctx->arena_catalog)) {
+		catalog = fy_gb_internalize(cfg->gb, ctx->arena_catalog);
+		fyai_error_check(ctx, fy_is_valid(catalog), err_out,
+				 "could not copy the catalogue of branch '%s'",
+				 fyai_ctx_branch(ctx));
+	}
+	cfg->catalog = catalog;
+	cfg->catalog_src = ctx->arena_catalog.v;
+	return 0;
+
+err_out:
+	return -1;
+}
+
 int fyai_config_adopt_arena(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	fy_generic doc;
 
 	if (!cfg || !cfg->gb || !fy_is_valid(ctx->arena_config))
+		return -1;
+	if (fyai_config_adopt_catalog(ctx))
 		return -1;
 	/* The prepared document contains --config and --set as higher layers. */
 	doc = config_merge(cfg->gb, ctx->arena_config, cfg->config_doc);
@@ -2257,6 +2281,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->diagram_fit = "legend";
 	cfg->table_border = 0;		/* 0 => follow the theme's table.border */
 	cfg->catalog = fy_invalid;
+	cfg->catalog_src = fy_invalid_value;
 	cfg->config_doc = fy_invalid;
 	cfg->sandbox = fy_invalid;
 	cfg->mcp_enabled = false;

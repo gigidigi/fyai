@@ -879,7 +879,7 @@ static void browser_build(struct fyai_browser *b, size_t limit,
 		description = b->rows[i].foreign ||
 			(b->resume && b->rows[i].title) ?
 			fyai_prompt_literal(browser_foreign_id(&b->rows[i])) :
-			fyai_prompt_literal(fy_get(branch.entry, "description", ""));
+			fyai_prompt_literal(fy_castp(&branch.description, ""));
 		if (b->rows[i].foreign && description && strlen(description) > 8)
 			description[8] = '\0';
 		fprintf(fp, "%s%s %s%s%s%s%s%s%s%s%s  \n",

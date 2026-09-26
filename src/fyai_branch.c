@@ -326,35 +326,53 @@ static fy_generic fyai_branch_member(fy_generic entry, const char *key)
 
 bool fyai_branch_decode(fy_generic entry, struct fyai_branch *b)
 {
+	fy_generic store;
+
 	memset(b, 0, sizeof(*b));
 	b->entry = fy_invalid;
-	b->config = fy_invalid;
 	b->head = fy_invalid;
-	b->created = fy_invalid;
 	b->updated = fy_invalid;
+	b->op = fy_invalid;
+	b->from = fy_invalid;
+	b->prev = fy_invalid;
+	b->store = fy_invalid;
+	b->config = fy_invalid;
+	b->catalog = fy_invalid;
+	b->created = fy_invalid;
 	b->cwd = fy_invalid;
 	b->description = fy_invalid;
 	b->agent = fy_invalid;
 	b->import = fy_invalid;
-	b->op = fy_invalid;
-	b->from = fy_invalid;
-	b->prev = fy_invalid;
 
 	if (!fy_is_mapping(entry))
 		return false;
+	store = fyai_branch_member(entry, "store");
+	if (fy_is_valid(store) && !fy_is_mapping(store))
+		return false;
 
 	b->entry = entry;
-	b->config = fyai_branch_member(entry, "config");
 	b->head = fyai_branch_member(entry, "head");
-	b->created = fyai_branch_member(entry, "created");
 	b->updated = fyai_branch_member(entry, "updated");
-	b->cwd = fyai_branch_member(entry, "cwd");
-	b->description = fyai_branch_member(entry, "description");
-	b->agent = fyai_branch_member(entry, "agent");
-	b->import = fyai_branch_member(entry, "import");
 	b->op = fyai_branch_member(entry, "op");
 	b->from = fyai_branch_member(entry, "from");
 	b->prev = fyai_branch_member(entry, "prev");
+	return fyai_branch_decode_store(store, b);
+}
+
+bool fyai_branch_decode_store(fy_generic store, struct fyai_branch *b)
+{
+	if (fy_is_invalid(store))
+		return true;
+	if (!fy_is_mapping(store))
+		return false;
+	b->store = store;
+	b->config = fyai_branch_member(store, "config");
+	b->catalog = fyai_branch_member(store, "catalog");
+	b->created = fyai_branch_member(store, "created");
+	b->cwd = fyai_branch_member(store, "cwd");
+	b->description = fyai_branch_member(store, "description");
+	b->agent = fyai_branch_member(store, "agent");
+	b->import = fyai_branch_member(store, "import");
 	return true;
 }
 
@@ -371,17 +389,11 @@ bool fyai_branch_lookup(fy_generic branches, const char *name,
 
 uint64_t fyai_branch_updated(const struct fyai_branch *b)
 {
-	if (fy_is_valid(b->updated))
-		return (uint64_t)fy_number(b->updated, 0);
-	/* A legacy entry stamps its publication as "created". */
-	return (uint64_t)fy_number(b->created, 0);
+	return (uint64_t)fy_number(b->updated, 0);
 }
 
 uint64_t fyai_branch_created(const struct fyai_branch *b)
 {
-	/* Unknown for a legacy entry: its "created" is the update time. */
-	if (fy_is_invalid(b->updated))
-		return 0;
 	return (uint64_t)fy_number(b->created, 0);
 }
 
@@ -392,21 +404,95 @@ const char *fyai_branch_cwd(const struct fyai_branch *b)
 	return fy_castp(&b->cwd, (const char *)NULL);
 }
 
+static fy_generic store_member_set(struct fy_generic_builder *gb,
+				   fy_generic store, const char *key,
+				   fy_generic v)
+{
+	if (fy_is_invalid(store))
+		return store;
+	if (fy_is_valid(v) && !fy_is_null(v)) {
+		if (fy_get(store, key).v == v.v)
+			return store;
+		return fy_assoc(gb, store, key, v);
+	}
+	if (fy_is_invalid(fy_get(store, key)))
+		return store;
+	return fy_disassoc(gb, store, key);
+}
+
+fy_generic fyai_branch_store_build(struct fy_generic_builder *gb,
+				   const struct fyai_branch *b)
+{
+	fy_generic store;
+
+	store = fy_is_mapping(b->store) ? b->store : fy_map_empty;
+	store = store_member_set(gb, store, "config", b->config);
+	store = store_member_set(gb, store, "catalog", b->catalog);
+	store = store_member_set(gb, store, "created", b->created);
+	store = store_member_set(gb, store, "cwd", b->cwd);
+	store = store_member_set(gb, store, "description", b->description);
+	store = store_member_set(gb, store, "agent", b->agent);
+	store = store_member_set(gb, store, "import", b->import);
+	return store;
+}
+
+static bool store_value_same(fy_generic a, fy_generic b)
+{
+	return a.v == b.v || fy_equal(a, b);
+}
+
+fy_generic fyai_branch_store_merge(struct fy_generic_builder *gb,
+				   fy_generic base, fy_generic ours,
+				   fy_generic theirs)
+{
+	fy_generic key, v, merged;
+
+	if (!fy_is_mapping(base))
+		base = fy_map_empty;
+	if (!fy_is_mapping(theirs))
+		theirs = fy_map_empty;
+	if (!fy_is_mapping(ours))
+		ours = fy_map_empty;
+	if (store_value_same(base, theirs))
+		return ours;
+
+	merged = ours;
+	/* A key changed or added only by them. */
+	fy_foreach_key_value(key, v, theirs) {
+		if (!store_value_same(fy_get(ours, key, fy_invalid),
+				      fy_get(base, key, fy_invalid)))
+			continue;
+		merged = fy_assoc(gb, merged, key, v);
+		if (fy_is_invalid(merged))
+			return fy_invalid;
+	}
+	/* A key removed only by them. */
+	fy_foreach_key_value(key, v, base) {
+		if (fy_is_valid(fy_get(theirs, key, fy_invalid)) ||
+		    !store_value_same(fy_get(ours, key, fy_invalid), v))
+			continue;
+		merged = fy_disassoc(gb, merged, key);
+		if (fy_is_invalid(merged))
+			return fy_invalid;
+	}
+	return merged;
+}
+
 fy_generic fyai_branch_build(struct fy_generic_builder *gb,
 			     const struct fyai_branch *b)
 {
+	fy_generic store;
+
+	store = fyai_branch_store_build(gb, b);
+	if (fy_is_invalid(store))
+		return fy_invalid;
 	return fy_mapping(gb,
-			  "config", fyai_generic_or_null(b->config),
 			  "head", fyai_generic_or_null(b->head),
-			  "created", fyai_generic_or_null(b->created),
 			  "updated", fyai_generic_or_null(b->updated),
-			  "cwd", fyai_generic_or_null(b->cwd),
-			  "description", fyai_generic_or_null(b->description),
-			  "agent", fyai_generic_or_null(b->agent),
-			  "import", fyai_generic_or_null(b->import),
 			  "op", fyai_generic_or_null(b->op),
 			  "from", fyai_generic_or_null(b->from),
-			  "prev", fyai_generic_or_null(b->prev));
+			  "prev", fyai_generic_or_null(b->prev),
+			  "store", store);
 }
 
 /* Cap on turns walked when counting or resolving a "~N" offset. */
@@ -563,8 +649,7 @@ fy_generic fyai_branch_select_rows(struct fyai_ctx *ctx,
 				   "model", fy_value(gb,
 					fy_get(b.config, "model", "-")),
 				   "description", fy_value(gb,
-					fy_get(picks[i].entry, "description",
-					       ""))));
+					fy_castp(&b.description, ""))));
 	}
 	free(picks);
 	return out;
@@ -694,7 +779,7 @@ int fyai_resolve_ref(struct fyai_ctx *ctx, const char *spec, fy_generic *headp)
 }
 
 int fyai_resolve_ref_state(struct fyai_ctx *ctx, const char *spec,
-			   fy_generic *headp, fy_generic *configp)
+			   fy_generic *headp, fy_generic *storep)
 {
 	char parsed[256];
 	struct fyai_branch b;
@@ -705,8 +790,8 @@ int fyai_resolve_ref_state(struct fyai_ctx *ctx, const char *spec,
 	int kind;
 
 	*headp = fy_invalid;
-	if (configp)
-		*configp = fy_invalid;
+	if (storep)
+		*storep = fy_invalid;
 	fyai_error_check(ctx, spec && *spec, err_out, "empty reference");
 
 	kind = fyai_ref_parse(spec, parsed, sizeof(parsed), &n);
@@ -742,8 +827,8 @@ int fyai_resolve_ref_state(struct fyai_ctx *ctx, const char *spec,
 					 "%s: ref log has no entry %lld",
 					 name, n);
 		}
-		if (configp)
-			*configp = b.config;
+		if (storep)
+			*storep = b.store;
 		*headp = b.head;
 		return 0;
 	}
@@ -760,14 +845,14 @@ int fyai_resolve_ref_state(struct fyai_ctx *ctx, const char *spec,
 		}
 		if (fy_is_valid(cur) && fy_is_null(cur))
 			cur = fy_invalid;
-		if (configp)
-			*configp = b.config;
+		if (storep)
+			*storep = b.store;
 		*headp = cur;
 		return 0;
 	}
 
-	if (configp)
-		*configp = b.config;
+	if (storep)
+		*storep = b.store;
 	*headp = b.head;
 	return 0;
 
@@ -813,8 +898,7 @@ static fy_generic branch_list_data(struct fyai_ctx *ctx, const char *under,
 				   "updated", fy_value(gb, (long long)
 					fyai_branch_updated(&b)),
 				   "description", fy_value(gb,
-					fy_is_valid(b.description) ?
-					fy_get(entry, "description", "") : "")));
+					fy_castp(&b.description, ""))));
 	}
 	return out;
 }
@@ -867,7 +951,7 @@ int fyai_branch_show(struct fyai_ctx *ctx, const char *name)
 		"created", fy_value(gb, (long long)fyai_branch_created(&b)),
 		"updated", fy_value(gb, (long long)fyai_branch_updated(&b)),
 		"directory", fy_value(gb, fyai_branch_cwd(&b) ? : "-"),
-		"description", fy_value(gb, fy_get(b.entry, "description", "-")),
+		"description", fy_value(gb, fy_castp(&b.description, "-")),
 		"agent", fy_value(gb, fy_get(b.agent, "persona", "-")),
 		"reflog_entries", fy_value(gb, branch_chain_len(b.entry)));
 	opts = fy_mapping(gb, "title", "Branch", "key_header", "Field",
@@ -904,7 +988,7 @@ int fyai_branch_create(struct fyai_ctx *ctx, const char *name,
 		       bool switch_to)
 {
 	struct fyai_branch b, cur, nb;
-	fy_generic head, entry, branches, desc, config, now;
+	fy_generic head, entry, branches, desc, store, now;
 	bool found;
 	int rc;
 
@@ -914,17 +998,23 @@ int fyai_branch_create(struct fyai_ctx *ctx, const char *name,
 	fyai_error_check(ctx, !found, err_out,
 			 "branch '%s' already exists", name);
 
-	/* A start point supplies both the conversation and configuration. */
+	/*
+	 * A start point supplies both the conversation and the store: the
+	 * configuration, the catalogue and every member this program does not
+	 * know.
+	 */
 	head = fy_invalid;
-	config = fy_invalid;
+	store = fy_invalid;
+	fyai_branch_decode(fy_invalid, &nb);
 	if (start) {
-		rc = fyai_resolve_ref_state(ctx, start, &head, &config);
+		rc = fyai_resolve_ref_state(ctx, start, &head, &store);
 		fyai_error_check(ctx, !rc, err_out,
 				 "could not resolve start point '%s'", start);
+		fyai_branch_decode_store(store, &nb);
 	} else if (fyai_branch_lookup(ctx->arena_branches,
 				      fyai_ctx_branch(ctx), &cur)) {
 		head = cur.head;
-		config = cur.config;
+		fyai_branch_decode_store(cur.store, &nb);
 	} else {
 		/* A session not stored yet starts the branch from its context. */
 		found = ctx->session_unstored &&
@@ -933,15 +1023,13 @@ int fyai_branch_create(struct fyai_ctx *ctx, const char *name,
 				 "current branch '%s' is missing",
 				 fyai_ctx_branch(ctx));
 		head = ctx->last_message;
-		config = ctx->arena_config;
+		nb.config = ctx->arena_config;
+		nb.catalog = ctx->arena_catalog;
 	}
 
 	desc = description ? fy_value(ctx->gb, description) : fy_invalid;
 
 	now = fy_value(ctx->gb, (long long)fyai_branch_timestamp());
-	memset(&nb, 0, sizeof(nb));
-	nb.entry = fy_invalid;
-	nb.config = config;
 	nb.head = head;
 	nb.created = now;
 	nb.updated = now;
@@ -992,9 +1080,9 @@ int fyai_branch_import(struct fyai_ctx *ctx, const char *name, fy_generic head,
 			 name);
 
 	now = fy_value(ctx->gb, (long long)fyai_branch_timestamp());
-	memset(&nb, 0, sizeof(nb));
-	nb.entry = fy_invalid;
+	fyai_branch_decode(fy_invalid, &nb);
 	nb.config = ctx->arena_config;
+	nb.catalog = ctx->arena_catalog;
 	nb.head = head;
 	nb.created = now;
 	nb.updated = now;
@@ -1208,6 +1296,7 @@ int fyai_branch_adopt(struct fyai_ctx *ctx, const char *name, bool keep_head)
 
 	ctx->last_message = b.head;
 	ctx->arena_config = b.config;
+	ctx->arena_catalog = b.catalog;
 	ctx->branch_desc = b.description;
 	ctx->branch_agent = b.agent;
 	ctx->branch_prev = b.entry;

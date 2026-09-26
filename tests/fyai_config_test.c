@@ -78,8 +78,6 @@ static void test_root_decode(struct fy_generic_builder *gb)
 	ver = fyai_root_decode(root, &r);
 	check(ver == FYAI_ROOT_VERSION, "container root: version");
 	check(fy_is_valid(r.branches), "container root: branches");
-	check(fy_is_invalid(r.catalog),
-	      "container root: null catalog decodes as invalid");
 	check(fyai_root_head_name(&r) &&
 	      !strcmp(fyai_root_head_name(&r), "main"),
 	      "container root: HEAD name");
@@ -101,8 +99,7 @@ static void test_root_decode(struct fy_generic_builder *gb)
 	root = fy_gb_mapping(gb, "fyai", (long long)FYAI_ROOT_VERSION);
 	ver = fyai_root_decode(root, &r);
 	check(ver == FYAI_ROOT_VERSION, "minimal root: version");
-	check(fy_is_invalid(r.branches) &&
-	      fy_is_invalid(r.catalog), "minimal root: all parts absent");
+	check(fy_is_invalid(r.branches), "minimal root: all parts absent");
 	check(!fyai_root_head_name(&r), "minimal root: no HEAD name");
 
 	/* legacy turn-shaped root: rejected (no back-compat) */

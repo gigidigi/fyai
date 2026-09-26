@@ -4177,7 +4177,9 @@ static bool fyai_agent_spawn_exec(struct fyai_ctx *ctx)
 /*
  * The state an executed sub-agent child cannot read from the arena: the
  * configuration of this run, the branch configuration, the conversation head
- * it forks from, and the identity of this execution. A command-line key is
+ * it forks from, and the identity of this execution. The catalogue of the
+ * branch is sent as its arena value: the child shares the arena and checks
+ * that the value is in it. A command-line key is
  * sent on the private channel; it is never stored.
  */
 static fy_generic fyai_agent_spawn_state(struct fyai_ctx *ctx,
@@ -4196,6 +4198,8 @@ static fy_generic fyai_agent_spawn_state(struct fyai_ctx *ctx,
 		"theme_variant", cfg->theme_variant ?
 			fy_value(gb, cfg->theme_variant) : fy_null,
 		"branch_config", fyai_generic_or_null(ctx->arena_config),
+		"branch_catalog", fy_is_mapping(ctx->arena_catalog) ?
+			fy_value(gb, (long long)ctx->arena_catalog.v) : fy_null,
 		"fork", fork,
 		"parent", ctx->agent_execution,
 		"api_key", cfg->api_key_explicit && cfg->api_key ?

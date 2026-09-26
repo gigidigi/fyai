@@ -19,11 +19,13 @@ int fyai_arena_reopen(struct fyai_ctx *ctx);
 
 /* Decoded container-root fields. */
 struct fyai_root {
-	fy_generic catalog;	/* arena-wide catalogue document */
 	fy_generic branches;	/* mapping: branch name -> branch entry */
 	fy_generic head;	/* the raw HEAD string generic */
 	fy_generic created;	/* when this root was published */
 };
+
+/* Return true if @v is a mapping stored in the arena of @a. */
+bool fyai_arena_mapping_contained(struct fy_allocator *a, fy_generic v);
 
 /* Decode a versioned container root. */
 int fyai_root_decode(fy_generic root, struct fyai_root *r);

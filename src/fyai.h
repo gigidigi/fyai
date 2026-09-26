@@ -147,7 +147,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
  * a root of any other version - including pre-container turn-shaped roots - is
  * rejected and the user re-inits. See doc/branching.md.
  */
-#define FYAI_ROOT_VERSION 2
+#define FYAI_ROOT_VERSION 3
 
 /* The branch an arena starts on, and the fallback when none is selected. */
 #define FYAI_BRANCH_DEFAULT "main"
@@ -395,10 +395,13 @@ struct fyai_cfg {
 	int mcp_timeout;			/* seconds (default 30) */
 
 	const char *arena_dir;
-	/* Repo arena catalog document (internalized into gb at config load;
-	 * fy_invalid when the arena carries none - the embedded snapshot is
-	 * the fallback). */
+	/*
+	 * Catalogue of the selected branch, internalized into gb (fy_invalid
+	 * when the branch carries none - the embedded snapshot is the
+	 * fallback). catalog_src is the arena value it was copied from.
+	 */
 	fy_generic catalog;
+	fy_generic_value catalog_src;
 	/*
 	 * The single configuration source: one merged document (arena config
 	 * as base - the user file is bootstrap-only when no arena config
@@ -540,7 +543,7 @@ struct fyai_ctx {
 	bool tools_spec_agent_child;
 	fy_generic last_message;
 	fy_generic arena_config;	/* the active branch's config, or fy_invalid */
-	fy_generic arena_catalog;	/* root["catalog"] or fy_invalid */
+	fy_generic arena_catalog;	/* catalogue of the branch, or fy_invalid */
 	/* Active branch state and its next ref-log predecessor. */
 	char *branch;
 	/* Stored HEAD, which can differ from the active branch. */
@@ -567,6 +570,11 @@ struct fyai_ctx {
 	const char *branch_op;
 	const char *branch_op_from;
 	fy_generic branch_agent;	/* sub-agent provenance for this branch */
+	/*
+	 * Store that the next publish starts from in place of the store of
+	 * branch_prev, or fy_invalid. The publish consumes it.
+	 */
+	fy_generic branch_store;
 	uint64_t refs_head;
 	struct curl_slist *headers;
 	char *auth_header;

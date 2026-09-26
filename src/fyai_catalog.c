@@ -272,7 +272,7 @@ int fyai_catalog_show(struct fyai_ctx *ctx)
 		return -1;
 	}
 	if (fy_is_invalid(ctx->arena_catalog))
-		fyai_report(ctx, "# embedded snapshot (no catalog in arena)\n");
+		fyai_report(ctx, "# embedded snapshot (no catalog on this branch)\n");
 	emit_generic_to_stdout(ctx, NULL, cat, true);
 	return 0;
 }

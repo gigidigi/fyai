@@ -112,6 +112,9 @@ void fyai_config_focus_bg_check(struct fyai_cfg *cfg);
  */
 int fyai_config_adopt_arena(struct fyai_ctx *ctx);
 
+/* Make the catalogue of the branch the catalogue of this run. */
+int fyai_config_adopt_catalog(struct fyai_ctx *ctx);
+
 /* Apply one configuration overlay to the derived cache. */
 int fyai_config_apply(struct fyai_cfg *cfg, fy_generic overlay);
 

@@ -2250,6 +2250,7 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 	ctx->branch_prev = fy_invalid;
 	ctx->branch_desc = fy_invalid;
 	ctx->branch_agent = fy_invalid;
+	ctx->branch_store = fy_invalid;
 	ctx->last_token_extents = fy_invalid;
 	if (fyai_signals_open(ctx))
 		goto err;

@@ -42,28 +42,51 @@ uint64_t fyai_branch_timestamp(void);
 /* The current directory as a string generic, or fy_invalid if unreadable. */
 fy_generic fyai_branch_cwd_generic(struct fy_generic_builder *gb);
 
-/* Decoded branch entry. Null values become fy_invalid. */
+/*
+ * Decoded branch entry. Null values become fy_invalid.
+ *
+ * An entry is the ref-log record {head, updated, op, from, prev, store}. The
+ * store holds the state that changes rarely. It is an open mapping: a key that
+ * this program does not know is kept on each publish. An unchanged store is
+ * the same arena object in each entry that refers to it.
+ */
 struct fyai_branch {
 	fy_generic entry;	/* the entry mapping itself */
-	fy_generic config;	/* this branch's configuration document */
 	fy_generic head;	/* tip of the turn chain */
-	fy_generic created;	/* first publication of the branch */
 	fy_generic updated;	/* publication time of this entry */
+	fy_generic op;		/* the operation that made this entry */
+	fy_generic from;	/* the previous name, on a rename */
+	fy_generic prev;	/* previous entry of this branch (its ref log) */
+	fy_generic store;	/* the store mapping itself */
+	/* Members of the store. */
+	fy_generic config;	/* this branch's configuration document */
+	fy_generic catalog;	/* this branch's provider and model catalogue */
+	fy_generic created;	/* first publication of the branch */
 	fy_generic cwd;		/* directory the branch started in */
 	fy_generic description;	/* free-text purpose of the branch */
 	fy_generic agent;	/* sub-agent provenance, if any */
 	fy_generic import;	/* foreign-session provenance, if any */
-	fy_generic op;		/* the operation that made this entry */
-	fy_generic from;	/* the previous name, on a rename */
-	fy_generic prev;	/* previous entry of this branch (its ref log) */
 };
 
+/* Decode the members of @store into @b. */
+bool fyai_branch_decode_store(fy_generic store, struct fyai_branch *b);
+
 /*
- * Entry metadata, for an entry of any version. An entry written before the
- * branch carried two timestamps holds one "created" member that is the time of
- * that publication, so it reads as the update time and leaves the creation
- * time unknown.
+ * Build the store of @b: its store with the known members of @b set, and a
+ * member that is fy_invalid removed.
  */
+fy_generic fyai_branch_store_build(struct fy_generic_builder *gb,
+				   const struct fyai_branch *b);
+
+/*
+ * Merge three stores key by key. A key that @ours did not change from @base
+ * takes the value of @theirs. Returns @ours when @theirs is @base.
+ */
+fy_generic fyai_branch_store_merge(struct fy_generic_builder *gb,
+				   fy_generic base, fy_generic ours,
+				   fy_generic theirs);
+
+/* Entry metadata. */
 uint64_t fyai_branch_updated(const struct fyai_branch *b);
 uint64_t fyai_branch_created(const struct fyai_branch *b);
 const char *fyai_branch_cwd(const struct fyai_branch *b);
@@ -207,9 +230,12 @@ long long fyai_branch_turn_count(fy_generic head, long long limit);
  */
 int fyai_resolve_ref(struct fyai_ctx *ctx, const char *spec, fy_generic *headp);
 
-/* Resolve a reference and its configuration. @configp may be NULL. */
+/*
+ * Resolve a reference and the store of the entry it names. @storep may be
+ * NULL.
+ */
 int fyai_resolve_ref_state(struct fyai_ctx *ctx, const char *spec,
-			   fy_generic *headp, fy_generic *configp);
+			   fy_generic *headp, fy_generic *storep);
 
 /*
  * Split a reference into its branch name and its suffix. Returns 0 for a bare
