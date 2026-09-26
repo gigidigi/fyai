@@ -34,6 +34,7 @@
 #include "fyai_prof.h"
 #include "fyai_branch.h"
 #include "fyai_merge.h"
+#include "fyai_catalog.h"
 #include "fyai_config.h"
 #include "fyai_storage.h"
 #include "fyai_turn.h"
@@ -982,6 +983,8 @@ err_out:
  * refs head to it. Returns 0 on success, >0 on concurrent-change conflict,
  * <0 on error.
  */
+static void branch_publish_test_gate(void);
+
 /* Leave headroom for conflicts from a full parallel tool group. */
 #define FYAI_STATE_PUBLISH_TRIES 64
 
@@ -1124,6 +1127,7 @@ static int fyai_root_publish_try(struct fyai_ctx *ctx)
 		return -1;
 	}
 	desired = (uint64_t)root.v;
+	branch_publish_test_gate();
 	fyai_prof_stamp(&t_cas);
 	rc = fy_allocator_refs_publish(ctx->durable_allocator, ctx->refs_head,
 				       desired, FY_ALLOC_REFS_CHECKPOINT);
@@ -1313,15 +1317,28 @@ int fyai_peek_arena_config(const char *arena_dir_opt, const char *branch_opt,
 	return ret;
 }
 
+/* True when branch/on_conflict lets this run replay on top of a change. */
+static bool publish_conflict_replays(struct fyai_ctx *ctx)
+{
+	const char *policy;
+
+	policy = ctx->cfg->branch_on_conflict;
+	return policy && strcmp(policy, "abort");
+}
+
 /*
  * Merge the store of this run with the store of @cur, the entry that a
- * concurrent publish made. A member that this run did not change takes the
- * value of @cur.
+ * concurrent publish made, three ways against the entry this run started
+ * from. A member that this run did not change takes the value of @cur. A
+ * member that both changed differently is a conflict, which
+ * branch/on_conflict decides as it decides one of the conversation: abort
+ * writes nothing, and rebase or merge keeps the value of this run.
  */
 static int publish_store_merge(struct fyai_ctx *ctx, const struct fyai_branch *cur)
 {
+	struct response_buffer paths = {0};
 	struct fyai_branch base, ours, merged;
-	fy_generic store;
+	fy_generic store, base_store, conflicts, p;
 	bool decoded;
 
 	fyai_branch_decode(ctx->branch_prev, &base);
@@ -1332,21 +1349,60 @@ static int publish_store_merge(struct fyai_ctx *ctx, const struct fyai_branch *c
 	ours.catalog = ctx->arena_catalog;
 	ours.description = ctx->branch_desc;
 	ours.agent = ctx->branch_agent;
+	conflicts = fy_seq_empty;
 	store = fyai_branch_store_build(ctx->gb, &ours);
-	if (fy_is_valid(store))
-		store = fyai_branch_store_merge(ctx->gb, base.store, store,
-						cur->store);
+	/*
+	 * A branch without a catalogue uses the embedded one, so both sides
+	 * started from that catalogue.
+	 */
+	base_store = base.store;
+	if (fy_is_invalid(base.catalog)) {
+		base.catalog = fyai_catalog_effective(fy_invalid, ctx->cfg->gb);
+		base_store = fyai_branch_store_build(ctx->gb, &base);
+	}
+	if (fy_is_valid(store) && fy_is_valid(base_store))
+		store = fyai_branch_store_merge(ctx->gb, base_store, store,
+						cur->store, &conflicts);
+	else
+		store = fy_invalid;
 	fyai_branch_decode(fy_invalid, &merged);
 	decoded = fy_is_valid(store) &&
 		  fyai_branch_decode_store(store, &merged);
 	fyai_error_check(ctx, decoded, err_out,
 			 "could not merge the store of branch '%s' with a "
 			 "concurrent change", fyai_ctx_branch(ctx));
+
+	if (!fy_empty(conflicts)) {
+		fy_foreach(p, conflicts) {
+			if ((paths.len && response_buffer_append(&paths, ", ")) ||
+			    response_buffer_append(&paths, fy_castp(&p, "")))
+				break;
+		}
+		if (!publish_conflict_replays(ctx)) {
+			fyai_error(ctx, "branch '%s': a concurrent change also "
+				   "set %s; nothing was written. Set "
+				   "branch/on_conflict to rebase or merge to "
+				   "keep the values of this command",
+				   fyai_ctx_branch(ctx),
+				   paths.len ? paths.data : "the store");
+			free(paths.data);
+			return -1;
+		}
+		fyai_notice(ctx, "branch '%s': a concurrent change also set %s; "
+			    "kept the values of this command",
+			    fyai_ctx_branch(ctx),
+			    paths.len ? paths.data : "the store");
+		free(paths.data);
+	}
+
 	ctx->arena_config = merged.config;
 	ctx->arena_catalog = merged.catalog;
 	ctx->branch_desc = merged.description;
 	ctx->branch_agent = merged.agent;
-	return 0;
+	/* The next publish builds on the merged store, unknown members too. */
+	ctx->branch_store = store;
+	/* A catalogue that they changed is the catalogue of this run too. */
+	return fyai_config_adopt_catalog(ctx);
 
 err_out:
 	return -1;
@@ -1355,10 +1411,9 @@ err_out:
 /* Reconcile the surviving root after a lost CAS. */
 static int publish_reconcile(struct fyai_ctx *ctx)
 {
-	struct fyai_branch cur;
+	struct fyai_branch cur, base;
 	struct fyai_root r;
 	fy_generic root, head;
-	const char *policy;
 	uint64_t refs;
 	int rc;
 
@@ -1382,8 +1437,23 @@ static int publish_reconcile(struct fyai_ctx *ctx)
 		return 0;
 	}
 
-	policy = ctx->cfg->branch_on_conflict;
-	if (!policy || !strcmp(policy, "abort")) {
+	/*
+	 * A conversation that only one side moved is not a conflict: take
+	 * that head. The store merges three ways and reports its own
+	 * conflicts.
+	 */
+	fyai_branch_decode(ctx->branch_prev, &base);
+	if (cur.head.v == base.head.v ||
+	    ctx->last_message.v == base.head.v) {
+		if (publish_store_merge(ctx, &cur))
+			return -1;
+		if (ctx->last_message.v == base.head.v)
+			ctx->last_message = cur.head;
+		ctx->branch_prev = cur.entry;
+		return 0;
+	}
+
+	if (!publish_conflict_replays(ctx)) {
 		fyai_error(ctx, "branch '%s' changed while this command was "
 			   "running; nothing was written. Set "
 			   "branch/on_conflict to rebase or merge to replay "
@@ -1464,54 +1534,18 @@ int fyai_publish_state(struct fyai_ctx *ctx)
 int fyai_publish_root(struct fyai_ctx *ctx, fy_generic config,
 		      fy_generic catalog, fy_generic head)
 {
-	struct fyai_branch cur_b;
-	struct fyai_root cur_r;
-	fy_generic root;
-	int tries, rc;
-
-	if (!ctx->durable_allocator || !ctx->durable_gb)
+	if (!ctx->durable_allocator || !ctx->durable_gb) {
+		fyai_error(ctx, "no arena; run fyai init");
 		return -1;
-
+	}
 	if (fy_is_valid(config))
 		ctx->arena_config = config;
 	if (fy_is_valid(catalog))
 		ctx->arena_catalog = catalog;
 	if (fy_is_valid(head))
 		ctx->last_message = head;
-
-	for (tries = 0; tries < 2; tries++) {
-		rc = fyai_root_publish_try(ctx);
-		if (rc <= 0)
-			goto out;
-		/* Adopt the surviving root, then apply this branch's changes. */
-		ctx->refs_head = fy_allocator_refs_get(ctx->durable_allocator);
-		if (!ctx->refs_head)
-			continue;
-		root = (fy_generic){ .v = ctx->refs_head };
-		if (fyai_root_decode(root, &cur_r) < 0) {
-			rc = -1;
-			goto out;
-		}
-		ctx->arena_branches = cur_r.branches;
-		fyai_branch_lookup(cur_r.branches, fyai_ctx_branch(ctx), &cur_b);
-		ctx->branch_prev = cur_b.entry;
-		ctx->branch_desc = cur_b.description;
-		ctx->branch_agent = cur_b.agent;
-		if (!fy_is_valid(config))
-			ctx->arena_config = cur_b.config;
-		if (!fy_is_valid(catalog))
-			ctx->arena_catalog = cur_b.catalog;
-		if (!fy_is_valid(head))
-			ctx->last_message = cur_b.head;
-	}
-out:
-	ctx->branch_store = fy_invalid;
-	if (rc) {
-		fyai_error(ctx, rc > 0 ? "fyai state changed concurrently" :
-			   "failed to publish fyai state");
-		return -1;
-	}
-	return 0;
+	/* A lost race reconciles as every publish of the branch does. */
+	return fyai_publish_state(ctx);
 }
 
 /* The longest wait of a publisher at the functional CAS test gate. */

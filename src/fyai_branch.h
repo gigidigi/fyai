@@ -79,12 +79,15 @@ fy_generic fyai_branch_store_build(struct fy_generic_builder *gb,
 				   const struct fyai_branch *b);
 
 /*
- * Merge three stores key by key. A key that @ours did not change from @base
- * takes the value of @theirs. Returns @ours when @theirs is @base.
+ * Merge three stores. A value that @ours did not change from @base takes the
+ * value of @theirs, and a mapping that both changed merges key by key. A
+ * value that both changed differently is a conflict: it keeps the value of
+ * @ours, and its slash path goes into the sequence *@conflictsp, which may be
+ * NULL. fy_invalid when the merge cannot be built.
  */
 fy_generic fyai_branch_store_merge(struct fy_generic_builder *gb,
 				   fy_generic base, fy_generic ours,
-				   fy_generic theirs);
+				   fy_generic theirs, fy_generic *conflictsp);
 
 /* Entry metadata. */
 uint64_t fyai_branch_updated(const struct fyai_branch *b);

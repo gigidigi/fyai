@@ -63,10 +63,10 @@ bool fyai_branch_entry_contained(struct fy_allocator *a, fy_generic entry,
 bool fyai_root_validate(struct fy_allocator *a, fy_generic root);
 
 /*
- * Publish a new container root. Valid arguments replace the corresponding
- * part; fy_invalid keeps the current one. On a concurrent-change CAS
- * conflict the root is re-read once, the surviving parts merged, and the
- * publish retried.
+ * Publish the branch with @config, @catalog and @head in place of the values
+ * of the context; fy_invalid keeps the value of the context, and a null
+ * catalogue removes it. A lost race reconciles as fyai_publish_state() does:
+ * the store merges three ways, and a conflict follows branch/on_conflict.
  */
 int fyai_publish_root(struct fyai_ctx *ctx, fy_generic config,
 		      fy_generic catalog, fy_generic head);

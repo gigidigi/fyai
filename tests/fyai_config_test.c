@@ -110,8 +110,8 @@ static void test_root_decode(struct fy_generic_builder *gb)
 	merged = fyai_branch_store_merge(gb,
 		fy_gb_mapping(gb, "a", 1LL, "b", 1LL, "c", 1LL),
 		fy_gb_mapping(gb, "a", 2LL, "b", 1LL, "c", 1LL),
-		fy_gb_mapping(gb, "a", 3LL, "b", 3LL, "d", 3LL));
-	check(fy_get(merged, "a", 0LL) == 2, "store merge: ours wins a conflict");
+		fy_gb_mapping(gb, "a", 3LL, "b", 3LL, "d", 3LL), NULL);
+	check(fy_get(merged, "a", 0LL) == 2, "store merge: ours kept on a conflict");
 	check(fy_get(merged, "b", 0LL) == 3, "store merge: their change taken");
 	check(fy_is_invalid(fy_get(merged, "c")), "store merge: their removal taken");
 	check(fy_get(merged, "d", 0LL) == 3, "store merge: their addition taken");

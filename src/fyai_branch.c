@@ -438,14 +438,191 @@ fy_generic fyai_branch_store_build(struct fy_generic_builder *gb,
 
 static bool store_value_same(fy_generic a, fy_generic b)
 {
-	return a.v == b.v || fy_equal(a, b);
+	if (a.v == b.v)
+		return true;
+	if (fy_is_invalid(a) || fy_is_invalid(b))
+		return false;
+	return fy_equal(a, b);
+}
+
+
+/* Most nested values that a store merge descends, and its longest path. */
+#define STORE_MERGE_DEPTH_MAX	32
+#define FYAI_STORE_PATH_MAX	256
+
+static fy_generic store_merge3(struct fy_generic_builder *gb, fy_generic base,
+			       fy_generic ours, fy_generic theirs,
+			       const char *path, unsigned int depth,
+			       fy_generic *conflictsp, bool *failp);
+
+/* The name of an item of a named sequence: its "name" or "canonical_id". */
+static fy_generic store_item_name(fy_generic item)
+{
+	fy_generic v;
+
+	if (!fy_is_mapping(item))
+		return fy_invalid;
+	v = fy_get(item, "name", fy_invalid);
+	if (!fy_is_string(v))
+		v = fy_get(item, "canonical_id", fy_invalid);
+	return fy_is_string(v) ? v : fy_invalid;
+}
+
+/*
+ * Index a sequence whose items are mappings with distinct names. fy_invalid
+ * when it is not one, which makes the sequence one value.
+ */
+static fy_generic store_seq_index(struct fy_generic_builder *gb, fy_generic seq)
+{
+	fy_generic idx, item, name;
+
+	if (fy_is_invalid(seq))
+		return fy_map_empty;
+	if (!fy_is_sequence(seq))
+		return fy_invalid;
+	idx = fy_map_empty;
+	fy_foreach(item, seq) {
+		name = store_item_name(item);
+		if (fy_is_invalid(name) ||
+		    fy_is_valid(fy_get(idx, name, fy_invalid)))
+			return fy_invalid;
+		idx = fy_assoc(gb, idx, name, item);
+		if (fy_is_invalid(idx))
+			return idx;
+	}
+	return idx;
+}
+
+/*
+ * Merge a named sequence item by item: the order of @ours, then the items
+ * that only they added, in their order. fy_invalid when a side is not a
+ * named sequence.
+ */
+static fy_generic store_merge_named(struct fy_generic_builder *gb,
+				    fy_generic base, fy_generic ours,
+				    fy_generic theirs, const char *path,
+				    unsigned int depth, fy_generic *conflictsp,
+				    bool *failp)
+{
+	char sub[FYAI_STORE_PATH_MAX];
+	fy_generic bi, oi, ti, out, item, v, name;
+	int pass;
+
+	bi = store_seq_index(gb, base);
+	oi = store_seq_index(gb, ours);
+	ti = store_seq_index(gb, theirs);
+	if (fy_is_invalid(bi) || fy_is_invalid(oi) || fy_is_invalid(ti))
+		return fy_invalid;
+
+	out = fy_seq_empty;
+	for (pass = 0; pass < 2; pass++) {
+		fy_foreach(item, pass ? theirs : ours) {
+			name = store_item_name(item);
+			/* The second pass adds what only they have. */
+			if (pass && fy_is_valid(fy_get(oi, name, fy_invalid)))
+				continue;
+			snprintf(sub, sizeof(sub), "%s/%s", path,
+				 fy_castp(&name, ""));
+			v = store_merge3(gb, fy_get(bi, name, fy_invalid),
+					 fy_get(oi, name, fy_invalid),
+					 fy_get(ti, name, fy_invalid),
+					 sub, depth + 1, conflictsp, failp);
+			if (*failp)
+				return fy_invalid;
+			if (fy_is_invalid(v))
+				continue;
+			out = fy_append(gb, out, v);
+			if (fy_is_invalid(out)) {
+				*failp = true;
+				return out;
+			}
+		}
+	}
+	return out;
+}
+
+/*
+ * Merge one value three ways. fy_invalid is an absent value. A mapping that
+ * both sides changed is merged key by key; any other value that both sides
+ * changed differently is a conflict: its path goes to @conflictsp and the
+ * value of @ours is kept.
+ */
+static fy_generic store_merge3(struct fy_generic_builder *gb, fy_generic base,
+			       fy_generic ours, fy_generic theirs,
+			       const char *path, unsigned int depth,
+			       fy_generic *conflictsp, bool *failp)
+{
+	char sub[FYAI_STORE_PATH_MAX];
+	fy_generic key, v, merged, keys;
+	const char *name;
+
+	if (store_value_same(ours, theirs) || store_value_same(base, theirs))
+		return ours;
+	if (store_value_same(base, ours))
+		return theirs;
+	/* A sequence of named items, such as the models, merges by name. */
+	if (fy_is_sequence(ours) && fy_is_sequence(theirs) &&
+	    depth < STORE_MERGE_DEPTH_MAX) {
+		merged = store_merge_named(gb, base, ours, theirs, path, depth,
+					   conflictsp, failp);
+		if (*failp)
+			return ours;
+		if (fy_is_valid(merged))
+			return merged;
+	}
+	if (!fy_is_mapping(ours) || !fy_is_mapping(theirs) ||
+	    (fy_is_valid(base) && !fy_is_mapping(base)) ||
+	    depth >= STORE_MERGE_DEPTH_MAX) {
+		*conflictsp = fy_append(gb, *conflictsp,
+					fy_value(gb, *path ? path : "/"));
+		if (fy_is_invalid(*conflictsp))
+			*failp = true;
+		return ours;
+	}
+	if (fy_is_invalid(base))
+		base = fy_map_empty;
+
+	/* Every key of either side and of the base, one time each. */
+	keys = fy_map_empty;
+	fy_foreach(key, ours)
+		keys = fy_assoc(gb, keys, key, true);
+	fy_foreach(key, theirs)
+		keys = fy_assoc(gb, keys, key, true);
+	fy_foreach(key, base)
+		keys = fy_assoc(gb, keys, key, true);
+	if (fy_is_invalid(keys)) {
+		*failp = true;
+		return ours;
+	}
+
+	merged = fy_map_empty;
+	fy_foreach(key, keys) {
+		name = fy_is_string(key) ? fy_castp(&key, "") : "?";
+		snprintf(sub, sizeof(sub), "%s%s%s", path, *path ? "/" : "",
+			 name);
+		v = store_merge3(gb, fy_get(base, key, fy_invalid),
+				 fy_get(ours, key, fy_invalid),
+				 fy_get(theirs, key, fy_invalid),
+				 sub, depth + 1, conflictsp, failp);
+		if (*failp)
+			return ours;
+		if (fy_is_invalid(v))
+			continue;
+		merged = fy_assoc(gb, merged, key, v);
+		if (fy_is_invalid(merged)) {
+			*failp = true;
+			return ours;
+		}
+	}
+	return merged;
 }
 
 fy_generic fyai_branch_store_merge(struct fy_generic_builder *gb,
 				   fy_generic base, fy_generic ours,
-				   fy_generic theirs)
+				   fy_generic theirs, fy_generic *conflictsp)
 {
-	fy_generic key, v, merged;
+	fy_generic conflicts, merged;
+	bool fail;
 
 	if (!fy_is_mapping(base))
 		base = fy_map_empty;
@@ -453,29 +630,14 @@ fy_generic fyai_branch_store_merge(struct fy_generic_builder *gb,
 		theirs = fy_map_empty;
 	if (!fy_is_mapping(ours))
 		ours = fy_map_empty;
-	if (store_value_same(base, theirs))
-		return ours;
-
-	merged = ours;
-	/* A key changed or added only by them. */
-	fy_foreach_key_value(key, v, theirs) {
-		if (!store_value_same(fy_get(ours, key, fy_invalid),
-				      fy_get(base, key, fy_invalid)))
-			continue;
-		merged = fy_assoc(gb, merged, key, v);
-		if (fy_is_invalid(merged))
-			return fy_invalid;
-	}
-	/* A key removed only by them. */
-	fy_foreach_key_value(key, v, base) {
-		if (fy_is_valid(fy_get(theirs, key, fy_invalid)) ||
-		    !store_value_same(fy_get(ours, key, fy_invalid), v))
-			continue;
-		merged = fy_disassoc(gb, merged, key);
-		if (fy_is_invalid(merged))
-			return fy_invalid;
-	}
-	return merged;
+	conflicts = fy_seq_empty;
+	fail = false;
+	merged = store_merge3(gb, base, ours, theirs, "", 0, &conflicts, &fail);
+	if (conflictsp)
+		*conflictsp = conflicts;
+	if (fail)
+		return fy_invalid;
+	return fy_is_valid(merged) ? merged : fy_map_empty;
 }
 
 fy_generic fyai_branch_build(struct fy_generic_builder *gb,
