@@ -148,7 +148,10 @@ grep -q 'kind: tool_call' codex-import.md || \
 	fail "Codex compact replacement tool call was not imported"
 grep -q 'int imported;' codex-import.md || \
 	fail "Codex compact replacement tool result was not imported"
-if grep -q 'Inspect it.' codex-import.md; then
+# The description of the branch is the title of the selected session.
+grep -qx '  description: Inspect it.' codex-import.md || \
+	fail "Codex import did not describe the branch by its own session"
+if grep -v '^  description:' codex-import.md | grep -q 'Inspect it.'; then
 	fail "Codex pre-compaction context remained active"
 fi
 
@@ -172,7 +175,8 @@ grep -q 'tool: read_file' claude-import.md || \
 	fail "Claude Read did not map to read_file"
 grep -q 'int imported;' claude-import.md || \
 	fail "Claude post-compaction tool result was not imported"
-if grep -q 'Inspect it.' claude-import.md; then
+# The description of the branch quotes the session; only the turns count.
+if grep -v '^  description:' claude-import.md | grep -q 'Inspect it.'; then
 	fail "Claude pre-compaction context remained active"
 fi
 run_fyai --branch import/claude-code/claude-test --color off history

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# Textual export: configuration and canonical conversation share one reviewable
+# Textual export: the branch store and canonical conversation share one reviewable
 # document, and directive-looking body prose is escaped one-to-one.
 set -eu
 . "$(dirname "$0")/../harness.sh"
@@ -32,16 +32,16 @@ test ! -e config.yaml || fail "export wrote separate config.yaml"
 
 # Document header and structure.
 grep -qx '<!-- meta:yaml' saved.md || fail "missing directive opener"
-grep -qx 'format: 1' saved.md || fail "missing format directive"
+grep -qx 'format: 2' saved.md || fail "missing format directive"
 grep -qx 'kind: conversation' saved.md || fail "missing header kind"
-grep -qx 'kind: config' saved.md || fail "missing configuration"
+grep -qx 'kind: store' saved.md || fail "missing branch store"
 grep -q 'system_prompt: Export system.' saved.md || \
 	fail "exported configuration is incomplete"
-grep -qx 'kind: config-update' saved.md || \
-	fail "missing the configuration update"
-grep -qE '^  temperature: 0\.(7|69)' saved.md || \
+grep -qx 'kind: store-update' saved.md || \
+	fail "missing the branch store update"
+grep -qE '^  config/temperature: 0\.(7|69)' saved.md || \
 	fail "an added key is not in the update"
-grep -qx '  temperature: null' saved.md || \
+grep -qx '  config/temperature: null' saved.md || \
 	fail "a removed key is not null in the update"
 grep -qx 'kind: publish' saved.md || fail "missing a publish marker"
 grep -qx 'kind: turn' saved.md || fail "missing a turn marker"
@@ -71,15 +71,19 @@ grep -qx '<!-- xx-meta:yaml' saved.md || \
 # in prose needs no escape, because a terminator is read only after an opener.
 # An update states only what that boundary changed. The last one removed a
 # single key, so it must carry exactly that one path.
-last=$(awk '/^kind: config-update$/ { blk = "" ; inblk = 1 ; next }
+last=$(awk '/^kind: store-update$/ { blk = "" ; inblk = 1 ; next }
 	    inblk && /^-->$/ { last = blk ; inblk = 0 ; next }
 	    inblk { blk = blk $0 "\n" }
 	    END { printf "%s", last }' saved.md)
-test "$last" = "config-update:
-  temperature: null" || fail "the last update is not a minimal delta: $last"
+test "$last" = "store-update:
+  config/temperature: null" || fail "the last update is not a minimal delta: $last"
 
 test "$(grep -cx 'kind: publish' saved.md)" -ge 3 || \
 	fail "a publish boundary was not recorded"
+
+# The directory and the creation time belong to this arena.
+! grep -qE '^  (cwd|created):' saved.md || \
+	fail "arena-local store members were exported"
 
 mock_stop 1
 pass

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# Config: the config document carries a read-only catalog: block mirroring
+# Config: the config document carries a read-only model_info: block mirroring
 # the full catalogue models[] entry for the current model, plus
 # canonical_provider - re-derived on every commit and removed when the
 # model is not in the catalogue.
@@ -37,7 +37,7 @@ run_fyai config set model cat-model
 assert_status 0
 run_fyai config effective
 assert_status 0
-assert_stdout_contains "catalog:"
+assert_stdout_contains "model_info:"
 assert_stdout_contains "display_name: Catalog Model"
 assert_stdout_contains "context_window: 32000"
 assert_stdout_contains "open_source: true"
@@ -48,7 +48,7 @@ run_fyai config set model not-in-catalog
 assert_status 0
 run_fyai config effective
 assert_status 0
-assert_stdout_not_contains "catalog:"
+assert_stdout_not_contains "model_info:"
 
 # a fresh catalogue import re-syncs the block for the currently configured
 # model rather than leaving it stale.

@@ -11,7 +11,6 @@
 
 FYAI_TEST_ENTRY(branch, select_order, branch_select_order)
 FYAI_TEST_ENTRY(branch, select_directory, branch_select_directory)
-FYAI_TEST_ENTRY(branch, select_legacy, branch_select_legacy)
 FYAI_TEST_ENTRY(branch, select_empty, branch_select_empty)
 FYAI_TEST_ENTRY(branch, pick_last, branch_pick_last_newest)
 FYAI_TEST_ENTRY(branch, import_provenance, branch_import_provenance)
@@ -22,31 +21,12 @@ static fy_generic entry_new(struct fy_generic_builder *gb, long long created,
 {
 	struct fyai_branch b;
 
-	memset(&b, 0, sizeof(b));
-	b.entry = fy_invalid;
-	b.config = fy_invalid;
-	b.head = fy_invalid;
+	fyai_branch_decode(fy_invalid, &b);
 	b.created = fy_value(gb, created);
 	b.updated = fy_value(gb, updated);
 	b.cwd = cwd ? fy_value(gb, cwd) : fy_invalid;
-	b.description = fy_invalid;
-	b.agent = fy_invalid;
-	b.import = fy_invalid;
 	b.op = fy_value(gb, FYAI_BRANCH_OP_TURN);
-	b.from = fy_invalid;
-	b.prev = fy_invalid;
 	return fyai_branch_build(gb, &b);
-}
-
-/* An entry as written before the branch carried two timestamps. */
-static fy_generic entry_legacy(struct fy_generic_builder *gb, long long created)
-{
-	return fy_mapping(gb, "config", fy_null, "head", fy_null,
-			  "created", fy_value(gb, created),
-			  "description", fy_null, "agent", fy_null,
-			  "import", fy_null,
-			  "op", fy_value(gb, FYAI_BRANCH_OP_TURN),
-			  "from", fy_null, "prev", fy_null);
 }
 
 static struct fy_generic_builder *builder_new(void)
@@ -108,14 +88,14 @@ int branch_select_directory(void)
 		"here", entry_new(gb, 10, 100, "/w"),
 		"there", entry_new(gb, 10, 200, "/elsewhere"),
 		/* A sub-agent branch is work of a turn, never a session. */
-		"here/agent:helper", fy_mapping(gb, "config", fy_null,
-			"head", fy_null, "created", fy_value(gb, 10LL),
+		"here/agent:helper", fy_mapping(gb, "head", fy_null,
 			"updated", fy_value(gb, 300LL),
-			"cwd", fy_value(gb, "/w"),
-			"description", fy_null,
-			"agent", fy_mapping(gb, "persona", "helper"),
 			"op", fy_value(gb, FYAI_BRANCH_OP_TURN),
-			"from", fy_null, "prev", fy_null));
+			"from", fy_null, "prev", fy_null,
+			"store", fy_mapping(gb,
+				"created", fy_value(gb, 10LL),
+				"cwd", fy_value(gb, "/w"),
+				"agent", fy_mapping(gb, "persona", "helper"))));
 
 	rows = fyai_branch_select_rows(NULL, gb, branches, "/w", false);
 	FYAI_TCHECK(fy_generic_sequence_get_item_count(rows) == 1);
@@ -125,39 +105,6 @@ int branch_select_directory(void)
 	rows = fyai_branch_select_rows(NULL, gb, branches, "/w", true);
 	FYAI_TCHECK(fy_generic_sequence_get_item_count(rows) == 2);
 	FYAI_TCHECK(!strcmp(row_branch(rows, 0), "there"));
-
-	fy_generic_builder_destroy(gb);
-	return 0;
-}
-
-int branch_select_legacy(void)
-{
-	struct fy_generic_builder *gb;
-	fy_generic branches, rows;
-	struct fyai_branch b;
-
-	gb = builder_new();
-	FYAI_TCHECK(gb);
-	branches = fy_mapping(gb,
-		"old", entry_legacy(gb, 500),
-		"new", entry_new(gb, 10, 100, "/w"));
-
-	/* A legacy entry records no directory, so it is unknown here. */
-	rows = fyai_branch_select_rows(NULL, gb, branches, "/w", false);
-	FYAI_TCHECK(fy_generic_sequence_get_item_count(rows) == 1);
-	FYAI_TCHECK(!strcmp(row_branch(rows, 0), "new"));
-
-	/* It is resumable from the all-directories listing, ordered by the
-	 * time its single "created" member stands for. */
-	rows = fyai_branch_select_rows(NULL, gb, branches, "/w", true);
-	FYAI_TCHECK(fy_generic_sequence_get_item_count(rows) == 2);
-	FYAI_TCHECK(!strcmp(row_branch(rows, 0), "old"));
-
-	FYAI_TCHECK(fyai_branch_lookup(branches, "old", &b));
-	FYAI_TCHECK(fyai_branch_updated(&b) == 500);
-	/* The creation time of a legacy branch is not known. */
-	FYAI_TCHECK(!fyai_branch_created(&b));
-	FYAI_TCHECK(!fyai_branch_cwd(&b));
 
 	fy_generic_builder_destroy(gb);
 	return 0;

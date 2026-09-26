@@ -35,13 +35,13 @@ assert_status 0
 run_fyai export -o again.md
 assert_status 0
 
-# Compare the conversation. Configuration boundaries differ by construction:
-# each arena carries its own bootstrap history, and the importing invocation
+# Compare the conversation. Store boundaries differ by construction: each
+# arena carries its own bootstrap history, and the importing invocation
 # resolves a model of its own, so only turns and messages are comparable.
 conversation() {
 	awk '/^<!-- meta:yaml$/ { inblk = 1; blk = $0 "\n"; next }
 	     inblk { blk = blk $0 "\n"
-		     if ($0 == "kind: config" || $0 == "kind: config-update")
+		     if ($0 == "kind: store" || $0 == "kind: store-update")
 			     drop = 1
 		     if ($0 == "-->") { inblk = 0
 				        if (!drop) printf "%s", blk

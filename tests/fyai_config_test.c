@@ -58,7 +58,7 @@ int session_compact_chatgpt_auth(void)
 
 static void test_root_decode(struct fy_generic_builder *gb)
 {
-	fy_generic root, turn, entry;
+	fy_generic root, turn, entry, store, merged;
 	struct fyai_branch b;
 	struct fyai_root r;
 	int ver;
@@ -67,12 +67,15 @@ static void test_root_decode(struct fy_generic_builder *gb)
 	turn = fy_gb_mapping(gb, "messages", fy_gb_sequence(gb),
 			     "previous", fy_null);
 	entry = fy_gb_mapping(gb,
-			      "config", fy_gb_mapping(gb, "model", "m1"),
 			      "head", turn,
-			      "prev", fy_null);
+			      "prev", fy_null,
+			      "store", fy_gb_mapping(gb,
+				"config", fy_gb_mapping(gb, "model", "m1"),
+				"catalog", fy_gb_mapping(gb, "models",
+							 fy_gb_sequence(gb)),
+				"shared", fy_gb_mapping(gb, "k", "v")));
 	root = fy_gb_mapping(gb,
 			     "fyai", (long long)FYAI_ROOT_VERSION,
-			     "catalog", fy_null,
 			     "HEAD", "main",
 			     "branches", fy_gb_mapping(gb, "main", entry));
 	ver = fyai_root_decode(root, &r);
@@ -89,6 +92,29 @@ static void test_root_decode(struct fy_generic_builder *gb)
 	check(!strcmp(fy_get(b.config, "model", ""), "m1"),
 	      "branch: config content");
 	check(fy_is_invalid(b.prev), "branch: null prev is invalid");
+	check(fy_is_mapping(b.catalog), "branch: catalog from the store");
+
+	/* An unknown store member survives a rebuild of the entry. */
+	b.description = fy_value(gb, "d");
+	entry = fyai_branch_build(gb, &b);
+	check(fyai_branch_decode(entry, &b), "rebuilt entry decodes");
+	store = fy_get(entry, "store");
+	check(!strcmp(fy_get(fy_get(store, "shared"), "k", ""), "v"),
+	      "store: unknown member kept");
+	check(!strcmp(fy_castp(&b.description, ""), "d"),
+	      "store: description set");
+	check(fy_is_invalid(fy_get(entry, "config")),
+	      "entry: config is only in the store");
+
+	/* Three-way store merge. */
+	merged = fyai_branch_store_merge(gb,
+		fy_gb_mapping(gb, "a", 1LL, "b", 1LL, "c", 1LL),
+		fy_gb_mapping(gb, "a", 2LL, "b", 1LL, "c", 1LL),
+		fy_gb_mapping(gb, "a", 3LL, "b", 3LL, "d", 3LL));
+	check(fy_get(merged, "a", 0LL) == 2, "store merge: ours wins a conflict");
+	check(fy_get(merged, "b", 0LL) == 3, "store merge: their change taken");
+	check(fy_is_invalid(fy_get(merged, "c")), "store merge: their removal taken");
+	check(fy_get(merged, "d", 0LL) == 3, "store merge: their addition taken");
 
 	check(!fyai_branch_lookup(r.branches, "nope", &b),
 	      "branch lookup: absent reports false");
@@ -112,6 +138,10 @@ static void test_root_decode(struct fy_generic_builder *gb)
 			     "config", fy_gb_mapping(gb, "model", "m1"),
 			     "head", turn);
 	check(fyai_root_decode(root, &r) < 0, "version 1 rejected");
+
+	/* version 2 kept branch state beside the ref log and is not migrated */
+	root = fy_gb_mapping(gb, "fyai", 2LL, "catalog", fy_null);
+	check(fyai_root_decode(root, &r) < 0, "version 2 rejected");
 
 	/* future version: rejected */
 	root = fy_gb_mapping(gb, "fyai", 999LL);
@@ -282,7 +312,7 @@ int config_root_decode(void)
 
 /* Derived, secret or example values that the sample sets on purpose. */
 static const char *const sample_exempt[] = {
-	"catalog", "api_key/", "mcp/auth_token/", "model", "agent/personas",
+	"model_info", "api_key/", "mcp/auth_token/", "model", "agent/personas",
 	NULL,
 };
 
