@@ -65,7 +65,7 @@ struct fyai_import_turn {
 };
 
 struct fyai_import_publish {
-	fy_generic config;		/* fy_invalid when unchanged */
+	fy_generic store;		/* fy_invalid when unchanged */
 	struct fyai_import_turn *turns;
 	size_t turn_count;
 	size_t turn_capacity;
@@ -77,9 +77,10 @@ struct fyai_import {
 	struct fyai_import_publish *publishes;
 	size_t count;
 	size_t capacity;
-	fy_generic config;		/* running configuration */
+	fy_generic store;		/* running branch store */
 	fy_generic pending;		/* results owed to the next turn */
 	unsigned int call_seq;
+	bool catalog_seen;		/* a store of the stream held a catalogue */
 	bool ignore_compact;
 	bool request_ready;
 };
@@ -141,7 +142,7 @@ static struct fyai_import_publish *fyai_import_publish_add(struct fyai_import *i
 	}
 	items = &im->publishes[im->count++];
 	memset(items, 0, sizeof(*items));
-	items->config = fy_invalid;
+	items->store = fy_invalid;
 	return items;
 err:
 	return NULL;
@@ -169,26 +170,34 @@ err:
 	return NULL;
 }
 
-/* Apply one slash-path delta; a null value removes the key. */
+/*
+ * Apply one slash-path delta below @prefix; a null value removes the key.
+ * Format 1 names configuration paths, which are below "config/" of the store.
+ */
 static fy_generic fyai_import_apply_update(struct fyai_import *im,
-					   fy_generic config, fy_generic update)
+					   fy_generic store, fy_generic update,
+					   const char *prefix)
 {
 	fy_generic key;
 	fy_generic val;
+	const char *path;
 
-	if (fy_is_invalid(config))
-		config = fy_gb_mapping(im->gb);
+	if (fy_is_invalid(store))
+		store = fy_gb_mapping(im->gb);
 	fy_foreach_key_value(key, val, update) {
 		if (!fy_is_string(key))
 			continue;
+		path = fy_castp(&key, "");
+		if (*prefix)
+			path = fy_sprintfa("%s%s", prefix, path);
 		if (fy_is_null(val))
-			config = fy_delete_at_pathstr(im->gb, config,
-						      fy_castp(&key, ""));
+			store = fy_delete_at_pathstr(im->gb, store, path);
 		else
-			config = fy_set_at_pathstr(im->gb, config,
-						   fy_castp(&key, ""), val);
+			store = fy_set_at_pathstr(im->gb, store, path, val);
+		if (fy_is_invalid(store))
+			return store;
 	}
-	return config;
+	return store;
 }
 
 static int fyai_import_message_add(struct fyai_import *im,
@@ -387,18 +396,42 @@ static int fyai_import_parse(struct fyai_import *im, char *text)
 		}
 		fyai_error_check(ctx, pu, err,
 				 "import: %s appears before any publish", kind_text);
+		if (fy_equal(kind, "store")) {
+			im->store = fy_get(directive, "store", fy_invalid);
+			fyai_error_check(ctx, fy_is_mapping(im->store), err,
+				"import: store is not a mapping");
+			pu->store = im->store;
+			continue;
+		}
+		if (fy_equal(kind, "store-update")) {
+			update = fy_get(directive, "store-update", fy_invalid);
+			fyai_error_check(ctx, fy_is_mapping(update), err,
+				"import: store-update is not a mapping");
+			im->store = fyai_import_apply_update(im, im->store,
+							     update, "");
+			fyai_error_check(ctx, fy_is_valid(im->store), err,
+				"import: cannot apply a store update");
+			pu->store = im->store;
+			continue;
+		}
+		/* Format 1 kept the configuration alone. */
 		if (fy_equal(kind, "config")) {
-			im->config = fy_get(directive, "config", fy_invalid);
-			pu->config = im->config;
+			im->store = fy_mapping(im->gb, "config",
+				fy_get(directive, "config", fy_invalid));
+			fyai_error_check(ctx, fy_is_valid(im->store), err,
+				"import: config is not a mapping");
+			pu->store = im->store;
 			continue;
 		}
 		if (fy_equal(kind, "config-update")) {
 			update = fy_get(directive, "config-update", fy_invalid);
 			fyai_error_check(ctx, fy_is_mapping(update), err,
 				"import: config-update is not a mapping");
-			im->config = fyai_import_apply_update(im, im->config,
-							      update);
-			pu->config = im->config;
+			im->store = fyai_import_apply_update(im, im->store,
+							     update, "config/");
+			fyai_error_check(ctx, fy_is_valid(im->store), err,
+				"import: cannot apply a configuration update");
+			pu->store = im->store;
 			continue;
 		}
 		if (fy_equal(kind, "compact")) {
@@ -479,6 +512,41 @@ err:
 	return -1;
 }
 
+/*
+ * Publish one boundary. The imported store replaces the members it holds; a
+ * configuration or a catalogue that it does not hold stays that of the
+ * branch. A catalogue that an earlier store of the stream held and this one
+ * does not was removed: the branch uses the embedded catalogue again.
+ */
+static int fyai_import_publish(struct fyai_import *im,
+			       struct fyai_import_publish *pu, fy_generic head)
+{
+	struct fyai_ctx *ctx = im->ctx;
+	struct fyai_branch s;
+	fy_generic config;
+	bool decoded;
+
+	config = fy_invalid;
+	if (fy_is_valid(pu->store)) {
+		fyai_branch_decode(fy_invalid, &s);
+		decoded = fyai_branch_decode_store(pu->store, &s);
+		fyai_error_check(ctx, decoded, err,
+				 "import: the branch store is not a mapping");
+		config = s.config;
+		if (fy_is_valid(s.catalog)) {
+			ctx->arena_catalog = s.catalog;
+			im->catalog_seen = true;
+		} else if (im->catalog_seen) {
+			ctx->arena_catalog = fy_invalid;
+		}
+		ctx->branch_desc = s.description;
+		ctx->branch_store = pu->store;
+	}
+	return fyai_publish_root(ctx, config, fy_invalid, head);
+err:
+	return -1;
+}
+
 /* Materialize the branch and re-issue its compaction. */
 static int fyai_import_compact(struct fyai_import *im,
 			       struct fyai_import_publish *pu,
@@ -495,7 +563,7 @@ static int fyai_import_compact(struct fyai_import *im,
 			 "import: cannot prepare the compaction request");
 	ctx->last_message = head;
 	fyai_branch_op_set(ctx, "import", NULL);
-	rc = fyai_publish_root(ctx, pu->config, fy_invalid, head);
+	rc = fyai_import_publish(im, pu, head);
 	fyai_error_check(ctx, !rc, err,
 			 "import: cannot materialize before compaction");
 	/* Use the current model and endpoint. */
@@ -546,7 +614,7 @@ static int fyai_import_replay(struct fyai_import *im)
 			head = turn;
 		}
 		fyai_branch_op_set(ctx, "import", NULL);
-		rc = fyai_publish_root(ctx, pu->config, fy_invalid, head);
+		rc = fyai_import_publish(im, pu, head);
 		fyai_error_check(ctx, !rc, err,
 				 "import: cannot publish a boundary");
 	}
@@ -568,7 +636,7 @@ int fyai_import_view(struct fyai_ctx *ctx, const char *path)
 	fp = NULL;
 	rc = -1;
 	im.ctx = ctx;
-	im.config = fy_invalid;
+	im.store = fy_invalid;
 	im.pending = fy_seq_empty;
 	im.gb = ctx->gb;
 	im.ignore_compact = ctx->cfg->cmd.args.import.ignore_compact;

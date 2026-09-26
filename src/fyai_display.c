@@ -320,9 +320,33 @@ static fy_generic fyai_export_config_flatten(struct fy_generic_builder *gb,
 	return out;
 }
 
-/* Return the slash-path changes from @previous to @config. */
-static fy_generic fyai_export_config_delta(struct fy_generic_builder *gb,
-					   fy_generic config, fy_generic previous)
+/*
+ * The highest path of @path that @store no longer holds. A member removed
+ * whole is one removal: its leaves removed one at a time leave an empty
+ * mapping behind, which is not the absent member.
+ */
+static fy_generic fyai_export_removed_root(struct fy_generic_builder *gb,
+					   fy_generic store, const char *path)
+{
+	char prefix[512];
+	const char *slash;
+	size_t len;
+
+	for (slash = strchr(path, '/'); slash; slash = strchr(slash + 1, '/')) {
+		len = (size_t)(slash - path);
+		if (len >= sizeof(prefix))
+			break;
+		memcpy(prefix, path, len);
+		prefix[len] = '\0';
+		if (fy_is_invalid(fy_get_at_pathstr(store, prefix)))
+			return fy_value(gb, prefix);
+	}
+	return fy_value(gb, path);
+}
+
+/* Return the slash-path changes from @previous to @store. */
+static fy_generic fyai_export_store_delta(struct fy_generic_builder *gb,
+					  fy_generic store, fy_generic previous)
 {
 	fy_generic old_flat;
 	fy_generic new_flat;
@@ -331,7 +355,7 @@ static fy_generic fyai_export_config_delta(struct fy_generic_builder *gb,
 	fy_generic val;
 
 	old_flat = fyai_export_config_flatten(gb, "", previous, fy_map_empty);
-	new_flat = fyai_export_config_flatten(gb, "", config, fy_map_empty);
+	new_flat = fyai_export_config_flatten(gb, "", store, fy_map_empty);
 	delta = fy_map_empty;
 	fy_foreach_key_value(key, val, new_flat) {
 		if (!fy_equal(fy_get(old_flat, key, fy_invalid), val))
@@ -339,37 +363,62 @@ static fy_generic fyai_export_config_delta(struct fy_generic_builder *gb,
 	}
 	fy_foreach(key, old_flat) {
 		if (fy_is_invalid(fy_get(new_flat, key, fy_invalid)))
-			delta = fy_assoc(gb, delta, key, fy_null);
+			delta = fy_assoc(gb, delta,
+					 fyai_export_removed_root(gb, store,
+						fy_castp(&key, "")),
+					 fy_null);
 	}
 	return delta;
 }
 
-static int fyai_export_config(struct fyai_ctx *ctx, FILE *fp,
-			      fy_generic config, fy_generic previous)
+/*
+ * The store members that a conversation carries to another arena. The
+ * directory, the creation time and the provenance describe this arena and are
+ * made again by the import.
+ */
+static fy_generic fyai_export_store_portable(struct fy_generic_builder *gb,
+					     fy_generic store)
+{
+	static const char *const local[] = {
+		"cwd", "created", "agent", "import",
+	};
+	size_t i;
+
+	if (!fy_is_mapping(store))
+		return fy_map_empty;
+	for (i = 0; i < sizeof(local) / sizeof(local[0]); i++) {
+		if (fy_is_valid(fy_get(store, local[i], fy_invalid)))
+			store = fy_disassoc(gb, store, local[i]);
+	}
+	return store;
+}
+
+static int fyai_export_store(struct fyai_ctx *ctx, FILE *fp,
+			     fy_generic store, fy_generic previous)
 {
 	struct fy_generic_builder *gb = ctx->transient_gb;
 	fy_generic delta;
 	int rc;
 
-	if (fy_is_valid(previous) && fy_equal(config, previous))
-		return 0;
-	/* Emit the complete first configuration and later changes. */
+	/* Emit the complete first store and later changes. */
 	if (fy_is_invalid(previous)) {
 		rc = fyai_export_directive(ctx, fp,
-			fy_mapping(gb, "kind", "config", "config", config));
+			fy_mapping(gb, "kind", "store", "store", store));
 		fyai_error_check(ctx, !rc, err,
-				 "export: cannot write the configuration");
-		fputs("## Configuration\n\n", fp);
+				 "export: cannot write the branch store");
+		fputs("## Store\n\n", fp);
 		return 0;
 	}
-	delta = fyai_export_config_delta(gb, config, previous);
+	if (store.v == previous.v || fy_equal(store, previous))
+		return 0;
+	delta = fyai_export_store_delta(gb, store, previous);
 	if (!fy_generic_mapping_get_pair_count(delta))
 		return 0;
 	rc = fyai_export_directive(ctx, fp,
-		fy_mapping(gb, "kind", "config-update", "config-update", delta));
+		fy_mapping(gb, "kind", "store-update", "store-update", delta));
 	fyai_error_check(ctx, !rc, err,
-			 "export: cannot write a configuration update");
-	fputs("## Configuration update\n\n", fp);
+			 "export: cannot write a branch store update");
+	fputs("## Store update\n\n", fp);
 	return 0;
 err:
 	return -1;
@@ -600,7 +649,8 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 	int rc;
 	int close_rc;
 	fy_generic entry;
-	fy_generic previous_config;
+	fy_generic previous_store;
+	fy_generic store;
 	fy_generic previous_head;
 	fy_generic meta;
 	bool decoded;
@@ -620,7 +670,7 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 	} else
 		fp = stdout;
 	rc = fyai_export_directive(ctx, fp,
-		fy_mapping(gb, "format", 1LL, "kind", "conversation"));
+		fy_mapping(gb, "format", 2LL, "kind", "conversation"));
 	fyai_error_check(ctx, !rc, out, "export: cannot write the document header");
 	fputc('\n', fp);
 	for (entry = ctx->branch_prev; fy_is_valid(entry);
@@ -647,7 +697,7 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 		fyai_turn_stack_cleanup(&stack);
 		previous_head = branch.head;
 	}
-	previous_config = fy_invalid;
+	previous_store = fy_invalid;
 	previous_head = fy_invalid;
 	for (entry_index = entries.count; entry_index-- > 0; ) {
 		decoded = fyai_branch_decode(entries.items[entry_index], &branch);
@@ -656,11 +706,13 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 		rc = fyai_export_marker(ctx, fp, "publish");
 		fyai_error_check(ctx, !rc, out, "export: cannot write a boundary");
 		fputs("## Publish\n\n", fp);
-		if (fy_is_valid(branch.config)) {
-			rc = fyai_export_config(ctx, fp, branch.config, previous_config);
-			fyai_error_check(ctx, !rc, out,
-				"export: cannot format configuration");
-		}
+		store = fyai_export_store_portable(ctx->transient_gb,
+						   branch.store);
+		fyai_error_check(ctx, fy_is_valid(store), out,
+				 "export: cannot read the branch store");
+		rc = fyai_export_store(ctx, fp, store, previous_store);
+		fyai_error_check(ctx, !rc, out,
+				 "export: cannot format the branch store");
 		rc = fyai_turn_stack_init(&stack, branch.head, previous_head);
 		fyai_error_check(ctx, !rc, out, "export: cannot read conversation");
 		for (i = 0; i < stack.count; i++) {
@@ -683,7 +735,7 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 			fyai_error_check(ctx, !rc, out, "export: cannot write a turn");
 		}
 		fyai_turn_stack_cleanup(&stack);
-		previous_config = branch.config;
+		previous_store = store;
 		previous_head = branch.head;
 	}
 	close_rc = fp == stdout ? fflush(fp) : fclose(fp);
