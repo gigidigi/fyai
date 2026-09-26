@@ -29,8 +29,8 @@ providers:
     pricing:
       currency: USD
       unit: per_million_tokens
-    input: 1.0
-    output: 2.0
+      input: 1.0
+      output: 2.0
 agents:
 - name: test-agent
   tools:

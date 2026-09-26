@@ -58,7 +58,7 @@ int session_compact_chatgpt_auth(void)
 
 static void test_root_decode(struct fy_generic_builder *gb)
 {
-	fy_generic root, turn, entry, store, merged;
+	fy_generic root, turn, entry, store, merged, conflicts;
 	struct fyai_branch b;
 	struct fyai_root r;
 	int ver;
@@ -110,11 +110,78 @@ static void test_root_decode(struct fy_generic_builder *gb)
 	merged = fyai_branch_store_merge(gb,
 		fy_gb_mapping(gb, "a", 1LL, "b", 1LL, "c", 1LL),
 		fy_gb_mapping(gb, "a", 2LL, "b", 1LL, "c", 1LL),
-		fy_gb_mapping(gb, "a", 3LL, "b", 3LL, "d", 3LL), NULL);
+		fy_gb_mapping(gb, "a", 3LL, "b", 3LL, "d", 3LL), &conflicts);
 	check(fy_get(merged, "a", 0LL) == 2, "store merge: ours kept on a conflict");
+	check(fy_len(conflicts) == 1 &&
+	      !strcmp(fy_get_at(conflicts, 0, ""), "a"),
+	      "store merge: the conflict is named");
 	check(fy_get(merged, "b", 0LL) == 3, "store merge: their change taken");
 	check(fy_is_invalid(fy_get(merged, "c")), "store merge: their removal taken");
 	check(fy_get(merged, "d", 0LL) == 3, "store merge: their addition taken");
+
+	/* Changes to different keys of one mapping are not a conflict. */
+	merged = fyai_branch_store_merge(gb,
+		fy_gb_mapping(gb, "config", fy_gb_mapping(gb, "x", 1LL, "y", 1LL)),
+		fy_gb_mapping(gb, "config", fy_gb_mapping(gb, "x", 2LL, "y", 1LL)),
+		fy_gb_mapping(gb, "config", fy_gb_mapping(gb, "x", 1LL, "y", 2LL)),
+		&conflicts);
+	check(fy_empty(conflicts), "store merge: disjoint keys do not conflict");
+	check(fy_get(fy_get(merged, "config"), "x", 0LL) == 2 &&
+	      fy_get(fy_get(merged, "config"), "y", 0LL) == 2,
+	      "store merge: nested changes of both are kept");
+
+	/* The same key of one mapping is, and its path says where. */
+	merged = fyai_branch_store_merge(gb,
+		fy_gb_mapping(gb, "config", fy_gb_mapping(gb, "x", 1LL)),
+		fy_gb_mapping(gb, "config", fy_gb_mapping(gb, "x", 2LL)),
+		fy_gb_mapping(gb, "config", fy_gb_mapping(gb, "x", 3LL)),
+		&conflicts);
+	check(fy_len(conflicts) == 1 &&
+	      !strcmp(fy_get_at(conflicts, 0, ""), "config/x"),
+	      "store merge: a nested conflict is named by its path");
+
+	/* A sequence of named items merges by name, as the models do. */
+	merged = fyai_branch_store_merge(gb,
+		fy_gb_mapping(gb, "models", fy_gb_sequence(gb,
+			fy_gb_mapping(gb, "name", "m1", "cw", 1LL),
+			fy_gb_mapping(gb, "name", "m2", "cw", 1LL),
+			fy_gb_mapping(gb, "name", "m3", "cw", 1LL))),
+		fy_gb_mapping(gb, "models", fy_gb_sequence(gb,
+			fy_gb_mapping(gb, "name", "m1", "cw", 2LL),
+			fy_gb_mapping(gb, "name", "m2", "cw", 1LL),
+			fy_gb_mapping(gb, "name", "m3", "cw", 1LL))),
+		fy_gb_mapping(gb, "models", fy_gb_sequence(gb,
+			fy_gb_mapping(gb, "name", "m1", "cw", 1LL),
+			fy_gb_mapping(gb, "name", "m2", "cw", 3LL),
+			fy_gb_mapping(gb, "name", "m4", "cw", 4LL))),
+		&conflicts);
+	check(fy_empty(conflicts), "store merge: named items merge");
+	check(fy_len(fy_get(merged, "models")) == 3 &&
+	      !strcmp(fy_get(fy_get_at(fy_get(merged, "models"), 0), "name", ""), "m1") &&
+	      fy_get(fy_get_at(fy_get(merged, "models"), 0), "cw", 0LL) == 2 &&
+	      fy_get(fy_get_at(fy_get(merged, "models"), 1), "cw", 0LL) == 3 &&
+	      !strcmp(fy_get(fy_get_at(fy_get(merged, "models"), 2), "name", ""), "m4"),
+	      "store merge: ours changed, theirs changed, removed and added");
+
+	merged = fyai_branch_store_merge(gb,
+		fy_gb_mapping(gb, "models", fy_gb_sequence(gb,
+			fy_gb_mapping(gb, "name", "m1", "cw", 1LL))),
+		fy_gb_mapping(gb, "models", fy_gb_sequence(gb,
+			fy_gb_mapping(gb, "name", "m1", "cw", 2LL))),
+		fy_gb_mapping(gb, "models", fy_gb_sequence(gb,
+			fy_gb_mapping(gb, "name", "m1", "cw", 3LL))),
+		&conflicts);
+	check(fy_len(conflicts) == 1 &&
+	      !strcmp(fy_get_at(conflicts, 0, ""), "models/m1/cw"),
+	      "store merge: a conflict in a named item is named by its path");
+
+	/* The same change on both sides is not a conflict. */
+	merged = fyai_branch_store_merge(gb,
+		fy_gb_mapping(gb, "a", 1LL),
+		fy_gb_mapping(gb, "a", 2LL),
+		fy_gb_mapping(gb, "a", 2LL), &conflicts);
+	check(fy_empty(conflicts) && fy_get(merged, "a", 0LL) == 2,
+	      "store merge: an equal change agrees");
 
 	check(!fyai_branch_lookup(r.branches, "nope", &b),
 	      "branch lookup: absent reports false");

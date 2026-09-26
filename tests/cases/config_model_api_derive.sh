@@ -24,6 +24,7 @@ providers:
     endpoint: /v1/chat/completions
   models:
   - canonical_id: rich-model
+    provider_model_id: rich-model
 - name: poorprov
   root_url: https://poor.invalid
   endpoints:
@@ -31,6 +32,7 @@ providers:
     endpoint: /v1/chat/completions
   models:
   - canonical_id: poor-model
+    provider_model_id: poor-model
 EOF
 run_fyai catalog import catalog.yaml
 assert_status 0

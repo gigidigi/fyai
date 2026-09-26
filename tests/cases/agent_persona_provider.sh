@@ -24,6 +24,7 @@ providers:
     endpoint: /v1/responses
   models:
   - canonical_id: parent-model
+    provider_model_id: parent-model
 - name: otherprov
   root_url: $MOCK_URL/other
   endpoints:
@@ -31,6 +32,7 @@ providers:
     endpoint: /v1/responses
   models:
   - canonical_id: child-model
+    provider_model_id: child-model
 EOF
 run_fyai catalog import catalog.yaml
 assert_status 0
