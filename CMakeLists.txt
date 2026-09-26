@@ -324,6 +324,21 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_catalog.inc"
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${FYAI_CATALOG_YAML}")
 
+# Embed the catalogue schema that a catalogue edit is checked against.
+set(FYAI_CATALOG_SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/data/catalog.schema.yaml")
+file(READ "${FYAI_CATALOG_SCHEMA}" _fyai_catalog_schema_hex HEX)
+string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
+    _fyai_catalog_schema_bytes "${_fyai_catalog_schema_hex}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_catalog_schema.inc"
+    "/* Generated from ${FYAI_CATALOG_SCHEMA}. */\n"
+    "static const unsigned char FYAI_EMBEDDED_CATALOG_SCHEMA[] = {\n"
+    "${_fyai_catalog_schema_bytes}"
+    "\n};\n"
+    "static const size_t FYAI_EMBEDDED_CATALOG_SCHEMA_LEN = sizeof(FYAI_EMBEDDED_CATALOG_SCHEMA);\n"
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${FYAI_CATALOG_SCHEMA}")
+
 # Embed the sample configuration so `fyai init` with no config file has a
 # sensible starting document instead of committing an empty config.
 set(FYAI_CONFIG_SAMPLE "${CMAKE_CURRENT_SOURCE_DIR}/config.yaml.sample")

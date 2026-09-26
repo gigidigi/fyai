@@ -61,6 +61,8 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define DEFAULT_RETRY_INITIAL_DELAY_MS 500
 #define DEFAULT_RETRY_MAX_DELAY_MS 30000
 #define DEFAULT_SHELL_TIMEOUT_MS 120000
+#define DEFAULT_CATALOG_UPDATE_COMMAND "scrape-providers"
+#define DEFAULT_CATALOG_UPDATE_TIMEOUT_MS 600000
 #define DEFAULT_SHELL_MAX_TIMEOUT_MS 600000
 /* Default and maximum read_file result sizes. Zero disables each limit. */
 #define DEFAULT_READ_MAX_BYTES (256 * 1024)
@@ -299,6 +301,10 @@ struct fyai_cfg {
 	bool agent_pty;			/* this sub-agent has a terminal */
 	bool shell_tty;			/* run a shell call on a terminal by default */
 	const char *shell_shell;	/* the shell a call runs under; empty = /bin/sh */
+	/* The program that writes a catalogue, and its time limit. */
+	const char *catalog_update_command;
+	unsigned int catalog_update_timeout_ms;
+	fy_generic catalog_update_credentials;	/* variable names */
 	bool shell_login;		/* run a shell call under a login shell */
 	int shell_tty_rows;		/* PTY rows (0 = follow the terminal) */
 	int shell_tty_cols;		/* PTY columns (0 = follow the terminal) */
@@ -486,6 +492,7 @@ fyai_cfg_uses_storage(struct fyai_cfg *cfg)
 
 struct fyai_mcp_ctx;
 struct fyai_config_edit_request;
+struct fyai_catalog_update_request;
 
 struct fyai_event_loop;
 struct fyai_event_source;
@@ -526,6 +533,7 @@ struct fyai_ctx {
 	struct fyai_agents *agents;
 	long long agent_execution, agent_parent;
 	struct fyai_config_edit_request *config_edit;
+	struct fyai_catalog_update_request *catalog_update;
 	/* The SIGINT handler can set this value. */
 	volatile sig_atomic_t interrupt_pending;
 	/* Count SIGINT edges while interrupt_pending remains set. */

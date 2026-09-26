@@ -274,6 +274,13 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 	cfg->shell_login = apply_bool(shell, "login", cfg->shell_login);
 	cfg->shell_tty_rows = fy_get(shell, "tty_rows", cfg->shell_tty_rows);
 	cfg->shell_tty_cols = fy_get(shell, "tty_cols", cfg->shell_tty_cols);
+	cfg->catalog_update_command = fy_get(fy_get(root, "catalog_update"),
+				"command", cfg->catalog_update_command ?
+					   cfg->catalog_update_command : "");
+	cfg->catalog_update_timeout_ms = fy_get(fy_get(root, "catalog_update"),
+				"timeout_ms", cfg->catalog_update_timeout_ms);
+	cfg->catalog_update_credentials = fy_get(fy_get(root, "catalog_update"),
+				"credentials", cfg->catalog_update_credentials);
 	cfg->agent_timeout_ms = fy_get(fy_get(root, "agent"), "timeout_ms",
 				cfg->agent_timeout_ms);
 	cfg->agent_max_timeout_ms = fy_get(fy_get(root, "agent"),
@@ -1875,6 +1882,7 @@ struct fyai_config_edit_request {
 	struct fyai_ctx *ctx;
 	struct fyai_editor_request *editor;
 	char *path;
+	bool catalog;		/* the document is the catalogue of the branch */
 	bool ui_external;
 	bool done;
 	bool cancelled;
@@ -1906,6 +1914,15 @@ static void fyai_config_edit_service(void *userdata)
 		goto out;
 	}
 	doc = fy_parse_file(ctx->gb, FYAI_YAML_PARSE_FLAGS, request->path);
+	if (request->catalog) {
+		rc = fyai_catalog_commit(ctx, doc, "the edited catalogue");
+		if (rc) {
+			fyai_error(ctx, "edits kept at %s", request->path);
+			goto out;
+		}
+		(void)unlink(request->path);
+		goto out;
+	}
 	report = fyai_config_validate_report(ctx->cfg, doc, "edited config");
 	if (config_report_commit(report, &doc)) {
 		fyai_error(ctx, "edits kept at %s", request->path);
@@ -1942,13 +1959,13 @@ fyai_config_edit_editor_complete(struct fyai_editor_request *editor,
 	}
 }
 
-struct fyai_config_edit_request *
-fyai_config_edit_submit(struct fyai_ctx *ctx)
+static struct fyai_config_edit_request *
+config_edit_open(struct fyai_ctx *ctx, bool catalog)
 {
 	struct fyai_config_edit_request *request;
 	const char *tmpdir, *text;
 	char tmpl[PATH_MAX];
-	fy_generic emitted;
+	fy_generic emitted, doc;
 	char *path;
 	int fd;
 	ssize_t wr;
@@ -1962,22 +1979,25 @@ fyai_config_edit_submit(struct fyai_ctx *ctx)
 	if (!request)
 		return NULL;
 	request->ctx = ctx;
+	request->catalog = catalog;
 	request->result = -1;
 	tmpdir = getenv("TMPDIR");
 	if (!tmpdir || !*tmpdir)
 		tmpdir = "/tmp";
-	rc = snprintf(tmpl, sizeof(tmpl), "%s/fyai-config-XXXXXX.yaml",
-		      tmpdir);
+	rc = snprintf(tmpl, sizeof(tmpl), "%s/fyai-%s-XXXXXX.yaml",
+		      tmpdir, catalog ? "catalog" : "config");
 	fyai_error_check(ctx, rc >= 0 && rc < (int)sizeof(tmpl), err,
 			 "cannot format configuration editor path");
 	fd = mkstemps(tmpl, 5);	/* ".yaml" suffix */
 	fyai_error_check(ctx, fd >= 0, err,
 			 "cannot create configuration editor file");
 
-	text = "# fyai configuration\n";
+	text = catalog ? "# fyai catalogue\n" : "# fyai configuration\n";
 	emitted = fy_invalid;
-	if (fy_is_valid(ctx->arena_config)) {
-		emitted = config_emit_yaml(ctx->gb, ctx->arena_config);
+	doc = catalog ? fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb) :
+			ctx->arena_config;
+	if (fy_is_valid(doc)) {
+		emitted = config_emit_yaml(ctx->gb, doc);
 		fyai_error_check(ctx, fy_is_valid(emitted), err_fd,
 				 "cannot render configuration for editing");
 		text = fy_castp(&emitted, "");
@@ -2019,6 +2039,18 @@ err:
 	return NULL;
 }
 
+struct fyai_config_edit_request *
+fyai_config_edit_submit(struct fyai_ctx *ctx)
+{
+	return config_edit_open(ctx, false);
+}
+
+struct fyai_config_edit_request *
+fyai_catalog_edit_submit(struct fyai_ctx *ctx)
+{
+	return config_edit_open(ctx, true);
+}
+
 void fyai_config_edit_cancel(struct fyai_config_edit_request *request)
 {
 	if (!request || request->done || request->cancelled)
@@ -2051,13 +2083,13 @@ void fyai_config_edit_destroy(struct fyai_config_edit_request *request)
 	free(request);
 }
 
-int fyai_config_edit(struct fyai_ctx *ctx)
+static int config_edit_wait(struct fyai_ctx *ctx, bool catalog)
 {
 	struct fyai_config_edit_request *request;
 	struct fyai_event_loop *el;
 	int rc;
 
-	request = fyai_config_edit_submit(ctx);
+	request = config_edit_open(ctx, catalog);
 	if (!request)
 		return -1;
 	el = fyai_ctx_loop(ctx);
@@ -2071,6 +2103,16 @@ int fyai_config_edit(struct fyai_ctx *ctx)
 	rc = fyai_config_edit_collect(request);
 	fyai_config_edit_destroy(request);
 	return rc;
+}
+
+int fyai_config_edit(struct fyai_ctx *ctx)
+{
+	return config_edit_wait(ctx, false);
+}
+
+int fyai_catalog_edit(struct fyai_ctx *ctx)
+{
+	return config_edit_wait(ctx, true);
 }
 
 /*
@@ -2210,6 +2252,9 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->shell_max_output_tokens = DEFAULT_SHELL_MAX_OUTPUT_TOKENS;
 	cfg->shell_tty = false;
 	cfg->shell_shell = "";
+	cfg->catalog_update_command = DEFAULT_CATALOG_UPDATE_COMMAND;
+	cfg->catalog_update_timeout_ms = DEFAULT_CATALOG_UPDATE_TIMEOUT_MS;
+	cfg->catalog_update_credentials = fy_invalid;
 	cfg->shell_login = false;
 	cfg->shell_session_timeout_ms = DEFAULT_SHELL_SESSION_TIMEOUT_MS;
 	cfg->shell_input_poll_ms = DEFAULT_SHELL_INPUT_POLL_MS;

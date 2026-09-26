@@ -11,22 +11,28 @@
 #include "config.h"
 #endif
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "fyai_sink.h"
 #include "fyai_catalog.h"
 #include "fyai_config.h"
 #include "fyai_markdown.h"
+#include "fyai_schema.h"
 #include "fyai_storage.h"
 #include "fyai_tool_spec.h"
+#include "fyai_tools.h"
 #include "utils.h"
 
 /* FYAI_EMBEDDED_CATALOG[] / FYAI_EMBEDDED_CATALOG_LEN - the vendored
  * data/catalog.yaml snapshot, generated at configure time. */
 #include "embedded_catalog.inc"
+/* FYAI_EMBEDDED_CATALOG_SCHEMA[] - data/catalog.schema.yaml. */
+#include "embedded_catalog_schema.inc"
 
 static fy_generic embedded_catalog = fy_invalid;
 
@@ -199,41 +205,714 @@ bool fyai_catalog_endpoint_has_hosted_tool(fy_generic endpoint,
 	return false;
 }
 
-int fyai_catalog_import(struct fyai_ctx *ctx, const char *path)
+static fy_generic embedded_catalog_schema = fy_invalid;
+
+fy_generic fyai_catalog_schema(struct fy_generic_builder *gb)
 {
-	fy_generic doc, models, providers, new_config;
+	fy_generic_sized_string embedded;
+	fy_generic schema;
+
+	if (fy_is_valid(embedded_catalog_schema))
+		return embedded_catalog_schema;
+	embedded.data = (const char *)FYAI_EMBEDDED_CATALOG_SCHEMA;
+	embedded.size = FYAI_EMBEDDED_CATALOG_SCHEMA_LEN;
+	schema = fy_parse(gb, embedded,
+			  FYAI_YAML_PARSE_FLAGS | FYOPPF_INPUT_TYPE_STRING, NULL);
+	/*
+	 * The schema is vendored from scrape-providers. Its $id names it and
+	 * resolves nothing, and the validator refuses the keyword.
+	 */
+	if (fy_is_mapping(schema) &&
+	    fy_is_valid(fy_get(schema, "$id", fy_invalid)))
+		schema = fy_disassoc(gb, schema, "$id");
+	embedded_catalog_schema = schema;
+	return embedded_catalog_schema;
+}
+
+/* Check @doc against the catalogue schema; one diagnostic says why not. */
+static int catalog_check(struct fyai_ctx *ctx, fy_generic doc,
+			 const char *origin)
+{
+	struct response_buffer msg = {0};
+	fy_generic schema, report, problem;
+
+	if (!fy_is_mapping(doc)) {
+		fyai_error(ctx, "%s is not a YAML mapping", origin);
+		return -1;
+	}
+	schema = fyai_catalog_schema(ctx->cfg->gb);
+	if (fy_is_invalid(schema)) {
+		fyai_error(ctx, "cannot read the embedded catalogue schema");
+		return -1;
+	}
+	report = fyai_schema_validate(ctx->cfg->gb, schema, doc);
+	if (fyai_schema_valid(report))
+		return 0;
+	fy_foreach(problem, fy_get(report, "problems", fy_seq_empty)) {
+		if (response_buffer_append(&msg, "\n  ") ||
+		    response_buffer_append(&msg, fy_castp(&problem, "")))
+			break;
+	}
+	fyai_error(ctx, "%s does not match the catalogue schema:%s", origin,
+		   msg.len ? msg.data : " (no details)");
+	free(msg.data);
+	return -1;
+}
+
+int fyai_catalog_commit(struct fyai_ctx *ctx, fy_generic doc,
+			const char *origin)
+{
+	fy_generic effective, new_config;
 
 	if (!ctx->durable_gb) {
 		fyai_error(ctx, "no arena; run fyai init");
 		return -1;
 	}
-	doc = fy_parse_file(ctx->gb,
-			    FYAI_YAML_PARSE_FLAGS, path);
+	if (!fy_is_null(doc) && catalog_check(ctx, doc, origin))
+		return -1;
+	/*
+	 * The model_info block of the configuration follows the catalogue it
+	 * was derived from, so derive it again for the new one.
+	 */
+	effective = fy_is_null(doc) ?
+		fyai_catalog_effective(fy_invalid, ctx->cfg->gb) : doc;
+	new_config = fy_is_valid(ctx->arena_config) ?
+		fyai_config_sync_catalog(ctx->gb, effective, ctx->arena_config) :
+		fy_invalid;
+	/* A null catalogue removes the member; the branch uses the embedded one. */
+	if (fyai_publish_root(ctx, new_config, doc, fy_invalid))
+		return -1;
+	if (fy_is_null(ctx->arena_catalog))
+		ctx->arena_catalog = fy_invalid;
+	return fyai_config_adopt_catalog(ctx);
+}
+
+int fyai_catalog_import(struct fyai_ctx *ctx, const char *path)
+{
+	fy_generic doc;
+
+	doc = fy_parse_file(ctx->gb, FYAI_YAML_PARSE_FLAGS, path);
 	if (!fy_is_mapping(doc)) {
 		fyai_error(ctx, "cannot parse %s", path);
 		return -1;
 	}
-	models = fy_get(doc, "models");
-	providers = fy_get(doc, "providers");
-	if (!fy_is_sequence(models) ||
-	    !fy_is_sequence(providers)) {
-		fyai_error(ctx, "%s lacks models:/providers: sections", path);
-		return -1;
-	}
-	/*
-	 * A new catalogue can change or drop the read-only model_info: block
-	 * (canonical_provider, open_source) on the currently configured
-	 * model, so re-derive it against the incoming catalogue rather than
-	 * whatever it was pinned against before.
-	 */
-	new_config = fy_is_valid(ctx->arena_config) ?
-		fyai_config_sync_catalog(ctx->gb, doc, ctx->arena_config) :
-		fy_invalid;
-	if (fyai_publish_root(ctx, new_config, doc, fy_invalid))
+	if (fyai_catalog_commit(ctx, doc, path))
 		return -1;
 	fyai_result(ctx, "catalog: imported %s (%zu models, %zu providers)\n",
-	       path, fy_len(models), fy_len(providers));
+		    path, fy_len(fy_get(doc, "models")),
+		    fy_len(fy_get(doc, "providers")));
 	return 0;
+}
+
+/*
+ * Catalogue paths are slash-separated. A component that selects an item of a
+ * sequence is its index, or the value of the key that names the item: "name",
+ * or "canonical_id" for the models that a provider offers.
+ */
+#define CATALOG_PATH_MAX_DEPTH	32
+
+static const char *catalog_item_key(fy_generic seq)
+{
+	fy_generic item;
+
+	fy_foreach(item, seq) {
+		if (fy_is_string(fy_get(item, "name", fy_invalid)))
+			return "name";
+		if (fy_is_string(fy_get(item, "canonical_id", fy_invalid)))
+			return "canonical_id";
+	}
+	return "name";
+}
+
+static long catalog_seq_find(fy_generic seq, const char *seg)
+{
+	fy_generic item;
+	const char *key;
+	char *end;
+	long idx, i;
+
+	idx = strtol(seg, &end, 10);
+	if (*seg && !*end)
+		return idx >= 0 && (size_t)idx < fy_len(seq) ? idx : -1;
+	key = catalog_item_key(seq);
+	i = 0;
+	fy_foreach(item, seq) {
+		if (!strcmp(fy_get(item, key, ""), seg))
+			return i;
+		i++;
+	}
+	return -1;
+}
+
+static int catalog_path_split(char *path, char **segs)
+{
+	char *seg, *save;
+	int n;
+
+	n = 0;
+	for (seg = strtok_r(path, "/", &save); seg;
+	     seg = strtok_r(NULL, "/", &save)) {
+		if (n == CATALOG_PATH_MAX_DEPTH)
+			return -1;
+		segs[n++] = seg;
+	}
+	return n;
+}
+
+static fy_generic catalog_path_get(fy_generic node, char **segs, int n)
+{
+	long idx;
+	int i;
+
+	for (i = 0; i < n && fy_is_valid(node); i++) {
+		if (fy_is_mapping(node)) {
+			node = fy_get(node, segs[i], fy_invalid);
+		} else if (fy_is_sequence(node)) {
+			idx = catalog_seq_find(node, segs[i]);
+			node = idx < 0 ? fy_invalid : fy_get_at(node, idx);
+		} else {
+			node = fy_invalid;
+		}
+	}
+	return node;
+}
+
+/*
+ * Return @node with the value at @segs replaced by @value, or removed when
+ * @value is fy_invalid. A new item of a sequence is appended and named by
+ * the path component. fy_invalid when the path does not lead anywhere.
+ */
+static fy_generic catalog_path_put(struct fy_generic_builder *gb,
+				   fy_generic node, char **segs, int n,
+				   fy_generic value)
+{
+	fy_generic child, item, out;
+	const char *key;
+	long idx, i;
+
+	if (!n)
+		return value;
+	if (fy_is_mapping(node)) {
+		child = fy_get(node, segs[0], fy_invalid);
+		if (n == 1 && fy_is_invalid(value))
+			return fy_is_invalid(child) ? fy_invalid :
+				fy_disassoc(gb, node, segs[0]);
+		if (fy_is_invalid(child)) {
+			if (fy_is_invalid(value))
+				return fy_invalid;
+			child = fy_map_empty;
+		}
+		child = catalog_path_put(gb, child, segs + 1, n - 1, value);
+		return fy_is_invalid(child) ? child :
+			fy_assoc(gb, node, segs[0], child);
+	}
+	if (!fy_is_sequence(node))
+		return fy_invalid;
+	idx = catalog_seq_find(node, segs[0]);
+	if (idx < 0) {
+		/* A missing item can be made, not removed. */
+		if (fy_is_invalid(value))
+			return fy_invalid;
+		key = catalog_item_key(node);
+		child = fy_mapping(gb, key, fy_value(gb, segs[0]));
+		if (n == 1 && fy_is_mapping(value) &&
+		    fy_is_invalid(fy_get(value, key, fy_invalid)))
+			child = fy_assoc(gb, value, key, fy_value(gb, segs[0]));
+		else if (n == 1)
+			child = value;
+		else
+			child = catalog_path_put(gb, child, segs + 1, n - 1,
+						 value);
+		return fy_is_invalid(child) ? child :
+			fy_append(gb, node, child);
+	}
+	out = fy_seq_empty;
+	i = 0;
+	fy_foreach(item, node) {
+		child = item;
+		if (i++ == idx) {
+			if (n == 1 && fy_is_invalid(value))
+				continue;
+			child = catalog_path_put(gb, item, segs + 1, n - 1,
+						 value);
+			if (fy_is_invalid(child))
+				return child;
+		}
+		out = fy_append(gb, out, child);
+		if (fy_is_invalid(out))
+			return out;
+	}
+	return out;
+}
+
+static fy_generic catalog_current(struct fyai_ctx *ctx)
+{
+	return fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb);
+}
+
+int fyai_catalog_get(struct fyai_ctx *ctx, const char *path)
+{
+	char *segs[CATALOG_PATH_MAX_DEPTH];
+	char *copy;
+	fy_generic v, emitted;
+	int n;
+
+	copy = strdup(path);
+	fyai_error_check(ctx, copy, err_out, "out of memory reading '%s'", path);
+	n = catalog_path_split(copy, segs);
+	v = n < 0 ? fy_invalid : catalog_path_get(catalog_current(ctx), segs, n);
+	free(copy);
+	fyai_error_check(ctx, n >= 0, err_out, "catalogue path '%s' is too deep",
+			 path);
+	fyai_error_check(ctx, fy_is_valid(v), err_out,
+			 "catalogue has nothing at '%s'", path);
+	if (fy_is_mapping(v) || fy_is_sequence(v)) {
+		emit_generic_to_stdout(ctx, NULL, v, true);
+		return 0;
+	}
+	/* A scalar is one flow line, as `config get` prints it. */
+	emitted = fy_emit(ctx->cfg->gb, v, FYOPEF_DISABLE_DIRECTORY |
+			  FYOPEF_OUTPUT_TYPE_STRING | FYOPEF_MODE_YAML_1_2 |
+			  FYOPEF_STYLE_ONELINE | FYOPEF_WIDTH_INF |
+			  FYOPEF_NO_ENDING_NEWLINE, NULL);
+	fyai_error_check(ctx, fy_is_valid(emitted), err_out,
+			 "cannot format the value at '%s'", path);
+	fyai_result(ctx, "%s\n", fy_castp(&emitted, ""));
+	return 0;
+
+err_out:
+	return -1;
+}
+
+/* Set @value (fy_invalid removes) at @path of the catalogue of the branch. */
+static int catalog_put(struct fyai_ctx *ctx, const char *path, fy_generic value)
+{
+	char *segs[CATALOG_PATH_MAX_DEPTH];
+	char *copy;
+	fy_generic doc;
+	int n, rc;
+
+	copy = strdup(path);
+	fyai_error_check(ctx, copy, err_out, "out of memory reading '%s'", path);
+	n = catalog_path_split(copy, segs);
+	doc = fy_invalid;
+	if (n > 0)
+		doc = catalog_path_put(ctx->gb, catalog_current(ctx), segs, n,
+				       value);
+	free(copy);
+	fyai_error_check(ctx, n > 0, err_out, "invalid catalogue path '%s'",
+			 path);
+	fyai_error_check(ctx, fy_is_valid(doc), err_out,
+			 fy_is_invalid(value) ?
+			 "catalogue has nothing at '%s'" :
+			 "catalogue path '%s' does not lead to a mapping or "
+			 "a sequence", path);
+	rc = fyai_catalog_commit(ctx, doc, "the edited catalogue");
+	return rc;
+
+err_out:
+	return -1;
+}
+
+int fyai_catalog_set(struct fyai_ctx *ctx, const char *path, const char *value)
+{
+	fy_generic v;
+
+	if (!ctx->durable_gb) {
+		fyai_error(ctx, "no arena; run fyai init");
+		return -1;
+	}
+	v = fy_parse(ctx->gb, value,
+		     FYAI_YAML_PARSE_FLAGS | FYOPPF_INPUT_TYPE_STRING, NULL);
+	if (fy_is_invalid(v)) {
+		fyai_error(ctx, "cannot parse value '%s'", value);
+		return -1;
+	}
+	return catalog_put(ctx, path, v);
+}
+
+int fyai_catalog_delete(struct fyai_ctx *ctx, const char *path)
+{
+	if (!ctx->durable_gb) {
+		fyai_error(ctx, "no arena; run fyai init");
+		return -1;
+	}
+	return catalog_put(ctx, path, fy_invalid);
+}
+
+int fyai_catalog_validate(struct fyai_ctx *ctx)
+{
+	if (catalog_check(ctx, catalog_current(ctx),
+			  fy_is_valid(ctx->arena_catalog) ?
+			  "the catalogue of the branch" :
+			  "the embedded catalogue"))
+		return -1;
+	fyai_result(ctx, "catalog: valid\n");
+	return 0;
+}
+
+int fyai_catalog_reset(struct fyai_ctx *ctx)
+{
+	if (fy_is_invalid(ctx->arena_catalog)) {
+		fyai_result(ctx, "catalog: the branch uses the embedded "
+			    "catalogue\n");
+		return 0;
+	}
+	if (fyai_catalog_commit(ctx, fy_null, "the embedded catalogue"))
+		return -1;
+	fyai_result(ctx, "catalog: the branch uses the embedded catalogue\n");
+	return 0;
+}
+
+/* Quote @s for /bin/sh into @out. */
+static int catalog_shell_quote(struct response_buffer *out, const char *s)
+{
+	if (response_buffer_append(out, " '"))
+		return -1;
+	for (; *s; s++) {
+		if (*s == '\'' ? response_buffer_append(out, "'\\''") :
+				 response_buffer_append_data(out, s, 1))
+			return -1;
+	}
+	return response_buffer_append(out, "'");
+}
+
+/* Return @seq with item @idx replaced by @item. */
+static fy_generic catalog_seq_replace(struct fy_generic_builder *gb,
+				      fy_generic seq, long idx, fy_generic item)
+{
+	fy_generic cur, out;
+	long i;
+
+	out = fy_seq_empty;
+	i = 0;
+	fy_foreach(cur, seq) {
+		out = fy_append(gb, out, i++ == idx ? item : cur);
+		if (fy_is_invalid(out))
+			break;
+	}
+	return out;
+}
+
+/* Replace or add each item of @add in @seq, matched by the key that names it. */
+static fy_generic catalog_seq_merge(struct fy_generic_builder *gb,
+				    fy_generic seq, fy_generic add)
+{
+	fy_generic item, out;
+	const char *key, *name;
+	long idx;
+
+	if (!fy_is_sequence(seq))
+		return add;
+	key = catalog_item_key(fy_len(seq) ? seq : add);
+	out = seq;
+	fy_foreach(item, add) {
+		name = fy_get(item, key, "");
+		idx = *name ? catalog_seq_find(out, name) : -1;
+		out = idx < 0 ? fy_append(gb, out, item) :
+			catalog_seq_replace(gb, out, idx, item);
+		if (fy_is_invalid(out))
+			return out;
+	}
+	return out;
+}
+
+/*
+ * Fill @names with the credentials that catalog_update/credentials names,
+ * NULL terminated. The names point into the configuration.
+ */
+static void catalog_update_env_keep(struct fyai_ctx *ctx, const char **names)
+{
+	const char *name;
+	size_t n;
+
+	n = 0;
+	fy_foreach(name, ctx->cfg->catalog_update_credentials) {
+		if (n == FYAI_CATALOG_ENV_KEEP_MAX)
+			break;
+		if (!fy_str_empty(name))
+			names[n++] = name;
+	}
+	names[n] = NULL;
+}
+
+/* The command line of catalog_update/command with the selection; heap. */
+static char *catalog_update_command(struct fyai_ctx *ctx,
+				    const char *const *providers,
+				    size_t count, bool curated)
+{
+	struct fyai_cfg *cfg = ctx->cfg;
+	struct response_buffer cmd = {0};
+	size_t i;
+	int rc;
+
+	fyai_error_check(ctx, !fy_str_empty(cfg->catalog_update_command), err,
+			 "catalog_update/command is empty");
+	rc = response_buffer_append(&cmd, cfg->catalog_update_command) ||
+	     response_buffer_append(&cmd, " --format yaml") ||
+	     (curated && response_buffer_append(&cmd, " --curated"));
+	for (i = 0; !rc && i < count; i++)
+		rc = response_buffer_append(&cmd, " --provider") ||
+		     catalog_shell_quote(&cmd, providers[i]);
+	fyai_error_check(ctx, !rc, err, "out of memory building the "
+			 "catalogue command");
+	return cmd.data;
+
+err:
+	free(cmd.data);
+	return NULL;
+}
+
+/*
+ * Parse the catalogue that @cmd wrote and commit it. With @selected, merge
+ * only the providers and models that it describes.
+ */
+static int catalog_update_apply(struct fyai_ctx *ctx, const char *cmd,
+				const char *data, size_t len, bool selected)
+{
+	fy_generic_sized_string text;
+	fy_generic doc, cur, merged, models;
+
+	fyai_error_check(ctx, len, err, "%s wrote no catalogue", cmd);
+	text.data = data;
+	text.size = len;
+	doc = fy_parse(ctx->gb, text, FYAI_YAML_PARSE_FLAGS |
+		       FYOPPF_INPUT_TYPE_STRING | FYOPPF_COLLECT_DIAG, NULL);
+	if (fy_is_invalid(doc)) {
+		parse_diag_report(ctx, doc, "not YAML",
+				  fy_sprintfa("the output of %s", cmd));
+		goto err;
+	}
+	fyai_error_check(ctx, fy_is_mapping(doc), err,
+			 "the output of %s is not a YAML mapping", cmd);
+
+	/*
+	 * A selection of providers replaces those providers and the models
+	 * that the scrape describes; the rest of the catalogue stays.
+	 */
+	if (selected) {
+		cur = catalog_current(ctx);
+		merged = catalog_seq_merge(ctx->gb, fy_get(cur, "providers"),
+				fy_get(doc, "providers", fy_seq_empty));
+		if (fy_is_valid(merged))
+			merged = fy_assoc(ctx->gb, cur, "providers", merged);
+		models = catalog_seq_merge(ctx->gb, fy_get(cur, "models"),
+				fy_get(doc, "models", fy_seq_empty));
+		if (fy_is_valid(merged) && fy_is_valid(models))
+			merged = fy_assoc(ctx->gb, merged, "models", models);
+		fyai_error_check(ctx, fy_is_valid(merged) &&
+				 fy_is_valid(models), err,
+				 "could not merge the output of %s into the "
+				 "catalogue", cmd);
+		doc = merged;
+	}
+	if (fyai_catalog_commit(ctx, doc, cmd))
+		goto err;
+	fyai_result(ctx, "catalog: updated (%zu models, %zu providers)\n",
+		    fy_len(fy_get(doc, "models")),
+		    fy_len(fy_get(doc, "providers")));
+	return 0;
+
+err:
+	return -1;
+}
+
+int fyai_catalog_update(struct fyai_ctx *ctx, const char *const *providers,
+			size_t count, bool curated)
+{
+	const char *env_keep[FYAI_CATALOG_ENV_KEEP_MAX + 1];
+	struct shell_command_result res = {0};
+	struct shell_command_opts opts = {0};
+	const char *stderr_text;
+	char *cmd = NULL;
+	int rc;
+
+	rc = -1;
+	fyai_error_check(ctx, ctx->durable_gb, out, "no arena; run fyai init");
+	cmd = catalog_update_command(ctx, providers, count, curated);
+	if (!cmd)
+		goto out;
+
+	fyai_report(ctx, "catalog: running %s\n", cmd);
+	catalog_update_env_keep(ctx, env_keep);
+	opts.timeout_ms = ctx->cfg->catalog_update_timeout_ms;
+	opts.env_keep = env_keep;
+	if (run_shell_command_capture_cb(ctx, cmd, &res, NULL, NULL,
+					 NULL, &opts))
+		goto out;	/* run_shell_command_capture_cb() says why */
+	/* The last line of the error output says why; keep it one line. */
+	if (res.stderr_data)
+		while (res.stderr_len && (res.stderr_data[res.stderr_len - 1] == '\n' ||
+					  res.stderr_data[res.stderr_len - 1] == '\r'))
+			res.stderr_data[--res.stderr_len] = '\0';
+	stderr_text = res.stderr_data && *res.stderr_data ?
+		res.stderr_data : "no error output";
+	fyai_error_check(ctx, !res.timed_out, out,
+			 "%s did not finish in %u ms", cmd, opts.timeout_ms);
+	fyai_error_check(ctx, !res.signaled, out, "%s was stopped by signal "
+			 "%d: %s", cmd, res.signal, stderr_text);
+	fyai_error_check(ctx, !res.exit_code, out, "%s exited with status "
+			 "%d: %s", cmd, res.exit_code, stderr_text);
+	rc = catalog_update_apply(ctx, cmd, res.stdout_data, res.stdout_len,
+				  count > 0);
+out:
+	shell_command_result_cleanup(&res);
+	free(cmd);
+	return rc;
+}
+
+/*
+ * An update started from a session. The program runs in a tile of the work
+ * pane and writes the catalogue to a private file; the session collects the
+ * request between turns and commits it there.
+ */
+struct fyai_catalog_update_request {
+	struct fyai_ctx *ctx;
+	struct fyai_shell_session *session;
+	char *cmd;			/* the catalogue command, for reports */
+	char dir[64];			/* private directory of the output */
+	char out[96];			/* the catalogue the program writes */
+	bool selected;
+	bool done;
+	bool cancelled;
+	int exit_code;
+	int signal;
+};
+
+static void catalog_update_exited(void *userdata, int exit_code, int signal)
+{
+	struct fyai_catalog_update_request *request = userdata;
+
+	request->session = NULL;
+	request->exit_code = exit_code;
+	request->signal = signal;
+	request->done = true;
+}
+
+struct fyai_catalog_update_request *
+fyai_catalog_update_submit(struct fyai_ctx *ctx, const char *const *providers,
+			   size_t count, bool curated)
+{
+	struct fyai_catalog_update_request *request;
+	struct response_buffer line = {0};
+	const char *tmp;
+	int rc;
+
+	request = calloc(1, sizeof(*request));
+	fyai_error_check(ctx, request, err, "could not allocate the "
+			 "catalogue update");
+	request->ctx = ctx;
+	request->selected = count > 0;
+	fyai_error_check(ctx, ctx->durable_gb, err, "no arena; run fyai init");
+	request->cmd = catalog_update_command(ctx, providers, count, curated);
+	if (!request->cmd)
+		goto err;
+
+	tmp = getenv("TMPDIR");
+	if (fy_str_empty(tmp) || strlen(tmp) > 32)
+		tmp = "/tmp";
+	snprintf(request->dir, sizeof(request->dir), "%s/fyai-catalog-XXXXXX",
+		 tmp);
+	fyai_error_check(ctx, mkdtemp(request->dir), err_dir,
+			 "could not create a directory for the catalogue: %s",
+			 strerror(errno));
+	snprintf(request->out, sizeof(request->out), "%s/catalog.yaml",
+		 request->dir);
+
+	/* Standard error stays on the tile; the catalogue goes to the file. */
+	rc = response_buffer_append(&line, request->cmd) ||
+	     response_buffer_append(&line, " >") ||
+	     catalog_shell_quote(&line, request->out);
+	fyai_error_check(ctx, !rc, err_line, "out of memory building the "
+			 "catalogue command");
+
+	fyai_report(ctx, "catalog: running %s\n", request->cmd);
+	request->session = fyai_tools_config_program(ctx, line.data, "catalog",
+					ctx->cfg->catalog_update_credentials,
+					catalog_update_exited, request);
+	if (!request->session)
+		goto err_line;	/* fyai_tools_config_program() says why */
+	free(line.data);
+	return request;
+
+err_line:
+	free(line.data);
+	(void)rmdir(request->dir);
+err_dir:
+	request->dir[0] = '\0';
+err:
+	if (request)
+		free(request->cmd);
+	free(request);
+	return NULL;
+}
+
+bool fyai_catalog_update_done(
+		const struct fyai_catalog_update_request *request)
+{
+	return request && request->done;
+}
+
+int fyai_catalog_update_collect(struct fyai_catalog_update_request *request)
+{
+	struct response_buffer buf = {0};
+	struct fyai_ctx *ctx;
+	char chunk[65536];
+	size_t n;
+	FILE *fp;
+	int rc;
+
+	if (!request || !request->done || request->cancelled)
+		return -1;
+	ctx = request->ctx;
+	rc = -1;
+	fyai_error_check(ctx, !request->signal, out, "%s was stopped by "
+			 "signal %d; its output is in its tile", request->cmd,
+			 request->signal);
+	fyai_error_check(ctx, !request->exit_code, out, "%s exited with "
+			 "status %d; its output is in its tile", request->cmd,
+			 request->exit_code);
+	fp = fopen(request->out, "r");
+	fyai_error_check(ctx, fp, out, "could not read the catalogue that %s "
+			 "wrote: %s", request->cmd, strerror(errno));
+	rc = 0;
+	while (!rc && (n = fread(chunk, 1, sizeof(chunk), fp)) > 0)
+		rc = response_buffer_append_data(&buf, chunk, n);
+	if (!rc && ferror(fp))
+		rc = -1;
+	fclose(fp);
+	fyai_error_check(ctx, !rc, out, "could not read the catalogue that %s "
+			 "wrote", request->cmd);
+	rc = catalog_update_apply(ctx, request->cmd, buf.data ? buf.data : "",
+				  buf.len, request->selected);
+out:
+	free(buf.data);
+	return rc;
+}
+
+void fyai_catalog_update_cancel(struct fyai_catalog_update_request *request)
+{
+	if (!request || request->done || request->cancelled)
+		return;
+	request->cancelled = true;
+	if (request->session)
+		fyai_tools_user_program_close(request->session);
+}
+
+void fyai_catalog_update_destroy(struct fyai_catalog_update_request *request)
+{
+	if (!request)
+		return;
+	fyai_catalog_update_cancel(request);
+	/* A program that is still running must not reach a freed request. */
+	if (request->session)
+		fyai_tools_user_program_forget(request->session);
+	if (request->dir[0]) {
+		(void)unlink(request->out);
+		(void)rmdir(request->dir);
+	}
+	free(request->cmd);
+	free(request);
 }
 
 int fyai_catalog_export(struct fyai_ctx *ctx, const char *path)

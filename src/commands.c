@@ -1541,6 +1541,14 @@ static int configure_catalog(int argc, char **argv, struct fyai_cfg *cfg)
 		[FYAICAT_TOOLS] = "tools",
 		[FYAICAT_IMPORT] = "import",
 		[FYAICAT_EXPORT] = "export",
+		[FYAICAT_GET] = "get",
+		[FYAICAT_SET] = "set",
+		[FYAICAT_DELETE] = "delete",
+		[FYAICAT_EDIT] = "edit",
+		[FYAICAT_VALIDATE] = "validate",
+		[FYAICAT_SCHEMA] = "schema",
+		[FYAICAT_RESET] = "reset",
+		[FYAICAT_UPDATE] = "update",
 		NULL
 	};
 	const char *what;
@@ -1552,13 +1560,15 @@ static int configure_catalog(int argc, char **argv, struct fyai_cfg *cfg)
 	idx = str_in_set(what, types);
 	if (idx < 0) {
 		fyai_cfg_error(cfg, "catalog: unknown type '%s' "
-			       "(show|list|tools|import|export)",
-			what);
+			       "(show|list|tools|import|export|get|set|delete|"
+			       "edit|validate|schema|reset|update)", what);
 		return -1;
 	}
 	args->type = (enum fyai_catalog_type)idx;
 	i++;
 	args->arg = NULL;
+	args->value = NULL;
+	args->provider_count = 0;
 	for (; i < argc; i++) {
 		if (!strcmp(argv[i], "--full")) {
 			args->full = true;
@@ -1568,9 +1578,36 @@ static int configure_catalog(int argc, char **argv, struct fyai_cfg *cfg)
 			args->full = false;
 			continue;
 		}
-		if (argv[i][0] == '-') {
+		if (args->type == FYAICAT_UPDATE &&
+		    !strcmp(argv[i], "--curated")) {
+			args->curated = true;
+			continue;
+		}
+		if (args->type == FYAICAT_UPDATE &&
+		    !strcmp(argv[i], "--provider")) {
+			if (++i >= argc) {
+				fyai_cfg_error(cfg, "catalog: update: "
+					       "--provider needs a name");
+				return -1;
+			}
+			if (args->provider_count ==
+			    FYAI_CATALOG_UPDATE_PROVIDERS_MAX) {
+				fyai_cfg_error(cfg, "catalog: update: more "
+					       "than %d providers",
+					       FYAI_CATALOG_UPDATE_PROVIDERS_MAX);
+				return -1;
+			}
+			args->providers[args->provider_count++] =
+				fy_gb_intern_string(cfg->gb, argv[i]);
+			continue;
+		}
+		if (argv[i][0] == '-' && argv[i][1]) {
 			fyai_cfg_error(cfg, "catalog: unknown option '%s'", argv[i]);
 			return -1;
+		}
+		if (args->type == FYAICAT_SET && args->arg && !args->value) {
+			args->value = fy_gb_intern_string(cfg->gb, argv[i]);
+			continue;
 		}
 		if (args->arg) {
 			fyai_cfg_error(cfg, "catalog: too many arguments");
@@ -1579,19 +1616,51 @@ static int configure_catalog(int argc, char **argv, struct fyai_cfg *cfg)
 		args->arg = fy_gb_intern_string(cfg->gb, argv[i]);
 	}
 
-	if (args->type == FYAICAT_IMPORT && !args->arg) {
-		fyai_cfg_error(cfg, "catalog: import: missing file");
-		return -1;
-	}
-	if (args->type == FYAICAT_LIST && args->arg &&
-	    strcmp(args->arg, "models") && strcmp(args->arg, "providers")) {
-		fyai_cfg_error(cfg, "catalog: list: models or providers");
-		return -1;
+	switch (args->type) {
+	case FYAICAT_IMPORT:
+		if (!args->arg) {
+			fyai_cfg_error(cfg, "catalog: import: missing file");
+			return -1;
+		}
+		break;
+	case FYAICAT_LIST:
+		if (args->arg && strcmp(args->arg, "models") &&
+		    strcmp(args->arg, "providers")) {
+			fyai_cfg_error(cfg, "catalog: list: models or providers");
+			return -1;
+		}
+		break;
+	case FYAICAT_GET:
+	case FYAICAT_DELETE:
+		if (!args->arg) {
+			fyai_cfg_error(cfg, "catalog: %s: missing path", what);
+			return -1;
+		}
+		break;
+	case FYAICAT_SET:
+		if (!args->arg || !args->value) {
+			fyai_cfg_error(cfg, "catalog: set: missing %s",
+				       args->arg ? "value" : "path");
+			return -1;
+		}
+		break;
+	case FYAICAT_EDIT:
+	case FYAICAT_VALIDATE:
+	case FYAICAT_SCHEMA:
+	case FYAICAT_RESET:
+	case FYAICAT_UPDATE:
+		if (args->arg) {
+			fyai_cfg_error(cfg, "catalog: %s takes no argument", what);
+			return -1;
+		}
+		break;
+	default:
+		break;
 	}
 	return 0;
 }
 
-static int execute_catalog(struct fyai_ctx *ctx)
+int fyai_execute_catalog(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct fyai_catalog_args *args = &cfg->cmd.args.catalog;
@@ -1607,6 +1676,26 @@ static int execute_catalog(struct fyai_ctx *ctx)
 		return fyai_catalog_import(ctx, args->arg);
 	case FYAICAT_EXPORT:
 		return fyai_catalog_export(ctx, args->arg);
+	case FYAICAT_GET:
+		return fyai_catalog_get(ctx, args->arg);
+	case FYAICAT_SET:
+		return fyai_catalog_set(ctx, args->arg, args->value);
+	case FYAICAT_DELETE:
+		return fyai_catalog_delete(ctx, args->arg);
+	case FYAICAT_EDIT:
+		return fyai_catalog_edit(ctx);
+	case FYAICAT_VALIDATE:
+		return fyai_catalog_validate(ctx);
+	case FYAICAT_SCHEMA:
+		emit_generic_to_stdout(ctx, NULL,
+				       fyai_catalog_schema(cfg->gb), true);
+		return 0;
+	case FYAICAT_RESET:
+		return fyai_catalog_reset(ctx);
+	case FYAICAT_UPDATE:
+		return fyai_catalog_update(ctx, args->providers,
+					   args->provider_count,
+					   args->curated);
 	}
 	return -1;
 }
@@ -2493,17 +2582,30 @@ static const struct fyai_verb fyai_verbs[FYAI_VERB_COUNT] = {
 		.id	   = FYAIVID_CATALOG,
 		.name	   = "catalog",
 		.configure = configure_catalog,
-		.execute   = execute_catalog,
-		.synopsis  = "catalog [show | list [models|providers] | tools [agent] | import <file> | export [file]]",
-		.help	   = "Inspect, ingest or export the provider/model catalogue (default: show).\n"
+		.execute   = fyai_execute_catalog,
+		.synopsis  = "catalog [show|list|tools|import|export|get|set|delete|edit|validate|schema|reset|update] [args]",
+		.help	   = "Inspect or change the provider/model catalogue of the current\n"
+			     "branch (default: show). A branch without one uses the catalogue\n"
+			     "embedded in the program.\n"
 			     "  show              emit the effective catalogue as YAML\n"
 			     "  list [what]       tabulate models and/or providers\n"
-			     "  import <file>     ingest a scrape-providers YAML into the arena\n"
-			     "  export [file]     write the effective catalogue as YAML (stdout if omitted)\n"
 			     "  tools [agent]     list agent tools (--brief|--full)\n"
-			     "Without an arena catalogue the build-time embedded snapshot is used.\n"
-			     "The catalogue is view/import/export only: there is no in-place edit,\n"
-			     "unlike config.",
+			     "  get <path>        print the value at a path\n"
+			     "  set <path> <yaml> set the value at a path\n"
+			     "  delete <path>     remove the value at a path\n"
+			     "  edit              edit the catalogue in $EDITOR\n"
+			     "  validate          check the catalogue against its schema\n"
+			     "  schema            print the catalogue schema\n"
+			     "  import <file>     replace the catalogue with a scrape-providers YAML\n"
+			     "  export [file]     write the effective catalogue (stdout if omitted)\n"
+			     "  reset             use the embedded catalogue again\n"
+			     "  update [--provider NAME]... [--curated]\n"
+			     "                    run catalog_update/command and take what it\n"
+			     "                    writes; --provider replaces only those providers\n"
+			     "A path is slash-separated. An item of a sequence is named by its\n"
+			     "index or by its name (canonical_id for the models of a provider):\n"
+			     "models/gpt-5.5/context_window, providers/openai/models/gpt-5.5.\n"
+			     "A set on an item that does not exist adds it.",
 		.flags	   = FYAIVF_BATCH | FYAIVF_NO_REQUESTS,
 		.default_args.catalog = {
 		},

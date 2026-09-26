@@ -44,9 +44,14 @@ static const char *const fyai_env_keep[] = {
 };
 
 /* True if @name of @len is one of the variables a tool may keep. */
-static bool env_keep_name(const char *name, size_t len)
+static bool env_keep_name(const char *name, size_t len,
+			  const char *const *keep)
 {
 	size_t i;
+
+	for (; keep && *keep; keep++)
+		if (!strncmp(name, *keep, len) && (*keep)[len] == '\0')
+			return true;
 
 	for (i = 0; i < sizeof(fyai_env_keep) / sizeof(*fyai_env_keep); i++)
 		if (!strncmp(name, fyai_env_keep[i], len) &&
@@ -58,7 +63,7 @@ static bool env_keep_name(const char *name, size_t len)
 	return false;
 }
 
-int fyai_env_sanitize(void)
+int fyai_env_sanitize(const char *const *keep)
 {
 	extern char **environ;
 	char name[FYAI_ENV_NAME_MAX];
@@ -74,7 +79,7 @@ int fyai_env_sanitize(void)
 			eq = strchr(environ[i], '=');
 			len = eq ? (size_t)(eq - environ[i]) :
 				   strlen(environ[i]);
-			if (env_keep_name(environ[i], len))
+			if (env_keep_name(environ[i], len, keep))
 				continue;
 			if (len >= sizeof(name)) {
 				/* Too long to name, so it cannot be removed. */

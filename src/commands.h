@@ -104,6 +104,7 @@ int fyai_resume_parse(struct fyai_cfg *cfg, int argc, char *argv[]);
 void fyai_usage(FILE *fp, const char *progname, const char *color_mode);
 int fyai_execute_list(struct fyai_ctx *ctx);
 int fyai_execute_config(struct fyai_ctx *ctx);
+int fyai_execute_catalog(struct fyai_ctx *ctx);
 
 /* per verb arguments */
 
@@ -213,12 +214,28 @@ enum fyai_catalog_type {
 	FYAICAT_TOOLS,
 	FYAICAT_IMPORT,
 	FYAICAT_EXPORT,
+	FYAICAT_GET,
+	FYAICAT_SET,
+	FYAICAT_DELETE,
+	FYAICAT_EDIT,
+	FYAICAT_VALIDATE,
+	FYAICAT_SCHEMA,
+	FYAICAT_RESET,
+	FYAICAT_UPDATE,
 };
+
+/* Most --provider options that one catalog update takes. */
+#define FYAI_CATALOG_UPDATE_PROVIDERS_MAX 32
 
 struct fyai_catalog_args {
 	enum fyai_catalog_type type;
-	const char *arg;	/* import file or list selector */
+	const char *arg;	/* import file, list selector or path */
+	const char *value;	/* set: the YAML flow value */
 	bool full;		/* --full: show complete tool descriptions */
+	bool curated;		/* update: --curated */
+	/* update: the --provider names, in the configuration builder */
+	const char *providers[FYAI_CATALOG_UPDATE_PROVIDERS_MAX];
+	size_t provider_count;
 };
 
 enum fyai_list_type {

@@ -125,6 +125,15 @@ typedef void (*fyai_tools_exit_fn)(void *userdata, int exit_code, int signal);
 struct fyai_shell_session *
 fyai_tools_user_program(struct fyai_ctx *ctx, const char *command,
 			fyai_tools_exit_fn done, void *userdata);
+/*
+ * Run @command, a program of the configuration, as fyai_tools_user_program()
+ * runs an editor, in a tile named @prefix-N. It runs without the shell
+ * sandbox and keeps the credentials that the sequence @env_keep names.
+ */
+struct fyai_shell_session *
+fyai_tools_config_program(struct fyai_ctx *ctx, const char *command,
+			  const char *prefix, fy_generic env_keep,
+			  fyai_tools_exit_fn done, void *userdata);
 /* Ask the program of @sess to end; @done still runs when it does. */
 void fyai_tools_user_program_close(struct fyai_shell_session *sess);
 /* Stop telling the owner when the program of @sess ends. */

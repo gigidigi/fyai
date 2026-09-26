@@ -24,6 +24,7 @@ struct fyai_terminal_opts {
 	const char *shell;		/* the program to run; NULL = /bin/sh */
 	bool login;			/* start @shell as a login shell */
 	bool pipes;			/* run on pipes, with no terminal */
+	const char *const *env_keep;	/* credentials to keep; NULL-terminated */
 };
 
 struct fyai_terminal_result {

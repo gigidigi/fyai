@@ -61,11 +61,14 @@ int fyai_sandbox_mode_parse(const char *name, enum fyai_sandbox_mode *modep);
  * processes it spawns. Portable; call in the child before exec (or at the top
  * of the `fyai tool` one-shot).
  *
+ * @keep is a NULL-terminated list of further names to keep, or NULL. Only
+ * fyai names them, from its configuration; never a model.
+ *
  * Returns 0 when the environment holds nothing but the kept set, -1 when a
  * variable could not be removed. Fail closed on -1: a partial sanitize still
  * carries credentials.
  */
-int fyai_env_sanitize(void);
+int fyai_env_sanitize(const char *const *keep);
 
 /* Longest environment variable name fyai_env_sanitize() can remove. */
 #define FYAI_ENV_NAME_MAX 256

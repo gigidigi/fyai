@@ -200,6 +200,7 @@ static void tty_child_exec(struct fyai_ctx *ctx, const char *command,
 	spec.workdir = opts->workdir;
 	spec.sandbox = sandbox;
 	spec.status_fd = status_fd;
+	spec.env_keep = opts->env_keep;
 
 	rc = fyai_child_exec_prepare(ctx, &spec);
 	if (rc)
@@ -302,6 +303,7 @@ static void pipe_child_exec(struct fyai_ctx *ctx, const char *command,
 	spec.workdir = opts->workdir;
 	spec.sandbox = sandbox;
 	spec.status_fd = status_fd;
+	spec.env_keep = opts->env_keep;
 
 	rc = fyai_child_exec_prepare(ctx, &spec);
 	if (rc)

@@ -997,7 +997,7 @@ int fyai_child_exec_prepare(struct fyai_ctx *ctx,
 	}
 	/* Fail closed if any provider credential cannot be removed. */
 	stage = FYAI_CHILD_STAGE_ENV;
-	if (fyai_env_sanitize())
+	if (fyai_env_sanitize(spec->env_keep))
 		goto err_setup;
 	/* Describe the child's terminal and screen dimensions. */
 	if (spec->term)
@@ -1083,6 +1083,7 @@ static void shell_capture_exec(struct fyai_ctx *ctx, const char *command,
 	spec.workdir = opts ? opts->workdir : NULL;
 	spec.sandbox = sandbox;
 	spec.status_fd = status_fd;
+	spec.env_keep = opts ? opts->env_keep : NULL;
 	rc = fyai_child_exec_prepare(ctx, &spec);
 	if (rc)
 		_exit(rc);

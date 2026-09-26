@@ -1978,6 +1978,41 @@ static fy_generic fyai_tool_child_serve(struct jsonrpc_conn *conn,
 	return fy_invalid;
 }
 
+/* Most credential names a program of the configuration keeps. */
+#define FYAI_TOOL_ENV_KEEP_MAX	32
+
+/*
+ * Fill @names with the credentials that a user-owned call keeps, NULL
+ * terminated. Only fyai_tools_config_program() sets them, and a provider
+ * call cannot be user-owned, so a model cannot name one. The names point into
+ * @args, which must outlive their use.
+ */
+static void fyai_tool_env_keep(fy_generic args, const char **names)
+{
+	fy_generic keep;
+	const char *name;
+	size_t n;
+
+	n = 0;
+	if (fy_get(args, "_fyai_user_owned", false)) {
+		keep = fy_get(args, "_fyai_env_keep", fy_invalid);
+		fy_foreach(name, keep) {
+			if (n == FYAI_TOOL_ENV_KEEP_MAX)
+				break;
+			if (!fy_str_empty(name))
+				names[n++] = name;
+		}
+	}
+	names[n] = NULL;
+}
+
+/* True when a user-owned call runs without the shell sandbox. */
+static bool fyai_tool_unconfined(fy_generic args)
+{
+	return fy_get(args, "_fyai_user_owned", false) &&
+	       fy_get(args, "_fyai_unconfined", false);
+}
+
 /* Open a session, answer its start, then serve it until it ends. */
 static void fyai_tool_child_session(struct fyai_ctx *ctx,
 				    struct fyai_tool_child *tc,
@@ -1985,6 +2020,7 @@ static void fyai_tool_child_session(struct fyai_ctx *ctx,
 {
 	struct fy_generic_builder *gb = fyai_ctx_transient_gb(ctx);
 	const struct fyai_sandbox_spec *sandbox;
+	const char *env_keep[FYAI_TOOL_ENV_KEEP_MAX + 1];
 	struct fyai_terminal_opts opts = {};
 	struct fyai_shell_sandbox sb;
 	struct fyai_event_loop *el;
@@ -1997,8 +2033,16 @@ static void fyai_tool_child_session(struct fyai_ctx *ctx,
 	command = fy_get(args, "command", fy_invalid);
 	workdir = fy_get(args, "workdir", fy_invalid);
 
-	rc = fyai_shell_sandbox_begin(ctx, &sb, &sandbox);
+	fyai_tool_env_keep(args, env_keep);
+	if (fyai_tool_unconfined(args)) {
+		memset(&sb, 0, sizeof(sb));
+		sandbox = NULL;
+		rc = 0;
+	} else {
+		rc = fyai_shell_sandbox_begin(ctx, &sb, &sandbox);
+	}
 	if (!rc) {
+		opts.env_keep = env_keep;
 		opts.workdir = fy_castp(&workdir, (const char *)NULL);
 		opts.term = ctx->cfg->shell_tty_term;
 		fyai_shell_tty_size(ctx, args, &opts.rows, &opts.cols);
@@ -2056,6 +2100,7 @@ static void fyai_tool_child_session(struct fyai_ctx *ctx,
 
 static void fyai_tool_child_serve_loop(struct fyai_ctx *ctx)
 {
+	const char *env_keep[FYAI_TOOL_ENV_KEEP_MAX + 1];
 	struct fyai_tool_child tc;
 	struct fyai_event_loop *el;
 	struct jsonrpc_conn *conn;
@@ -2094,8 +2139,10 @@ static void fyai_tool_child_serve_loop(struct fyai_ctx *ctx)
 			 * A sub-agent needs provider credentials after a persona
 			 * changes its model. Its own tool children sanitize again.
 			 */
+			fyai_tool_env_keep(fyai_tool_call_args(ctx, tc.args),
+					   env_keep);
 			if (!fy_equal(fyai_tool_call_name(ctx, tc.args), "agent") &&
-			    fyai_env_sanitize())
+			    fyai_env_sanitize(env_keep))
 				fyai_error(ctx,
 					   "could not remove every credential from the tool environment");
 			if (fyai_shell_session_call(ctx, tc.args)) {
@@ -5470,6 +5517,7 @@ int fyai_tools_kill(struct fyai_ctx *ctx, const char *name)
  */
 static int fyai_tools_user_start(struct fyai_ctx *ctx, const char *command,
 				 const char *prefix, const char *what,
+				 fy_generic env_keep,
 				 struct fyai_shell_session **sessp)
 {
 	struct fyai_tool_job *job = NULL;
@@ -5502,6 +5550,10 @@ static int fyai_tools_user_start(struct fyai_ctx *ctx, const char *command,
 			  "tty", true,
 			  "name", name,
 			  "_fyai_user_owned", true);
+	/* A program of the configuration runs as the catalogue verb does. */
+	if (fy_is_valid(args) && fy_is_sequence(env_keep))
+		args = fy_assoc(gb, args, "_fyai_env_keep", env_keep,
+				"_fyai_unconfined", true);
 	args_text = emit_json_string(gb, args);
 	if (ctx->cfg->api_mode == FYAI_API_CHAT_COMPLETIONS)
 		call = fy_mapping(gb,
@@ -5533,23 +5585,26 @@ int fyai_tools_bang(struct fyai_ctx *ctx, const char *command)
 {
 	struct fyai_shell_session *sess;
 
-	if (fyai_tools_user_start(ctx, command, "bang", "bang shell", &sess))
+	if (fyai_tools_user_start(ctx, command, "bang", "bang shell",
+				  fy_invalid, &sess))
 		return -1;
 	if (sess && sess->surface)
 		(void)fyai_tools_focus(ctx, sess->surface);
 	return 0;
 }
 
-struct fyai_shell_session *
-fyai_tools_user_program(struct fyai_ctx *ctx, const char *command,
-			fyai_tools_exit_fn done, void *userdata)
+static struct fyai_shell_session *
+fyai_tools_program_start(struct fyai_ctx *ctx, const char *command,
+			 const char *prefix, const char *what,
+			 fy_generic env_keep, fyai_tools_exit_fn done,
+			 void *userdata)
 {
 	struct fyai_shell_session *sess;
 
-	if (fyai_tools_user_start(ctx, command, "edit", "editor", &sess))
+	if (fyai_tools_user_start(ctx, command, prefix, what, env_keep, &sess))
 		return NULL;
 	fyai_error_check(ctx, sess, err,
-			 "the editor was given no terminal session");
+			 "the %s was given no terminal session", what);
 	/* The end is reported from the loop, so it cannot come before this. */
 	sess->on_exit = done;
 	sess->on_exit_data = userdata;
@@ -5561,6 +5616,24 @@ fyai_tools_user_program(struct fyai_ctx *ctx, const char *command,
 
 err:
 	return NULL;
+}
+
+struct fyai_shell_session *
+fyai_tools_user_program(struct fyai_ctx *ctx, const char *command,
+			fyai_tools_exit_fn done, void *userdata)
+{
+	return fyai_tools_program_start(ctx, command, "edit", "editor",
+					fy_invalid, done, userdata);
+}
+
+struct fyai_shell_session *
+fyai_tools_config_program(struct fyai_ctx *ctx, const char *command,
+			  const char *prefix, fy_generic env_keep,
+			  fyai_tools_exit_fn done, void *userdata)
+{
+	return fyai_tools_program_start(ctx, command, prefix, prefix,
+					fy_is_sequence(env_keep) ? env_keep :
+					fy_seq_empty, done, userdata);
 }
 
 void fyai_tools_user_program_close(struct fyai_shell_session *sess)
@@ -6386,7 +6459,7 @@ int fyai_run_tool_verb(struct fyai_ctx *ctx)
 	 * needed. The shell tool still forks internally to capture output and
 	 * inherits this confinement.
 	 */
-	rc = fyai_env_sanitize();
+	rc = fyai_env_sanitize(NULL);
 	fyai_error_check(ctx, !rc, out,
 			 "tool: could not remove every credential from the environment");
 	rc = fyai_tool_apply_sandbox(ctx);

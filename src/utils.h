@@ -138,6 +138,7 @@ struct shell_command_opts {
 	unsigned int timeout_ms;	/* 0 = no limit */
 	const char *shell;		/* the program to run; NULL = /bin/sh */
 	bool login;			/* start @shell as a login shell */
+	const char *const *env_keep;	/* credentials to keep; NULL-terminated */
 };
 
 /* Exec @command or an interactive shell; return only when exec fails. */
@@ -232,6 +233,7 @@ struct fyai_child_spec {
 	const char *workdir;		/* chdir before confinement; NULL keeps */
 	const struct fyai_sandbox_spec *sandbox;
 	int status_fd;			/* says why a start stopped; -1 none */
+	const char *const *env_keep;	/* credentials to keep; NULL-terminated */
 };
 
 /* Apply @spec before exec, returning the child's failure exit status. */

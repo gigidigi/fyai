@@ -1915,6 +1915,137 @@ usage:
 	return -1;
 }
 
+/* /catalog update [--curated] [--provider] [NAME]...: a program in a tile. */
+static int slash_catalog_update(struct fyai_ctx *ctx, const char *arg)
+{
+	const char *providers[FYAI_CATALOG_UPDATE_PROVIDERS_MAX];
+	const char *word;
+	size_t count, len;
+	bool curated;
+
+	fyai_error_check(ctx, !ctx->catalog_update, err,
+			 "catalog: an update is already running");
+	count = 0;
+	curated = false;
+	for (;;) {
+		while (*arg == ' ' || *arg == '\t')
+			arg++;
+		if (!*arg)
+			break;
+		len = strcspn(arg, " \t");
+		word = fy_gb_intern_string(ctx->cfg->gb,
+					   fy_sprintfa("%.*s", (int)len, arg));
+		arg += len;
+		fyai_error_check(ctx, word, err, "catalog: could not store "
+				 "the update selection");
+		if (!strcmp(word, "--curated")) {
+			curated = true;
+			continue;
+		}
+		if (!strcmp(word, "--provider"))
+			continue;
+		fyai_error_check(ctx, *word != '-', err, "catalog: use /catalog "
+				 "update [--curated] [--provider NAME]...");
+		fyai_error_check(ctx, count < ARRAY_SIZE(providers), err,
+				 "catalog: at most %zu providers in one update",
+				 ARRAY_SIZE(providers));
+		providers[count++] = word;
+	}
+	ctx->catalog_update = fyai_catalog_update_submit(ctx, providers, count,
+							 curated);
+	return ctx->catalog_update ? 0 : -1;
+err:
+	return -1;
+}
+
+static int slash_catalog(struct fyai_ctx *ctx, const char *arg)
+{
+	struct fyai_catalog_args *args = &ctx->cfg->cmd.args.catalog;
+	struct fyai_catalog_args saved = *args;
+	static const struct {
+		const char *name;
+		enum fyai_catalog_type type;
+		int operands;	/* 0 none, 1 optional, 2 required, 3 path and value */
+	} subs[] = {
+		{ "show", FYAICAT_SHOW, 0 },
+		{ "list", FYAICAT_LIST, 1 },
+		{ "tools", FYAICAT_TOOLS, 1 },
+		{ "get", FYAICAT_GET, 2 },
+		{ "set", FYAICAT_SET, 3 },
+		{ "delete", FYAICAT_DELETE, 2 },
+		{ "edit", FYAICAT_EDIT, 0 },
+		{ "validate", FYAICAT_VALIDATE, 0 },
+		{ "schema", FYAICAT_SCHEMA, 0 },
+		{ "import", FYAICAT_IMPORT, 2 },
+		{ "export", FYAICAT_EXPORT, 1 },
+		{ "reset", FYAICAT_RESET, 0 },
+	};
+	const char *key, *value;
+	size_t keylen, len, i;
+	int rc;
+
+	while (*arg == ' ' || *arg == '\t')
+		arg++;
+	len = strcspn(arg, " \t");
+	key = arg + len;
+	while (*key == ' ' || *key == '\t')
+		key++;
+	value = key + strcspn(key, " \t");
+	keylen = (size_t)(value - key);
+	while (*value == ' ' || *value == '\t')
+		value++;
+
+	/* The update runs a program: it runs in a tile of the work pane. */
+	if (len == 6 && !strncmp(arg, "update", len))
+		return slash_catalog_update(ctx, key);
+	for (i = 0; len && i < ARRAY_SIZE(subs); i++) {
+		if (strlen(subs[i].name) == len &&
+		    !strncmp(arg, subs[i].name, len))
+			break;
+	}
+	if (len && i == ARRAY_SIZE(subs))
+		goto usage;
+	memset(args, 0, sizeof(*args));
+	args->type = len ? subs[i].type : FYAICAT_SHOW;
+	if (len && subs[i].operands == 0 && *key)
+		goto usage;
+	if (len && subs[i].operands >= 2 && !*key)
+		goto usage;
+	if (len && subs[i].operands == 3) {
+		if (!*value)
+			goto usage;
+		args->arg = fy_gb_intern_string(ctx->cfg->gb,
+				fy_sprintfa("%.*s", (int)keylen, key));
+		args->value = fy_gb_intern_string(ctx->cfg->gb, value);
+	} else if (*key) {
+		args->arg = fy_gb_intern_string(ctx->cfg->gb, key);
+	}
+
+	if (args->type == FYAICAT_EDIT) {
+		*args = saved;
+		if (ctx->config_edit) {
+			fyai_error(ctx, "an editor is already active");
+			return -1;
+		}
+		ctx->config_edit = fyai_catalog_edit_submit(ctx);
+		return ctx->config_edit ? 0 : -1;
+	}
+	rc = fyai_execute_catalog(ctx);
+	/* The model_info block and the model resolution follow the catalogue. */
+	if (!rc && (args->type == FYAICAT_SET || args->type == FYAICAT_DELETE ||
+		    args->type == FYAICAT_IMPORT || args->type == FYAICAT_RESET))
+		rc = fyai_config_rederive(ctx);
+	*args = saved;
+	return rc;
+usage:
+	fyai_error(ctx, "catalog: use /catalog [show|list [what]|tools [agent]|"
+		   "get <path>|set <path> <value>|delete <path>|edit|validate|"
+		   "schema|import <file>|export [file]|reset|update "
+		   "[--curated] [--provider NAME]...]");
+	*args = saved;
+	return -1;
+}
+
 static int slash_list(struct fyai_ctx *ctx, const char *arg)
 {
 	struct fyai_list_args *args = &ctx->cfg->cmd.args.list;
@@ -2737,6 +2868,8 @@ static const struct fyai_slash_cmd fyai_slash_cmds[] = {
 	{ "api", "[mode]", "show or switch the API grammar", slash_api },
 	{ "config", "[show|effective|edit|get|set|delete]", "inspect or edit config",
 	  slash_config },
+	{ "catalog", "[show|list|get|set|delete|edit|validate|reset]",
+	  "inspect or edit the catalogue of the branch", slash_catalog },
 	{ "list", "[what]", "list providers, models, turns, exchanges, or reflog",
 	  slash_list },
 	{ "history", "[--tool-detail MODE] [last N]",
@@ -2983,7 +3116,8 @@ int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 		 strcmp(cmd->name, "page") &&
 		 strcmp(cmd->name, "list") &&
 		 strcmp(cmd->name, "branch") &&
-		 strcmp(cmd->name, "config"));
+		 strcmp(cmd->name, "config") &&
+		 strcmp(cmd->name, "catalog"));
 	fyai_ui_pane_end(ctx, title, error, pane_output);
 
 	/* Settings/model/context may have changed; reflect it in the footer. */
@@ -3060,6 +3194,10 @@ bool fyai_session_slash_immediate(struct fyai_ctx *ctx, const char *line,
 		"show", "effective", "validate", "schema", "describe",
 		"get", NULL,
 	};
+	static const char *const catalog_reads[] = {
+		"show", "list", "tools", "get", "validate", "schema", "export",
+		NULL,
+	};
 
 	if (!busy)
 		return true;
@@ -3088,6 +3226,9 @@ bool fyai_session_slash_immediate(struct fyai_ctx *ctx, const char *line,
 	if (!strcmp(cmd->name, "config"))
 		return session_slash_argless(arg) ||
 			session_slash_subcommand(arg, config_reads);
+	if (!strcmp(cmd->name, "catalog"))
+		return session_slash_argless(arg) ||
+			session_slash_subcommand(arg, catalog_reads);
 	if (!strcmp(cmd->name, "secret"))
 		return session_slash_argless(arg) ||
 			session_slash_word(arg, "status");
@@ -3391,6 +3532,12 @@ static void session_complete_command_args(struct fyai_ctx *ctx,
 		"show", "effective", "edit", "validate", "schema", "describe",
 		"get", "set", "delete", NULL,
 	};
+	static const char *const catalog_names[] = { "catalog", NULL };
+	static const char *const catalog_values[] = {
+		"show", "list", "tools", "get", "set", "delete", "edit",
+		"validate", "schema", "import", "export", "reset", "update",
+		NULL,
+	};
 	static const char *const api_names[] = { "api", NULL };
 	static const char *const api_values[] = {
 		"responses", "chat-completions", "messages", NULL,
@@ -3405,6 +3552,7 @@ static void session_complete_command_args(struct fyai_ctx *ctx,
 		{ list_names, list_values },
 		{ mcp_names, mcp_values },
 		{ config_names, config_values },
+		{ catalog_names, catalog_values },
 		{ api_names, api_values },
 		{ log_names, log_values },
 	};

@@ -105,6 +105,22 @@ retry:
   initial_delay_ms: 500
   max_delay_ms: 30000
 
+# `fyai catalog update` runs `command` to write a catalogue: a
+# scrape-providers compatible program, given --format yaml and the selection
+# options. It gets only the provider keys that `credentials` names, and is
+# stopped after `timeout_ms` (0 never). These are the keys scrape-providers
+# reads.
+catalog_update:
+  command: scrape-providers
+  timeout_ms: 600000
+  credentials:
+    - ANTHROPIC_API_KEY
+    - DEEPSEEK_API_KEY
+    - FIREWORKS_API_KEY
+    - META_API_KEY
+    - OPENAI_API_KEY
+    - OPENCODE_API_KEY
+
 # Limits for the shell tool. `timeout_ms` (milliseconds) applies when the
 # model gives no `timeout`; `max_timeout_ms` bounds the one it gives.
 # Output is bounded too, because it becomes prompt text: a command that

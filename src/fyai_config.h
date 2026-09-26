@@ -86,6 +86,9 @@ int fyai_config_export(struct fyai_ctx *ctx, const char *path);
 struct fyai_config_edit_request;
 struct fyai_config_edit_request *
 fyai_config_edit_submit(struct fyai_ctx *ctx);
+/* The same request for the catalogue of the branch. */
+struct fyai_config_edit_request *
+fyai_catalog_edit_submit(struct fyai_ctx *ctx);
 void fyai_config_edit_cancel(struct fyai_config_edit_request *request);
 bool fyai_config_edit_done(
 		const struct fyai_config_edit_request *request);
@@ -93,6 +96,7 @@ int fyai_config_edit_collect(
 		const struct fyai_config_edit_request *request);
 void fyai_config_edit_destroy(struct fyai_config_edit_request *request);
 int fyai_config_edit(struct fyai_ctx *ctx);
+int fyai_catalog_edit(struct fyai_ctx *ctx);
 
 /*
  * Rebuild the live derived config cache from the arena config after an

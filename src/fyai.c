@@ -2835,6 +2835,25 @@ enum fyai_line_result {
 	FYAILR_ERROR,
 };
 
+/*
+ * Commit a finished catalogue update between turns: the commit publishes the
+ * branch store and derives the model again, which a turn must not see change.
+ */
+static void fyai_interactive_catalog_update_step(struct fyai_ctx *ctx)
+{
+	int rc;
+
+	if (!fyai_catalog_update_done(ctx->catalog_update))
+		return;
+	rc = fyai_catalog_update_collect(ctx->catalog_update);
+	fyai_catalog_update_destroy(ctx->catalog_update);
+	ctx->catalog_update = NULL;
+	if (!rc)
+		rc = fyai_config_rederive(ctx);
+	/* A failed update leaves the catalogue as it was; the session goes on. */
+	fyai_ui_diag_drain(ctx, "catalog");
+}
+
 static int fyai_interactive_config_edit_step(struct fyai_ctx *ctx)
 {
 	int rc;
@@ -3097,6 +3116,8 @@ static int fyai_prompt_interactive_async(struct fyai_ctx *ctx)
 		rc = fyai_interactive_config_edit_step(ctx);
 		fyai_error_check(ctx, !rc, out,
 				 "could not finish the configuration edit");
+		if (!run)
+			fyai_interactive_catalog_update_step(ctx);
 
 		if (run && fyai_turn_run_done(run)) {
 			rc = fyai_interactive_finish_run(ctx, &run, &initial,
@@ -3194,6 +3215,8 @@ out:
 		fyai_config_edit_destroy(ctx->config_edit);
 		ctx->config_edit = NULL;
 	}
+	fyai_catalog_update_destroy(ctx->catalog_update);
+	ctx->catalog_update = NULL;
 	/* Reclaim the active turn's builder or a lingering idle scratch one. */
 	fyai_cleanup_transient_builder(ctx);
 	if (!fyai_mcp_stop(ctx)) {

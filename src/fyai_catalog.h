@@ -75,8 +75,50 @@ fy_generic fyai_catalog_endpoint(fy_generic provider, enum fyai_api_mode api);
 bool fyai_catalog_endpoint_has_hosted_tool(fy_generic endpoint,
 						const char *tool);
 
+/* The embedded catalogue schema, parsed into @gb one time. */
+fy_generic fyai_catalog_schema(struct fy_generic_builder *gb);
+
+/*
+ * Check @doc against the catalogue schema and make it the catalogue of the
+ * branch. fy_null removes the catalogue of the branch, which then uses the
+ * embedded one. The model_info block of the configuration follows.
+ */
+int fyai_catalog_commit(struct fyai_ctx *ctx, fy_generic doc,
+			const char *origin);
+
 /* verb backends */
 int fyai_catalog_import(struct fyai_ctx *ctx, const char *path);
+int fyai_catalog_get(struct fyai_ctx *ctx, const char *path);
+int fyai_catalog_set(struct fyai_ctx *ctx, const char *path, const char *value);
+int fyai_catalog_delete(struct fyai_ctx *ctx, const char *path);
+int fyai_catalog_validate(struct fyai_ctx *ctx);
+int fyai_catalog_reset(struct fyai_ctx *ctx);
+/*
+ * Run catalog_update/command and commit what it writes. With @count provider
+ * names, merge only the providers and models that it describes.
+ */
+int fyai_catalog_update(struct fyai_ctx *ctx, const char *const *providers,
+			size_t count, bool curated);
+
+/* Most names catalog_update/credentials gives the command. */
+#define FYAI_CATALOG_ENV_KEEP_MAX	32
+/* Most providers one session update selects. */
+#define FYAI_CATALOG_UPDATE_PROVIDERS_MAX	32
+
+/*
+ * Start catalog_update/command in a tile of the work pane, for a session. The
+ * program ends on its own; fyai_catalog_update_collect() commits what it
+ * wrote. Collect it outside an event callback, between turns.
+ */
+struct fyai_catalog_update_request;
+struct fyai_catalog_update_request *
+fyai_catalog_update_submit(struct fyai_ctx *ctx, const char *const *providers,
+			   size_t count, bool curated);
+bool fyai_catalog_update_done(
+		const struct fyai_catalog_update_request *request);
+int fyai_catalog_update_collect(struct fyai_catalog_update_request *request);
+void fyai_catalog_update_cancel(struct fyai_catalog_update_request *request);
+void fyai_catalog_update_destroy(struct fyai_catalog_update_request *request);
 int fyai_catalog_export(struct fyai_ctx *ctx, const char *path);
 int fyai_catalog_show(struct fyai_ctx *ctx);
 int fyai_catalog_list(struct fyai_ctx *ctx, const char *what);

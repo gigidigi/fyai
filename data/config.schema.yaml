@@ -187,6 +187,43 @@ properties:
         description: >-
           Upper bound on one delay, applied to the calculated delay and to a
           `Retry-After` value. 0 removes the bound.
+  catalog_update:
+    type: object
+    additionalProperties: false
+    description: >-
+      The program that `fyai catalog update` runs to write a catalogue.
+    properties:
+      command:
+        type: string
+        default: scrape-providers
+        description: >-
+          Command line of a scrape-providers compatible program. fyai adds
+          --format yaml and the selection options, runs it under /bin/sh
+          with only the credentials that `credentials` names, and reads the
+          catalogue from its standard output.
+      credentials:
+        type: array
+        maxItems: 32
+        items:
+          type: string
+          pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+        default:
+          - ANTHROPIC_API_KEY
+          - DEEPSEEK_API_KEY
+          - FIREWORKS_API_KEY
+          - META_API_KEY
+          - OPENAI_API_KEY
+          - OPENCODE_API_KEY
+        description: >-
+          Names of the environment variables that hold the provider keys the
+          command reads to list the models of a provider. They are given to
+          the command in addition to the environment of a tool; every other
+          credential is removed.
+      timeout_ms:
+        type: integer
+        minimum: 0
+        default: 600000
+        description: Time limit of one run. 0 disables the limit.
   shell:
     type: object
     additionalProperties: false
