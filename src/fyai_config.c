@@ -1164,12 +1164,12 @@ int fyai_config_set(struct fyai_ctx *ctx, const char *key, const char *value)
 		return -1;
 	}
 	/* The merged doc tracks the edit (validated form, including any
-	 * re-derived catalog: block) so the effective view and this run
+	 * re-derived model_info: block) so the effective view and this run
 	 * stay on the single source. */
 	ctx->cfg->config_doc = config_doc_mirror_key(gb, ctx->cfg->config_doc,
 						     root, key);
 	ctx->cfg->config_doc = config_doc_mirror_key(gb, ctx->cfg->config_doc,
-						     root, "catalog");
+						     root, "model_info");
 	/* A model edit also replaces the derived grammar and endpoint. */
 	if (!strcmp(key, "model")) {
 		ctx->cfg->config_doc = config_doc_mirror_key(gb,
@@ -1401,7 +1401,7 @@ static fy_generic config_doc_sync_derived_api(struct fy_generic_builder *gb,
 }
 
 /*
- * Re-derive the read-only `catalog:` block on @doc from @catalog: the full
+ * Re-derive the read-only `model_info:` block on @doc from @catalog: the full
  * models[] entry for the configured model, plus `canonical_provider` (the
  * default, unprefixed provider offering it). Keyed off `model`, honouring a
  * `provider/` prefix only when it names a catalogue provider (same rule as
@@ -1434,13 +1434,13 @@ static fy_generic catalog_sync_config_doc(struct fy_generic_builder *gb,
 	}
 
 	cat_model = fyai_catalog_resolved_model(catalog, bare);
-	before = fy_get(doc, "catalog");
+	before = fy_get(doc, "model_info");
 	if (fy_is_invalid(cat_model)) {
 		if (fy_is_invalid(before))
 			return doc;
-		doc = fy_delete_at_pathstr(gb, doc, "catalog");
+		doc = fy_delete_at_pathstr(gb, doc, "model_info");
 		if (changesp)
-			*changesp = config_change_add(gb, *changesp, "catalog",
+			*changesp = config_change_add(gb, *changesp, "model_info",
 						      "removed", before, fy_invalid);
 		return doc;
 	}
@@ -1451,10 +1451,10 @@ static fy_generic catalog_sync_config_doc(struct fy_generic_builder *gb,
 				 fy_get(cat_prov, "name", "") : "");
 	if (fy_equal(before, block))
 		return doc;
-	doc = fy_set_at_pathstr(gb, doc, "catalog", block);
+	doc = fy_set_at_pathstr(gb, doc, "model_info", block);
 	if (changesp) {
-		after = fy_get(doc, "catalog");
-		*changesp = config_change_add(gb, *changesp, "catalog",
+		after = fy_get(doc, "model_info");
+		*changesp = config_change_add(gb, *changesp, "model_info",
 					      fy_is_invalid(before) ?
 					      "added" : "changed", before, after);
 	}
@@ -1804,7 +1804,7 @@ int fyai_config_delete(struct fyai_ctx *ctx, const char *key)
 	ctx->cfg->config_doc = config_doc_mirror_key(gb, ctx->cfg->config_doc,
 						     root, key);
 	ctx->cfg->config_doc = config_doc_mirror_key(gb, ctx->cfg->config_doc,
-						     root, "catalog");
+						     root, "model_info");
 	return fyai_publish_root(ctx, root, fy_invalid, fy_invalid);
 }
 
@@ -2713,7 +2713,7 @@ static int apply_config_set_ops(struct fyai_cfg *cfg)
 	}
 	/* CLI --set/-m overrides never touch the arena, but `config effective`
 	 * (and anything else reading cfg->config_doc this run) should still
-	 * see the catalog: block for whatever model they landed on. */
+	 * see the model_info: block for whatever model they landed on. */
 	doc = fyai_config_sync_catalog(cfg->gb,
 				       fyai_catalog_effective(cfg->catalog, cfg->gb),
 				       doc);

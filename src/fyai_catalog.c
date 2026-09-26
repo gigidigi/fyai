@@ -221,7 +221,7 @@ int fyai_catalog_import(struct fyai_ctx *ctx, const char *path)
 		return -1;
 	}
 	/*
-	 * A new catalogue can change or drop the read-only catalog: block
+	 * A new catalogue can change or drop the read-only model_info: block
 	 * (canonical_provider, open_source) on the currently configured
 	 * model, so re-derive it against the incoming catalogue rather than
 	 * whatever it was pinned against before.

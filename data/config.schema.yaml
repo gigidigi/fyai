@@ -931,7 +931,7 @@ properties:
         type: boolean
         default: false
         description: Print session token usage to stderr.
-  catalog:
+  model_info:
     type: object
     required: [name]
     description: >-
