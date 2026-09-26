@@ -188,13 +188,14 @@ Each branch owns:
 
 - its conversation head;
 - its stored configuration;
+- its provider and model catalogue;
 - the time it was created and the time of its current entry;
 - the directory it started in;
 - descriptive metadata;
 - agent metadata where the branch belongs to a sub-agent;
 - a branch-local reflog.
 
-The arena-wide model catalogue is shared, but user intent and conversation history are branch-local.
+Configuration, catalogue, and conversation history are all branch-local. A new branch starts with the catalogue of its start point.
 
 At the start of an invocation, the current branch is selected in this order:
 
@@ -383,6 +384,24 @@ Interactive equivalents include:
 ```
 
 Changing the model re-resolves provider, endpoint, API grammar, wire model identifier, context window, token limit, and credentials where appropriate.
+
+### The catalogue
+
+Each branch has its own provider and model catalogue. A branch that has none uses the catalogue built into `fyai`. Edit it as you edit the configuration:
+
+```sh
+fyai catalog get models/gpt-5.5/context_window
+fyai catalog set models/gpt-5.5/context_window 400000
+fyai catalog set providers/openai/models/gpt-5.5/pricing '{input: 1.25, output: 10}'
+fyai catalog delete models/old-model
+fyai catalog edit
+fyai catalog validate
+fyai catalog reset
+```
+
+A path is slash-separated. An item of a sequence is named by its index or by its name; a model that a provider offers is named by its `canonical_id`. A `set` on an item that does not exist adds it. Every change is checked against the catalogue schema (`fyai catalog schema`), and a change that fails it writes nothing.
+
+`fyai catalog update` runs `catalog_update/command`, `scrape-providers` by default, and takes the catalogue that it writes. `--provider NAME` replaces only that provider and the models that the scrape describes; `--curated` is passed to the command. The command gets only the provider keys that `catalog_update/credentials` names. In a session, `/catalog update` takes the same options and runs the command in a tile of the work pane. The session commits the catalogue when the command ends and no turn runs.
 
 `fyai context` reports the projected fill of the next request. The same
 projection is enforced: a prompt that cannot fit the model's context window is
@@ -974,6 +993,7 @@ A line beginning with `//` is sent to the model verbatim with one slash removed.
 | `/status` | Show model, provider, auth, context, and usage overview |
 | `/stats` | Show cumulative token usage for the selected conversation chain |
 | `/usage` | Show live subscription limits and credits |
+| `/catalog ...` | Inspect or edit the catalogue of the branch |
 | `/tools [agent] [--brief\|--full]` | List catalogue agent tools |
 | `/help` | List commands and settings |
 | `/exit`, `/quit` | Leave the session |
@@ -1090,7 +1110,7 @@ Global parsing stops at the first non-option. A known token is dispatched as a v
 | `compact [hint]` | Summarize into a new chain |
 | `context` | Report context fill |
 | `api [mode]` | Show or store API grammar |
-| `catalog ...` | Inspect catalogue data and agent tools |
+| `catalog ...` | Inspect, edit, or update the catalogue of the branch |
 | `agent TASK` | Run one transient sub-agent and print its final report |
 | `auth ...` | Manage provider authentication |
 | `secret ...` | Manage logical secrets |

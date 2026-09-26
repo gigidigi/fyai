@@ -161,8 +161,12 @@ The store is an open mapping. Put new branch state in the store, not in the
 entry. Build it with `fyai_branch_store_build()`, which starts from the stored
 mapping and thus keeps members that it does not know. An unchanged store must
 stay the same arena object, so a publish that moves only the head adds no copy.
-After a lost CAS, merge the store with `fyai_branch_store_merge()`: a member
-that this run did not change takes the concurrent value. A version 2 root is
+After a lost CAS, merge the store three ways with `fyai_branch_store_merge()`.
+It merges a mapping key by key and a sequence of named items by name. A value
+that both sides changed differently is a conflict: apply `branch/on_conflict`
+to it as to turns, and name each conflicting path. A head that only one side
+moved is not a conflict. `fyai_publish_root()` publishes through
+`fyai_publish_state()`; do not add a second reconciliation. A version 2 root is
 not read.
 
 Three operations adopt a published root: publish, reconciliation after a lost
@@ -249,6 +253,16 @@ structure fields in one `apply_config` pass. During model resolution, derive
 the endpoint, provider, and catalogue `max_tokens`. Do not persist these
 derived values. When the model changes, derive and persist the API grammar and
 URL for the new provider.
+
+Commit every catalogue change through `fyai_catalog_commit()`. It checks the
+document against `data/catalog.schema.yaml`, derives the `model_info` block
+again, and publishes to the store of the branch. `fyai catalog update` runs
+`catalog_update/command` as a child that keeps only the credentials that
+`catalog_update/credentials` names. Pass the names, not the values: the child
+keeps them when it removes the environment, so no key goes into an argument or
+an arena. The verb waits for the command. `/catalog update` runs it in a tile
+of the work pane through `fyai_tools_config_program()`, and the session
+commits the output between turns.
 
 Keep the informational `model_info` block synchronized on every configuration
 commit. Remove it when the selected model is not in the catalogue.

@@ -703,9 +703,19 @@ and to put ours on top are the same order.
 The default is `abort` because to change the order of a conversation without
 being asked is not a decision that a program should make.
 
-The store is merged member by member against the store that this run started
-from. A member that only they changed takes their value. A member that we
-changed keeps our value.
+A conversation that only one side moved is not a conflict: the publish takes
+that head. Only two sides that both added turns need `branch/on_conflict`.
+
+The store merges three ways against the store that this run started from. A
+value that only they changed takes their value. A mapping that both changed
+merges key by key, thus `fyai config set temperature` in one terminal and
+`fyai config set top_p` in another both stay. A sequence of named items, such
+as the models of the catalogue, merges item by item by `name` or
+`canonical_id`. A value that both changed to different values is a conflict,
+and `branch/on_conflict` decides it as it decides turns: `abort` writes nothing
+and names each conflicting path, and `rebase` or `merge` keeps the value of
+this command and says so. A branch without a catalogue merges against the
+embedded catalogue, which both sides started from.
 
 ## 9. Sub-agent branches
 
@@ -892,7 +902,8 @@ know is kept on each publish, merged, and exported. A new kind of branch state
 is a new member of the store, not a new key of the entry.
 
 The catalogue is part of the store, thus each branch has its own. `fyai catalog
-import` changes the current branch. A new branch takes the catalogue of its
+import`, `set`, `delete`, `edit`, `reset` and `update` change the current
+branch. A new branch takes the catalogue of its
 start point. A branch that is selected before it has an entry takes the
 catalogue of the branch that `HEAD` names. A branch without a catalogue uses the
 catalogue embedded in the program.
