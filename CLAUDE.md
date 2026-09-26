@@ -147,12 +147,23 @@ initialize each generic field explicitly.
 The durable root has this versioned shape:
 
 ```text
-{fyai: 2, catalog, HEAD, branches}
+{fyai: 3, HEAD, branches}
+branches/<name>: {head, updated, op, from, prev, store}
+store: {config, catalog, created, cwd, description, agent, import, ...}
 ```
 
-Each branch entry owns its conversation head and configuration. The root owns
-the catalogue. Do not use a sidecar configuration file. Do not use a
-root-level configuration value.
+A branch entry is one ref-log record. Its `store` holds the branch state that
+changes rarely: the configuration, the catalogue, and the provenance. Each
+branch owns its catalogue. Do not use a sidecar configuration file. Do not use
+a root-level configuration or catalogue value.
+
+The store is an open mapping. Put new branch state in the store, not in the
+entry. Build it with `fyai_branch_store_build()`, which starts from the stored
+mapping and thus keeps members that it does not know. An unchanged store must
+stay the same arena object, so a publish that moves only the head adds no copy.
+After a lost CAS, merge the store with `fyai_branch_store_merge()`: a member
+that this run did not change takes the concurrent value. A version 2 root is
+not read.
 
 Three operations adopt a published root: publish, reconciliation after a lost
 CAS, and `fyai_branches_refresh()`. Each operation must set
@@ -239,7 +250,7 @@ the endpoint, provider, and catalogue `max_tokens`. Do not persist these
 derived values. When the model changes, derive and persist the API grammar and
 URL for the new provider.
 
-Keep the informational `catalog` block synchronized on every configuration
+Keep the informational `model_info` block synchronized on every configuration
 commit. Remove it when the selected model is not in the catalogue.
 
 Validate at every ingestion point. `--set` and an explicit `--config` file are

@@ -122,8 +122,9 @@ not stable. A name stays correct after `gc`. If you give a numeric reference,
 ### 5.1 The ref log
 
 Every operation that publishes a branch appends an entry to that branch's own
-ref log. An entry keeps the head, the configuration, the time, the operation
-that made it and, for a rename, the name the branch had before. Publishing a
+ref log. An entry keeps the head, the store (the configuration, the catalogue
+and the description), the time, the operation that made it and, for a rename,
+the name the branch had before. Publishing a
 different branch does not move this one's ref-log indices.
 
 ```sh
@@ -244,11 +245,12 @@ fyai branch describe <name> [<text>] # set or clear the description
 last change, and a mark on the current branch.
 
 `fyai branch create` uses the start point for the **whole** state: the new
-branch gets the conversation *and* the configuration that were in force there,
+branch gets the conversation *and* the store - the configuration and the
+catalogue - that were in force there,
 as a start point does in `git`. Without a start point the current branch is the
 start point, which is what `git branch <new>` does with `HEAD`.
 
-For `<branch>@{N}` the configuration comes from that ref-log entry, thus a
+For `<branch>@{N}` the store comes from that ref-log entry, thus a
 branch made at a ref-log entry restores the settings of that moment as well as
 the turns.
 
@@ -701,6 +703,10 @@ and to put ours on top are the same order.
 The default is `abort` because to change the order of a conversation without
 being asked is not a decision that a program should make.
 
+The store is merged member by member against the store that this run started
+from. A member that only they changed takes their value. A member that we
+changed keeps our value.
+
 ## 9. Sub-agent branches
 
 Each sub-agent call makes a branch below the branch that started it:
@@ -843,49 +849,60 @@ fyai --branch main/agent:explore transcript
 
 ## 11. Storage format
 
-The arena root is a container mapping. Version 2 adds the branches:
+The arena root is a container mapping. Version 3 puts the state of a branch
+that changes rarely in a store under its entry:
 
 ```yaml
-fyai: 2
-catalog: <mapping|null>       # for all branches
+fyai: 3
 HEAD: main                    # the name of the current branch
 branches:
   main:
-    config: <mapping|null>
-    head:   <turn|null>
-    created: <timestamp>          # the first publication of the branch
+    head:    <turn|null>
     updated: <timestamp>          # the publication of this entry
-    cwd:    <string|null>         # the directory the branch started in
-    description: <string|null>
-    op:     <string>              # what made this entry (turn, merge, ...)
-    from:   <string|null>         # the previous name, on a rename
-    prev:   <branch-entry|null>
+    op:      <string>             # what made this entry (turn, merge, ...)
+    from:    <string|null>        # the previous name, on a rename
+    prev:    <branch-entry|null>
+    store:
+      config:  <mapping>
+      catalog: <mapping>          # absent: the embedded catalogue
+      created: <timestamp>        # the first publication of the branch
+      cwd:     <string>           # the directory the branch started in
+      description: <string>
   main/explore-1:
-    config: <mapping|null>
-    head:   <turn|null>
-    created: <timestamp>
+    head:    <turn|null>
     updated: <timestamp>
-    cwd:    <string|null>
-    agent:  { name: <string>, description: <string>,
-              context: <fork|fresh>, persona: <string|null> }
-    op:     <string>
-    prev:   <branch-entry|null>
+    op:      <string>
+    prev:    <branch-entry|null>
+    store:
+      config:  <mapping>
+      created: <timestamp>
+      cwd:     <string>
+      agent:   { name: <string>, description: <string>,
+                 context: <fork|fresh>, persona: <string|null> }
 prev: <root|null>             # the reflog of the arena
 ```
 
-The `config` and `head` keys are in the branch entry. The catalogue stays at the
-root level, because it is an immutable copy of provider data and not a statement
-of intent.
+An entry is one record of the ref log: the head, the time, the operation and
+the link to the entry before it. The store holds everything else. A publish
+that changes only the head makes a new entry that refers to the same store,
+thus each entry between two configuration changes shares one stored object.
+
+The store is an open mapping. A member that this version of `fyai` does not
+know is kept on each publish, merged, and exported. A new kind of branch state
+is a new member of the store, not a new key of the entry.
+
+The catalogue is part of the store, thus each branch has its own. `fyai catalog
+import` changes the current branch. A new branch takes the catalogue of its
+start point. A branch that is selected before it has an entry takes the
+catalogue of the branch that `HEAD` names. A branch without a catalogue uses the
+catalogue embedded in the program.
 
 `created` and `cwd` describe where the branch began: the first publication sets
 them and every later publication carries them. `updated` is the time of the
 entry that holds it, so it advances on every publication, a configuration
 change included. `resume` orders the sessions by it.
 
-An entry written before this shape holds one `created` member, which is the
-time of that publication: it reads as `updated`, and the creation time of such
-a branch is not known. The first publication onto it adopts that value as the
-creation time and records the directory.
+An arena of version 2 is not read. Run `fyai init --force` to start again.
 
 There are two reflog chains. The `prev` key of the root links to the previous
 root, and gives the history of the full arena. The `prev` key of a branch entry

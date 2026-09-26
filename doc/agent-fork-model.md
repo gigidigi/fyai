@@ -135,6 +135,7 @@ The `tool/run` request of an executed child has a `spawn` mapping.
 | --- | --- |
 | `config` | `cfg->config_doc`, the merged configuration of the run |
 | `branch_config` | the configuration of the parent branch |
+| `branch_catalog` | the raw arena value of the catalogue of the parent branch |
 | `fork` | `{branch, head}`: the parent branch and the raw value of its head |
 | `parent` | the agent execution of the parent |
 | `api_key` | a `--api-key` value; never stored |
@@ -142,7 +143,9 @@ The `tool/run` request of an executed child has a `spawn` mapping.
 The child checks `config` against the schema, which rejects a raw key, and
 adopts it before it parses the call. The call is in the grammar of that
 configuration. `fyai_agent_run()` adopts the branch configuration and the fork
-point after it reopens the arena.
+point after it reopens the arena. The child shares the arena, thus the
+catalogue is sent as its arena value and not as a copy. The child accepts it
+only if it is a mapping in the arena.
 
 ### The fork point
 

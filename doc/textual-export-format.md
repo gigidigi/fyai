@@ -1,7 +1,7 @@
 # Textual export format
 
 `fyai export` writes a branch as one Markdown document. The document contains
-the provider-independent conversation and its configuration history. It omits
+the provider-independent conversation and the history of the branch store. It omits
 provider request IDs, tool-call IDs, timestamps, and stream data.
 
 Export writes to standard output or `-o <file>`. Import reads from standard
@@ -23,7 +23,7 @@ column zero. The content is one YAML mapping.
 
 ```md
 <!-- meta:yaml
-format: 1
+format: 2
 kind: conversation
 -->
 ```
@@ -39,28 +39,40 @@ The document uses these structural directives:
 - `message` contains one message role and is followed by its text.
 - `tool_call` contains one tool name, its arguments, and its result.
 - `compact` records a compaction operation.
-- `config` contains the complete initial configuration.
-- `config-update` contains a later configuration change.
+- `store` contains the complete initial branch store.
+- `store-update` contains a later change of the branch store.
 
 Publish and turn directives preserve boundaries that cannot be derived from
 messages. Import replays these boundaries in order.
 
-## Configuration
+## Branch store
 
-The first publish contains a `config` directive. A later publish can contain a
-`config-update` mapping. Each update key is a slash path, as used by
-`fyai config set`:
+The first publish contains a `store` directive with the branch store: the
+configuration, the catalogue, the description and every other member. A later
+publish can contain a `store-update` mapping. Each update key is a slash path
+into the store. A configuration key is below `config/`, as `fyai config set`
+names it:
 
 ```yaml
-kind: config-update
-config-update:
-  temperature: 0.7
-  display/tool_detail: full
-  agent/timeout_ms: null
+kind: store-update
+store-update:
+  config/temperature: 0.7
+  config/display/tool_detail: full
+  config/agent/timeout_ms: null
+  description: the parser work
 ```
 
 A null value removes the key. A sequence is one value and is replaced as a
 whole.
+
+Export omits `cwd`, `created`, `agent` and `import`. These members describe the
+arena of the export, and import makes them again. A branch that has no
+catalogue exports none. Import keeps the configuration and the catalogue of the
+destination branch when the document holds none.
+
+Import also reads format 1. There, `config` contains the complete initial
+configuration and `config-update` a later change, with paths relative to the
+configuration.
 
 ## Messages and tool calls
 
