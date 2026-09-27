@@ -69,7 +69,7 @@ void fyai_usage(FILE *fp, const char *progname, const char *color_mode)
 	ITEM("transcript [opts]", "Human-digestible conversation transcript");
 	ITEM("history [opts]", "Alias for transcript");
 	ITEM("display [opts]", "Alias for transcript");
-	ITEM("export [-o file]", "Export the conversation as Markdown (stdout by default)");
+	ITEM("export [-o file] [ref]", "Export the conversation as Markdown (stdout by default)");
 	ITEM("import [-i file]", "Import a conversation (stdin by default)");
 	ITEM("resume [branch]", "Resume a session (--last, --all; no argument picks)");
 	ITEM("replay [opts]", "Re-issue the branch's user turns against the current state");
@@ -345,6 +345,7 @@ static int configure_export(int argc, char **argv, struct fyai_cfg *cfg)
 	int i;
 
 	args->path = NULL;
+	args->ref = NULL;
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-o") || !strcmp(argv[i], "--output")) {
 			if (++i >= argc) {
@@ -354,15 +355,20 @@ static int configure_export(int argc, char **argv, struct fyai_cfg *cfg)
 			args->path = argv[i];
 			continue;
 		}
-		fyai_cfg_error(cfg, "export: unknown option '%s'", argv[i]);
-		return -1;
+		if (argv[i][0] == '-' || args->ref) {
+			fyai_cfg_error(cfg, "export: unknown option '%s'",
+				       argv[i]);
+			return -1;
+		}
+		args->ref = argv[i];
 	}
 	return 0;
 }
 
 static int execute_export(struct fyai_ctx *ctx)
 {
-	return fyai_export_view(ctx, ctx->cfg->cmd.args.export.path);
+	return fyai_export_view(ctx, ctx->cfg->cmd.args.export.path,
+				ctx->cfg->cmd.args.export.ref);
 }
 
 static int configure_import(int argc, char **argv, struct fyai_cfg *cfg)
@@ -2474,10 +2480,12 @@ static const struct fyai_verb fyai_verbs[FYAI_VERB_COUNT] = {
 		.name	   = "export",
 		.configure = configure_export,
 		.execute   = execute_export,
-		.synopsis  = "export [-o file]",
+		.synopsis  = "export [-o file] [<branch>|<branch>@{N}]",
 		.help      = "Write the active branch as the textual export format.\n"
 			     "Output goes to standard output; -o writes a file.\n"
-			     "Use --branch/-b to export a branch other than the active one.\n",
+			     "Use --branch/-b to export a branch other than the active one.\n"
+			     "A reference exports the branch as it was at that ref-log\n"
+			     "entry: main@{1} is main one entry ago.\n",
 		.flags	   = FYAIVF_BATCH | FYAIVF_NO_REQUESTS |
 			     FYAIVF_NEEDS_TRANSIENT_BUILDER,
 	},

@@ -34,7 +34,8 @@ size_t fyai_display_source_rows(const struct fyai_cfg *cfg, const char *md,
 				size_t len, size_t width);
 /* Repaint recent stored exchanges at the current width. */
 int fyai_display_repaint(struct fyai_ctx *ctx, int rows);
-int fyai_export_view(struct fyai_ctx *ctx, const char *path);
+int fyai_export_view(struct fyai_ctx *ctx, const char *path,
+		     const char *ref);
 int fyai_import_view(struct fyai_ctx *ctx, const char *path);
 int fyai_replay_view(struct fyai_ctx *ctx, bool ignore_compact);
 int fyai_dump_view(struct fyai_ctx *ctx);

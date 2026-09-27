@@ -635,7 +635,8 @@ err:
 	return -1;
 }
 
-int fyai_export_view(struct fyai_ctx *ctx, const char *path)
+int fyai_export_view(struct fyai_ctx *ctx, const char *path,
+		     const char *ref)
 {
 	struct fyai_turn_stack stack;
 	struct fy_generic_builder *gb;
@@ -649,6 +650,7 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 	int rc;
 	int close_rc;
 	fy_generic entry;
+	fy_generic start;
 	fy_generic previous_store;
 	fy_generic store;
 	fy_generic previous_head;
@@ -662,6 +664,10 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 	gb = ctx->transient_gb;
 	assert(gb);
 	rc = -1;
+	/* A reference names the ref-log entry that the export ends at. */
+	start = ctx->branch_prev;
+	if (ref && fyai_resolve_ref_entry(ctx, ref, &start))
+		return -1;
 	/* No path is stdout, so an export composes with a pipe by default. */
 	conversation_path = path ? path : "standard output";
 	if (path) {
@@ -673,8 +679,7 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path)
 		fy_mapping(gb, "format", 2LL, "kind", "conversation"));
 	fyai_error_check(ctx, !rc, out, "export: cannot write the document header");
 	fputc('\n', fp);
-	for (entry = ctx->branch_prev; fy_is_valid(entry);
-	     entry = branch.prev) {
+	for (entry = start; fy_is_valid(entry); entry = branch.prev) {
 		decoded = fyai_branch_decode(entry, &branch);
 		fyai_error_check(ctx, decoded, out,
 				 "export: cannot read branch history");

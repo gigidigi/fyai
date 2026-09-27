@@ -152,6 +152,7 @@ struct fyai_display_args {
 
 struct fyai_export_args {
 	const char *path;	/* NULL is standard output */
+	const char *ref;	/* <branch>[@{N}]; NULL is the active branch */
 };
 
 /* `fyai resume`: continue a stored session instead of starting a fresh one. */

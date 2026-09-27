@@ -1022,6 +1022,44 @@ err_out:
 	return -1;
 }
 
+int fyai_resolve_ref_entry(struct fyai_ctx *ctx, const char *spec,
+			   fy_generic *entryp)
+{
+	char parsed[256];
+	struct fyai_branch b;
+	const char *name;
+	long long n, i;
+	bool found, ok;
+	int kind;
+
+	*entryp = fy_invalid;
+	fyai_error_check(ctx, spec && *spec, err_out, "empty reference");
+	kind = fyai_ref_parse(spec, parsed, sizeof(parsed), &n);
+	fyai_error_check(ctx, kind == 0 || kind == '@', err_out,
+			 "'%s' does not name a ref-log entry; use <branch> or "
+			 "<branch>@{N}", spec);
+	name = !strcmp(parsed, "HEAD") ?
+	       fy_sprintfa("%s", fyai_ctx_branch(ctx)) : parsed;
+	fyai_error_check(ctx, fyai_branch_name_ref_valid(name), err_out,
+			 "invalid branch name '%s'", name);
+	found = fyai_branch_lookup(ctx->arena_branches, name, &b);
+	fyai_error_check(ctx, found, err_out, "no such branch '%s'", name);
+	for (i = 0; kind == '@' && i < n; i++) {
+		/* A stored link is data: check it before following it. */
+		ok = fyai_branch_entry_contained(ctx->durable_allocator,
+						 b.prev, 1);
+		if (ok)
+			ok = fyai_branch_decode(b.prev, &b);
+		fyai_error_check(ctx, ok, err_out,
+				 "%s: ref log has no entry %lld", name, n);
+	}
+	*entryp = b.entry;
+	return 0;
+
+err_out:
+	return -1;
+}
+
 /* Build the rows for `branch list` in the transient builder. */
 static fy_generic branch_list_data(struct fyai_ctx *ctx, const char *under,
 				   bool all)

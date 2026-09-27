@@ -241,6 +241,14 @@ int fyai_resolve_ref_state(struct fyai_ctx *ctx, const char *spec,
 			   fy_generic *headp, fy_generic *storep);
 
 /*
+ * Resolve "<branch>" or "<branch>@{N}" to the ref-log entry it names.
+ * "<branch>~N" names a turn, not an entry, and is refused. Returns 0 with
+ * *entryp set, -1 with a diagnostic raised.
+ */
+int fyai_resolve_ref_entry(struct fyai_ctx *ctx, const char *spec,
+			   fy_generic *entryp);
+
+/*
  * Split a reference into its branch name and its suffix. Returns 0 for a bare
  * name, '~' for "~N" or a run of '^', '@' for "@{N}", or -1 when the spec is
  * malformed. @buf receives the branch part and @np the count.
