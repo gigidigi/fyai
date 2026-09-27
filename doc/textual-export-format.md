@@ -16,6 +16,17 @@ fyai import -i conversation.md
 On export, `--branch`/`-b` selects the source. On import, it selects an empty
 destination branch. Import without this option replaces the active branch.
 
+Export also takes a reference to one entry of a ref log: `<branch>` or
+`<branch>@{N}`. It writes the branch as it was at that entry, with the
+history that leads to it. `fyai list reflog` shows the entries.
+
+```sh
+fyai export -o before.md 'main@{1}'
+```
+
+A `<branch>~N` reference names a turn and not a ref-log entry, thus export
+refuses it.
+
 ## Directives
 
 A directive starts with `<!-- meta:yaml` at column zero and ends with `-->` at
