@@ -65,9 +65,9 @@ from screen import Screen, rows_at
 def same(a, b):
     """Equal rows, or rows that differ only in the activity mark of the
     status gutter or elapsed time: two runs meet them in other phases."""
-    a, b = a.rstrip(), b.rstrip()
-    a = re.sub(r" \d+s(?=\s|$)", " TIME", a)
-    b = re.sub(r" \d+s(?=\s|$)", " TIME", b)
+    # A busy turn shows its elapsed time; a run that has ended shows none.
+    a = re.sub(r" \d+(?:m\d\d)?s(?=\s|$)", "", a).rstrip()
+    b = re.sub(r" \d+(?:m\d\d)?s(?=\s|$)", "", b).rstrip()
     if a == b:
         return True
     gutter = 2
