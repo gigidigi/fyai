@@ -2247,7 +2247,7 @@ fy_generic fyai_auth_models(struct fyai_ctx *ctx,
 	models = fy_get(doc, "models");
 	if (!fy_is_sequence(models))
 		goto err;
-	providers = fy_sequence(gb, fy_value(gb, "**chatgpt**"));
+	providers = fy_sequence(gb, fy_value(gb, "chatgpt"));
 	fy_foreach(m, models) {
 		slug = fy_get(m, "slug", "");
 		if (!*slug)
@@ -2256,8 +2256,8 @@ fy_generic fyai_auth_models(struct fyai_ctx *ctx,
 			continue;
 		active = ctx->cfg->model && fy_equal(ctx->cfg->model, slug);
 		item = fy_null_filtered_mapping(gb,
-			"name", fy_value(gb, active ?
-					     fy_sprintfa("**%s**", slug) : slug),
+			"name", fy_value(gb, slug),
+			"active", active,
 			"providers", providers,
 			"context_window", fy_get(m, "context_window", 0LL),
 			"max_output_tokens", fy_get(m, "max_output_tokens", 0LL),
@@ -2324,37 +2324,6 @@ fy_generic fyai_auth_status_data(struct fyai_ctx *ctx,
 	return doc;
 }
 
-int fyai_auth_status(struct fyai_ctx *ctx, bool json, bool info)
-{
-	fy_generic doc;
-	const char *out;
-	doc = fyai_auth_status_data(ctx, ctx->transient_gb, info || json);
-	if (fy_is_invalid(doc))
-		return -1;
-	/*
-	 * Column overrides: the keys whose humanized form is not the label we
-	 * want, plus the humanized `status` value (signed_in -> "Signed in").
-	 * fy_mapping() without a builder is frame-local storage, so the
-	 * renderopts must be built here, in the frame that renders them.
-	 */
-	if (!json)
-		return fyai_generic_to_markdown(ctx,
-			fy_mapping(
-				"title", "Authentication",
-				"columns", fy_mapping(
-					"status", fy_mapping("format", "humanize"),
-					"account_id", fy_mapping("name", "Account"),
-					"plan", fy_mapping("name", "Subscription"),
-					"expires_at", fy_mapping("name", "Token expires"),
-					"fedramp", fy_mapping("name", "FedRAMP account"),
-					"storage", fy_mapping("name", "Credential storage"))),
-			doc);
-	out = emit_request_body(ctx->transient_gb, doc);
-	if (out)
-		fyai_result(ctx, "%s\n", out);
-	return out ? 0 : -1;
-}
-
 static const char *limit_reset_local(fy_generic window, char *buf, size_t size)
 {
 	long long resets;
@@ -2372,7 +2341,8 @@ static const char *limit_reset_local(fy_generic window, char *buf, size_t size)
 	return buf;
 }
 
-int fyai_auth_usage(struct fyai_ctx *ctx, bool json)
+int fyai_auth_usage(struct fyai_ctx *ctx, struct fy_generic_builder *out_gb,
+		    bool raw, fy_generic *datap)
 {
 	struct auth_http r = {};
 	struct curl_slist *headers = NULL;
@@ -2383,6 +2353,7 @@ int fyai_auth_usage(struct fyai_ctx *ctx, bool json)
 	char primary_reset[64], secondary_reset[64];
 	int rc = -1;
 
+	*datap = fy_invalid;
 	ctx->cfg->chatgpt_auth = true;
 	if (auth_load(ctx, &ctx->auth)) {
 		fyai_error(ctx, "openai: not logged in; run `fyai auth openai login`");
@@ -2412,11 +2383,8 @@ int fyai_auth_usage(struct fyai_ctx *ctx, bool json)
 		fyai_error(ctx, "openai: malformed usage response");
 		goto out;
 	}
-	if (json) {
-		const char *out_json = emit_request_body(gb, doc);
-		if (!out_json)
-			goto out;
-		fyai_result(ctx, "%s\n", out_json);
+	if (raw) {
+		*datap = fy_gb_internalize(out_gb, doc);
 	} else {
 		rate = fy_get(doc, "rate_limit");
 		primary = fy_get(rate, "primary_window");
@@ -2449,10 +2417,10 @@ int fyai_auth_usage(struct fyai_ctx *ctx, bool json)
 			"secondary_resets", limit_reset_local(secondary, secondary_reset,
 							   sizeof(secondary_reset)),
 			"credit_balance", credit_balance);
-		if (fyai_generic_to_markdown(ctx,
-			fy_mapping("title", "OpenAI subscription usage"), display))
-			goto out;
+		*datap = fy_gb_internalize(out_gb, display);
 	}
+	fyai_error_check(ctx, fy_is_valid(*datap), out,
+			 "openai: cannot store the usage");
 	rc = 0;
 out:
 	free(r.data);
@@ -2487,7 +2455,6 @@ int fyai_auth_logout(struct fyai_ctx *ctx)
 	fyai_error_check(ctx, !file_rc && !keyring_rc, err_out,
 			 "could not remove stored authentication");
 
-	fyai_result(ctx, "auth: logged out\n");
 	return 0;
 
 err_out:
@@ -2574,52 +2541,6 @@ err_destroy:
 err_out:
 	auth_unlock(ctx, lockfd);
 	return -1;
-}
-
-int fyai_auth_execute(struct fyai_ctx *ctx)
-{
-	struct fyai_auth_args *a = &ctx->cfg->cmd.args.auth;
-	int rc = -1;
-
-	if (fy_not_equal(a->provider, "openai")) {
-		fyai_error(ctx, "provider '%s' is not supported yet", a->provider);
-		return -1;
-	}
-
-	switch (a->command) {
-	case FYAI_AUTH_STATUS:
-	case FYAI_AUTH_INFO:
-		rc = fyai_auth_status(ctx, a->json, a->command == FYAI_AUTH_INFO);
-		if (rc)
-			fyai_error(ctx, "status failed");
-		break;
-
-	case FYAI_AUTH_USAGE:
-		rc = fyai_auth_usage(ctx, a->json);
-		if (rc)
-			fyai_error(ctx, "usage failed");
-		break;
-
-	case FYAI_AUTH_LOGOUT:
-		rc = fyai_auth_logout(ctx);
-		if (rc)
-			fyai_error(ctx, "logout failed");
-		break;
-
-	case FYAI_AUTH_LOGIN:
-		rc = fyai_auth_login(ctx, a->device_code, a->no_browser,
-				     a->manual);
-		if (rc)
-			fyai_error(ctx, "login failed");
-		break;
-
-	default:
-		/* impossible */
-		rc = -1;
-		break;
-	}
-
-	return rc;
 }
 
 void fyai_auth_cleanup(struct fyai_ctx *ctx)

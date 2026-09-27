@@ -93,7 +93,9 @@ int fyai_catalog_commit(struct fyai_ctx *ctx, fy_generic doc,
 
 /* verb backends */
 int fyai_catalog_import(struct fyai_ctx *ctx, const char *path);
-int fyai_catalog_get(struct fyai_ctx *ctx, const char *path);
+/* The value at the slash path @path of the catalogue of the branch. */
+int fyai_catalog_value(struct fyai_ctx *ctx, const char *path,
+		       fy_generic *valuep);
 int fyai_catalog_set(struct fyai_ctx *ctx, const char *path, const char *value);
 int fyai_catalog_delete(struct fyai_ctx *ctx, const char *path);
 int fyai_catalog_validate(struct fyai_ctx *ctx);
@@ -124,9 +126,22 @@ bool fyai_catalog_update_done(
 int fyai_catalog_update_collect(struct fyai_catalog_update_request *request);
 void fyai_catalog_update_cancel(struct fyai_catalog_update_request *request);
 void fyai_catalog_update_destroy(struct fyai_catalog_update_request *request);
+/* Write the catalogue of the branch as YAML to the file @path. */
 int fyai_catalog_export(struct fyai_ctx *ctx, const char *path);
-int fyai_catalog_show(struct fyai_ctx *ctx);
-int fyai_catalog_list(struct fyai_ctx *ctx, const char *what);
-int fyai_catalog_tools(struct fyai_ctx *ctx, const char *agent, bool full);
+/*
+ * The catalogue of the branch, else the embedded snapshot; a notice says
+ * which. The value is held by the arena or by the process.
+ */
+int fyai_catalog_document(struct fyai_ctx *ctx, fy_generic *catp);
+/* The models, or with @what "providers" the providers, of the catalogue. */
+fy_generic fyai_catalog_list_data(struct fyai_ctx *ctx,
+				  struct fy_generic_builder *gb,
+				  const char *what);
+/*
+ * The tools of the coding agent @agent, or of fyai itself, as Markdown; the
+ * caller frees it. NULL with the cause raised.
+ */
+char *fyai_catalog_tools_markdown(struct fyai_ctx *ctx, const char *agent,
+				  bool full);
 
 #endif

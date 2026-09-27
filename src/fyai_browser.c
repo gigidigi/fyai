@@ -1958,24 +1958,50 @@ void fyai_browser_step(struct fyai_ctx *ctx)
 				break;
 		}
 		rc = fyai_session_branch_switch(ctx, b->target, false, b->resume);
+		/* A session the picker selected is named by the header. */
+		if (!rc && !b->resume)
+			(void)fyai_result(ctx, "switched to branch %s\n",
+					  b->target);
 		if (!rc)
 			b->picked = true;
 		break;
 	case 'n': case 'N':
 		rc = fyai_branch_create(ctx, b->target, *b->input ? b->input : NULL,
 				NULL, false);
+		if (!rc)
+			(void)fyai_result(ctx, "created branch %s\n", b->target);
 		if (!rc && action == 'N')
 			rc = fyai_session_branch_switch(ctx, b->target, false,
 							b->resume);
+		if (!rc && action == 'N' && !b->resume)
+			(void)fyai_result(ctx, "switched to branch %s\n",
+					  b->target);
 		break;
-	case 'r': rc = fyai_branch_rename(ctx, b->target, b->reference); break;
-	case 'd': rc = fyai_branch_delete(ctx, b->target, true); break;
+	case 'r':
+		rc = fyai_branch_rename(ctx, b->target, b->reference);
+		if (!rc)
+			(void)fyai_result(ctx, "renamed %s to %s\n", b->target,
+					  b->reference);
+		break;
+	case 'd':
+		rc = fyai_branch_delete(ctx, b->target, true);
+		if (!rc)
+			(void)fyai_result(ctx, "deleted branch %s\n",
+					  b->target);
+		break;
 	case 'e': rc = fyai_branch_describe(ctx, b->target, b->input); break;
 	case 'm': case 'b':
 		rc = fyai_branch_join(ctx, b->target,
 			action == 'm' ? FYAI_JOIN_MERGE : FYAI_JOIN_REBASE, false);
 		break;
-	case 'x': rc = fyai_branch_reset(ctx, b->reference); break;
+	case 'x':
+		rc = fyai_branch_reset(ctx, b->reference);
+		if (!rc)
+			(void)fyai_result(ctx, "%s is now at %s; the previous "
+					  "head is %s@{1}\n",
+					  fyai_ctx_branch(ctx), b->reference,
+					  fyai_ctx_branch(ctx));
+		break;
 	}
 report:
 	if (!rc) {

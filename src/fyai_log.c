@@ -125,18 +125,19 @@ static int fyai_log_clear_target(struct fyai_ctx *ctx, const char *target)
 	return fyai_log_truncate(ctx, target);
 }
 
-static void fyai_log_print(struct fyai_ctx *ctx)
+fy_generic fyai_log_status_data(struct fyai_ctx *ctx,
+				struct fy_generic_builder *gb)
 {
 	const struct fyai_cfg *cfg = ctx->cfg;
 
-	fyai_result(ctx, "logging: wire %s, stream %s, conversation %s, mcp %s\n",
-	       cfg->wire_logging ? "on" : "off",
-	       cfg->stream_logging ? "on" : "off",
-	       cfg->conversation_logging ? "on" : "off",
-	       cfg->mcp_logging ? "on" : "off");
+	return fy_mapping(gb,
+		"wire", cfg->wire_logging,
+		"stream", cfg->stream_logging,
+		"conversation", cfg->conversation_logging,
+		"mcp", cfg->mcp_logging);
 }
 
-static void fyai_log_set(struct fyai_cfg *cfg, const char *target, bool on)
+void fyai_log_set(struct fyai_cfg *cfg, const char *target, bool on)
 {
 	if (!strcmp(target, "wire") || !strcmp(target, "all"))
 		cfg->wire_logging = on;
@@ -148,72 +149,25 @@ static void fyai_log_set(struct fyai_cfg *cfg, const char *target, bool on)
 		cfg->mcp_logging = on;
 }
 
-int fyai_log_control(struct fyai_ctx *ctx, const char *arg)
+int fyai_log_view(struct fyai_ctx *ctx, const char *target)
 {
-	struct fyai_cfg *cfg = ctx->cfg;
-	char first[32], second[32], extra[2];
-	const char *target, *action;
-	int n;
+	if (strcmp(target, "all"))
+		return fyai_log_view_target(ctx, target);
+	if (fyai_log_view_target(ctx, "wire") ||
+	    fyai_log_view_target(ctx, "stream") ||
+	    fyai_log_view_target(ctx, "conversation") ||
+	    fyai_log_view_target(ctx, "mcp"))
+		return -1;
+	return 0;
+}
 
-	if (!arg || !*arg) {
-		fyai_log_print(ctx);
-		return 0;
-	}
-
-	first[0] = second[0] = extra[0] = '\0';
-	n = sscanf(arg, "%31s %31s %1s", first, second, extra);
-	if (n < 1 || n > 2 || extra[0]) {
-		fyai_error(ctx, "use [wire|stream|conversation|mcp|all] start|stop|clear|view");
+int fyai_log_clear_log(struct fyai_ctx *ctx, const char *target)
+{
+	if (fyai_log_clear_target(ctx, target)) {
+		fyai_error(ctx, "clear failed");
 		return -1;
 	}
-
-	if (!strcmp(first, "wire") || !strcmp(first, "stream") ||
-	    !strcmp(first, "conversation") || !strcmp(first, "mcp") ||
-	    !strcmp(first, "all")) {
-		target = first;
-		action = n == 2 ? second : "";
-	} else {
-		if (n == 2) {
-			fyai_error(ctx, "use [wire|stream|conversation|mcp|all] start|stop|clear|view");
-			return -1;
-		}
-		target = "all";
-		action = first;
-	}
-
-	if (!strcmp(action, "start") || !strcmp(action, "on")) {
-		fyai_log_set(cfg, target, true);
-		fyai_log_print(ctx);
-		return 0;
-	}
-	if (!strcmp(action, "stop") || !strcmp(action, "off")) {
-		fyai_log_set(cfg, target, false);
-		fyai_log_print(ctx);
-		return 0;
-	}
-	if (!strcmp(action, "clear")) {
-		if (fyai_log_clear_target(ctx, target)) {
-			fyai_error(ctx, "clear failed");
-			return -1;
-		}
-		fyai_result(ctx, "logging: cleared %s\n", target);
-		return 0;
-	}
-	if (!strcmp(action, "view")) {
-		if (!strcmp(target, "all")) {
-			if (fyai_log_view_target(ctx, "wire") ||
-			    fyai_log_view_target(ctx, "stream") ||
-			    fyai_log_view_target(ctx, "conversation") ||
-			    fyai_log_view_target(ctx, "mcp"))
-				return -1;
-		} else if (fyai_log_view_target(ctx, target)) {
-			return -1;
-		}
-		return 0;
-	}
-
-	fyai_error(ctx, "use [wire|stream|conversation|mcp|all] start|stop|clear|view");
-	return -1;
+	return 0;
 }
 
 int fyai_log_generic(struct fyai_ctx *ctx, const char *name, fy_generic doc)

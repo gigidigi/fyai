@@ -185,4 +185,28 @@ int fyai_config_messages_gate(struct fyai_cfg *cfg);
 int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[]);
 void fyai_config_cleanup(struct fyai_cfg *cfg);
 
+/*
+ * Select the branch that cfg->cmd.args.resume names before the configuration
+ * loads. With none, the picker selects in the session.
+ */
+int fyai_config_select_resume(struct fyai_cfg *cfg);
+
+/*
+ * Set @key to @value in the session layer of the configuration: this session
+ * uses it, and nothing stores it. The merged document is checked against the
+ * schema first; a failure changes nothing. Returns 0, or -1 with the cause
+ * raised.
+ */
+int fyai_config_session_set(struct fyai_ctx *ctx, const char *key,
+			    fy_generic value);
+
+/*
+ * True when a session changes @path for itself: the schema marks the key, or
+ * a group above it, with `x-fyai-scope: session`.
+ */
+bool fyai_config_session_scoped(const char *path);
+
+/* The node of the configuration schema at the slash path @path. */
+fy_generic fyai_config_schema_node(const char *path);
+
 #endif

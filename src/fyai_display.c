@@ -3871,6 +3871,25 @@ err_out:
 	return -1;
 }
 
+int fyai_display_foreach_turn(struct fyai_ctx *ctx,
+			      const struct fyai_turn_selector_args *sel,
+			      int (*fn)(void *arg, fy_generic turn), void *arg)
+{
+	struct fyai_turn_stack stack;
+	size_t lo, hi, i;
+	int rc;
+
+	memset(&stack, 0, sizeof(stack));
+	rc = fyai_turn_stack_init(&stack, ctx->last_message, fy_invalid);
+	fyai_error_check(ctx, !rc, out, "could not read the conversation");
+	fyai_exchange_window(sel, &stack, &lo, &hi);
+	for (i = lo; !rc && i < hi; i++)
+		rc = fn(arg, stack.items[i]);
+out:
+	fyai_turn_stack_cleanup(&stack);
+	return rc ? -1 : 0;
+}
+
 int fyai_display_view(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;

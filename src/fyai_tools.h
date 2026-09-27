@@ -105,8 +105,16 @@ bool fyai_tools_focus_tile(struct fyai_ctx *ctx, struct fytim_surface *sf);
 /* Focus the prompt without changing pane geometry. */
 void fyai_tools_focus_prompt(struct fyai_ctx *ctx);
 /* List or terminate live shell sessions and sub-agents. */
-int fyai_tools_sessions(struct fyai_ctx *ctx);
-int fyai_tools_kill(struct fyai_ctx *ctx, const char *name);
+/* The live shell sessions and sub-agents: name, kind, and state, in @gb. */
+fy_generic fyai_tools_sessions_data(struct fyai_ctx *ctx,
+				    struct fy_generic_builder *gb);
+/*
+ * Stop the live shell session or sub-agent @name, or close its side-question
+ * panel. *@actionp says which: "stopping shell", "stopping agent", or
+ * "closed btw panel".
+ */
+int fyai_tools_kill(struct fyai_ctx *ctx, const char *name,
+		    const char **actionp);
 /* Return the pane and keyboard focus to the prompt. */
 void fyai_tools_unzoom(struct fyai_ctx *ctx);
 /* Start a user-owned TTY shell in the work pane. */
@@ -175,7 +183,12 @@ int fyai_mcp_refresh(struct fyai_ctx *ctx);
 int fyai_mcp_start(struct fyai_ctx *ctx);
 bool fyai_mcp_settled(struct fyai_ctx *ctx);
 void fyai_mcp_publish_tools(struct fyai_ctx *ctx);
-int fyai_mcp_status(struct fyai_ctx *ctx);
+/*
+ * The live MCP connections: server, state, transport, auth, tools, expiry,
+ * endpoint, and last error, in @gb. An empty sequence with none.
+ */
+fy_generic fyai_mcp_status_data(struct fyai_ctx *ctx,
+				struct fy_generic_builder *gb);
 int fyai_mcp_login(struct fyai_ctx *ctx, const char *name);
 int fyai_mcp_logout(struct fyai_ctx *ctx, const char *name);
 fy_generic fyai_mcp_tools(struct fyai_ctx *ctx);

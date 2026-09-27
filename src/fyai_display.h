@@ -108,4 +108,12 @@ void fyai_emit_tool_call(struct fyai_ctx *ctx, FILE *mf,
 			 struct fyai_md_blocks *blocks);
 int fyai_tool_preview_lines(const struct fyai_cfg *cfg, const char *name);
 
+/*
+ * Call @fn for each stored turn of the exchanges that @sel selects, oldest
+ * first. A nonzero return of @fn stops the walk. Returns 0, or -1.
+ */
+int fyai_display_foreach_turn(struct fyai_ctx *ctx,
+			      const struct fyai_turn_selector_args *sel,
+			      int (*fn)(void *arg, fy_generic turn), void *arg);
+
 #endif

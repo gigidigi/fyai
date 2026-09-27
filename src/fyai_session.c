@@ -56,6 +56,7 @@
 #include "fyai_browser.h"
 #include "fyai_agents.h"
 #include "fyai_session.h"
+#include "fyai_cmd.h"
 #include "fyai_stream.h"
 #include "fyai_ui.h"
 #include "fyai_storage.h"
@@ -121,7 +122,6 @@ int fyai_session_clear(struct fyai_ctx *ctx)
 
 	if (fyai_publish_state(ctx))
 		return -1;
-	fyai_result(ctx, "conversation cleared\n");
 	return 0;
 }
 
@@ -534,24 +534,10 @@ static bool session_chatgpt_capable(const struct fyai_cfg *cfg,
 	return cfg->auth_mode == FYAI_AUTH_CHATGPT || cfg->chatgpt_auth;
 }
 
-int fyai_session_model(struct fyai_ctx *ctx, const char *name)
+int fyai_session_model(struct fyai_ctx *ctx, const char *name, bool live)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct fyai_cfg tmp;
-	long long window;
-
-	if (!name || !*name) {
-		window = fyai_context_window(ctx);
-		fyai_result(ctx, "model: %s (provider %s, api %s, window ",
-		       cfg->model ? cfg->model : "",
-		       cfg->provider ? cfg->provider : "?",
-		       fyai_api_to_string(cfg->api_mode));
-		if (window)
-			fyai_result(ctx, "%lld)\n", window);
-		else
-			fyai_result(ctx, "unknown)\n");
-		return 0;
-	}
 
 	/*
 	 * Resolve into a scratch copy so a failed switch leaves the session
@@ -570,7 +556,8 @@ int fyai_session_model(struct fyai_ctx *ctx, const char *name)
 		return -1;
 	if (fyai_config_messages_gate(&tmp))
 		return -1;
-	if ((!tmp.api_key || !*tmp.api_key) &&
+	/* Only a live session sends the next request with it. */
+	if (live && (!tmp.api_key || !*tmp.api_key) &&
 	    !session_chatgpt_capable(cfg, &tmp)) {
 		fyai_error(ctx, "model: no API key for provider '%s' (set %s%s)",
 			   tmp.provider ? tmp.provider : "?",
@@ -585,7 +572,7 @@ int fyai_session_model(struct fyai_ctx *ctx, const char *name)
 	 * new model; resolve returns early and harmlessly when an API key is
 	 * in use. */
 	cfg->chatgpt_auth = false;
-	if (fyai_auth_resolve(ctx))
+	if (live && fyai_auth_resolve(ctx))
 		return -1;
 
 	/* Rebuild the derived request state when a live session exists. */
@@ -593,10 +580,6 @@ int fyai_session_model(struct fyai_ctx *ctx, const char *name)
 		return -1;
 
 	session_persist_model(ctx);
-
-	fyai_result(ctx, "model: %s (provider %s, api %s)\n",
-	       cfg->model, cfg->provider ? cfg->provider : "?",
-	       fyai_api_to_string(cfg->api_mode));
 	return 0;
 }
 
@@ -613,7 +596,7 @@ static int session_api_parse(const char *s, enum fyai_api_mode *modep)
 	return 0;
 }
 
-int fyai_session_api(struct fyai_ctx *ctx, const char *arg)
+int fyai_session_api(struct fyai_ctx *ctx, const char *arg, bool live)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct fyai_cfg tmp;
@@ -621,25 +604,16 @@ int fyai_session_api(struct fyai_ctx *ctx, const char *arg)
 	fy_generic catalog;
 	fy_generic prov;
 
-	if (!arg || !*arg) {
-		fyai_result(ctx, "api: %s (model %s, provider %s, url %s, max_tokens %d)\n",
-		       fyai_api_to_string(cfg->api_mode),
-		       cfg->model ? cfg->model : "",
-		       cfg->provider ? cfg->provider : "?",
-		       cfg->api_url ? cfg->api_url : "?",
-		       cfg->max_tokens);
+	if (!arg || !*arg)
 		return 0;
-	}
 
 	if (session_api_parse(arg, &mode)) {
 		fyai_error(ctx, "api: unknown grammar '%s' "
 			   "(responses|chat-completions|messages)", arg);
 		return -1;
 	}
-	if (mode == cfg->api_mode) {
-		fyai_result(ctx, "api: already %s\n", fyai_api_to_string(mode));
+	if (mode == cfg->api_mode)
 		return 0;
-	}
 
 	/*
 	 * Resolve into a scratch copy so a failed switch leaves the session
@@ -675,7 +649,8 @@ int fyai_session_api(struct fyai_ctx *ctx, const char *arg)
 	}
 	if (fyai_config_messages_gate(&tmp))
 		return -1;
-	if ((!tmp.api_key || !*tmp.api_key) &&
+	/* Only a live session sends the next request with it. */
+	if (live && (!tmp.api_key || !*tmp.api_key) &&
 	    !session_chatgpt_capable(cfg, &tmp)) {
 		fyai_error(ctx, "api: no API key for provider '%s' (set %s%s)",
 			   tmp.provider ? tmp.provider : "?",
@@ -689,7 +664,7 @@ int fyai_session_api(struct fyai_ctx *ctx, const char *arg)
 	/* Re-derive ChatGPT subscription routing for the new grammar; resolve
 	 * returns early and harmlessly when an API key is in use. */
 	cfg->chatgpt_auth = false;
-	if (fyai_auth_resolve(ctx))
+	if (live && fyai_auth_resolve(ctx))
 		return -1;
 
 	/* Rebuild the derived request state when a live session exists. */
@@ -965,10 +940,21 @@ long long fyai_context_projected(struct fyai_ctx *ctx)
 	return fyai_context_projected_at(ctx, ctx->last_message);
 }
 
-static fy_generic session_status_data(struct fyai_ctx *ctx)
+/* The output allowance; the window, not the configuration, can set it. */
+static fy_generic session_allowance(struct fy_generic_builder *gb,
+				    struct fyai_cfg *cfg, long long out_tokens)
+{
+	return out_tokens < cfg->max_tokens ?
+	       fy_stringf(gb, "%lld tokens (reduced from %d to fit)",
+			  out_tokens, cfg->max_tokens) :
+	       fy_stringf(gb, "%lld tokens", out_tokens);
+}
+
+fy_generic fyai_session_status_data(struct fyai_ctx *ctx,
+				    struct fy_generic_builder *gb)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
-	fy_generic context, reasoning, allowance;
+	fy_generic context, reasoning;
 	struct fyai_context_prompt p;
 	long long window, shown, out_tokens;
 
@@ -976,63 +962,37 @@ static fy_generic session_status_data(struct fyai_ctx *ctx)
 	fyai_context_prompt_at(ctx, ctx->last_message, &p);
 	shown = session_projected_tokens(ctx, &p);
 	out_tokens = fyai_context_output_tokens(ctx, p.prompt, window);
-	/* Say so when the window, not the configuration, sets the allowance. */
-	allowance = out_tokens < cfg->max_tokens ?
-		fy_stringf("%lld tokens (reduced from %d to fit)",
-			   out_tokens, cfg->max_tokens) :
-		fy_stringf("%lld tokens", out_tokens);
 	if (cfg->reasoning_effort && *cfg->reasoning_effort)
-		reasoning = fy_stringf("%s%s%s", cfg->reasoning_effort,
+		reasoning = fy_stringf(gb, "%s%s%s", cfg->reasoning_effort,
 			cfg->reasoning_summary && *cfg->reasoning_summary ?
 			" / " : "", cfg->reasoning_summary ?
 			cfg->reasoning_summary : "");
 	else
-		reasoning = fy_value("off");
+		reasoning = fy_value(gb, "off");
 	if (window)
-		context = fy_stringf("~%lld / %lld (%.1f%%)",
-			shown, window,
-			(double)shown * 100.0 / (double)window);
+		context = fy_stringf(gb, "~%lld / %lld (%.1f%%)", shown, window,
+				     (double)shown * 100.0 / (double)window);
 	else
-		context = fy_stringf("~%lld / unknown", shown);
-	return fy_mapping(ctx->transient_gb,
-		"Model", cfg->model ? cfg->model : "",
-		"Provider", cfg->provider ? cfg->provider : "?",
-		"API", fyai_api_to_string(cfg->api_mode),
-		"Endpoint", cfg->api_url ? cfg->api_url : "(derived)",
-		"Reasoning", reasoning,
-		"Temperature", cfg->temperature,
-		"Context", context,
-		"Prompt", session_prompt_text(ctx, &p),
-		"Output allowance", allowance);
+		context = fy_stringf(gb, "~%lld / unknown", shown);
+	return fy_mapping(gb,
+		"model", cfg->model ? cfg->model : "",
+		"provider", cfg->provider ? cfg->provider : "?",
+		"api", fyai_api_to_string(cfg->api_mode),
+		"endpoint", cfg->api_url ? cfg->api_url : "(derived)",
+		"reasoning", reasoning,
+		"temperature", cfg->temperature,
+		"context", context,
+		"prompt", fy_gb_internalize(gb, session_prompt_text(ctx, &p)),
+		"output_allowance", session_allowance(gb, cfg, out_tokens),
+		"auth", fyai_auth_status_data(ctx, gb, false),
+		"usage", fyai_stats_data(ctx, gb));
 }
 
-static fy_generic mapping_prefixed(struct fyai_ctx *ctx, fy_generic out,
-				   const char *prefix, fy_generic add)
-{
-	fy_generic key, value;
-	char *name;
-	size_t i, n;
-
-	if (!fy_is_mapping(add))
-		return out;
-	n = fy_generic_mapping_get_pair_count(add);
-	for (i = 0; i < n; i++) {
-		key = fy_generic_mapping_get_at_key(add, i);
-		value = fy_generic_mapping_get_at_value(add, i);
-		if (fy_is_mapping(value) || fy_is_sequence(value))
-			continue;
-		if (asprintf(&name, "%s%s", prefix, fy_castp(&key, "")) < 0)
-			return out;
-		out = fy_assoc(ctx->transient_gb, out, name, value);
-		free(name);
-	}
-	return out;
-}
-
-int fyai_session_context(struct fyai_ctx *ctx)
+fy_generic fyai_session_context_data(struct fyai_ctx *ctx,
+				     struct fy_generic_builder *gb)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
-	fy_generic context, data, allowance, estimated, measured;
+	fy_generic context, estimated, measured;
 	struct fyai_context_prompt p;
 	long long window, projected, out_tokens;
 
@@ -1042,55 +1002,26 @@ int fyai_session_context(struct fyai_ctx *ctx)
 	out_tokens = fyai_context_output_tokens(ctx, p.prompt, window);
 
 	/* Report both token sources and mark the source used. */
-	estimated = fy_stringf("~%lld tokens%s", p.estimated,
+	estimated = fy_stringf(gb, "~%lld tokens%s", p.estimated,
 			       p.from_estimate ? "  <- used" : "");
 	measured = p.source == FYAICS_NONE ?
-		fy_value("none yet") :
-		fy_stringf("%lld tokens, %s%s", p.measured,
+		fy_value(gb, "none yet") :
+		fy_stringf(gb, "%lld tokens, %s%s", p.measured,
 			   fyai_context_source_name(p.source),
 			   p.from_estimate ? "" : "  <- used");
-	/* Say so when the window, not the configuration, sets the allowance. */
-	allowance = out_tokens < cfg->max_tokens ?
-		fy_stringf("%lld tokens (reduced from %d to fit)",
-			   out_tokens, cfg->max_tokens) :
-		fy_stringf("%lld tokens", out_tokens);
 	if (window)
-		context = fy_stringf("~%lld / %lld (%.1f%%)", projected,
+		context = fy_stringf(gb, "~%lld / %lld (%.1f%%)", projected,
 			window, (double)projected * 100.0 / (double)window);
 	else
-		context = fy_value("unknown");
-	data = fy_mapping(ctx->transient_gb,
+		context = fy_value(gb, "unknown");
+	return fy_mapping(gb,
 		"model", cfg->model ? cfg->model : "",
 		"provider", cfg->provider ? cfg->provider : "?",
 		"api", fyai_api_to_string(cfg->api_mode),
 		"context", context,
 		"prompt_estimated", estimated,
 		"prompt_measured", measured,
-		"output_max", allowance);
-	return fyai_generic_to_markdown(ctx,
-		fy_mapping("title", "Context",
-			   "columns", fy_mapping(
-				"api", fy_mapping("name", "API"))),
-		data);
-}
-
-/*
- * /status: a one-shot overview of the session's model/provider selection,
- * request shaping, context fill, then the auth status and token usage
- * sections (reusing their own renderers).
- */
-int fyai_session_status(struct fyai_ctx *ctx)
-{
-	fy_generic status, auth, stats;
-
-	status = session_status_data(ctx);
-	auth = fyai_auth_status_data(ctx, ctx->transient_gb, false);
-	stats = fyai_stats_data(ctx, ctx->transient_gb);
-	status = mapping_prefixed(ctx, status, "Auth / ", auth);
-	status = mapping_prefixed(ctx, status, "Usage / ", stats);
-	(void)fyai_generic_to_markdown(ctx, fy_mapping("title", "Session"),
-				       status);
-	return 0;
+		"output_max", session_allowance(gb, cfg, out_tokens));
 }
 
 char *fyai_prompt_literal(const char *text)
@@ -1472,916 +1403,7 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	free(branch);
 }
 
-/* ---- simple config-item slash commands ---------------------------------- */
-
-enum fyai_opt_kind {
-	FYAIOK_STR,
-	FYAIOK_BOOL,
-	FYAIOK_FLOAT,
-};
-
-struct fyai_slash_opt {
-	const char *name;
-	enum fyai_opt_kind kind;
-	size_t off;			/* offsetof the field in fyai_cfg */
-	const char *const *values;	/* enum for validation/completion */
-	bool restyle;			/* reload markdown styling on change */
-	bool reasoning;			/* rejected under the Messages API */
-	const char *ckey;		/* config path to persist to (or NULL) */
-	const char *help;
-};
-
-static const char *const effort_vals[] = {
-	"minimal", "low", "medium", "high", NULL,
-};
-static const char *const summary_vals[] = {
-	"auto", "concise", "detailed", NULL,
-};
-static const char *const bool_vals[] = {
-	"on", "off", "true", "false", NULL,
-};
-static const char *const tool_detail_vals[] = {
-	"none", "brief", "default", "full", NULL,
-};
-
-/*
- * The values of a setting. A theme selector names every libfymd4c and
- * palette theme the build has, so the list is asked from the libraries.
- */
-static const char *const *slash_opt_values(const struct fyai_slash_opt *o);
-
-static const struct fyai_slash_opt fyai_slash_opts[] = {
-	{ "reasoning-effort", FYAIOK_STR, offsetof(struct fyai_cfg, reasoning_effort),
-	  effort_vals, false, true, "reasoning/effort", "reasoning effort" },
-	{ "reasoning-summary", FYAIOK_STR, offsetof(struct fyai_cfg, reasoning_summary),
-	  summary_vals, false, true, "reasoning/summary", "reasoning summary" },
-	{ "effort", FYAIOK_STR, offsetof(struct fyai_cfg, reasoning_effort),
-	  effort_vals, false, true, "reasoning/effort", "reasoning effort (alias)" },
-	{ "summary", FYAIOK_STR, offsetof(struct fyai_cfg, reasoning_summary),
-	  summary_vals, false, true, "reasoning/summary", "reasoning summary (alias)" },
-	/* The selectors come from the libraries: see slash_opt_values(). */
-	{ "theme", FYAIOK_STR, offsetof(struct fyai_cfg, theme),
-	  NULL, true, false, "display/theme",
-	  "Markdown theme[:auto|dark|light]" },
-	{ "tool-detail", FYAIOK_STR, offsetof(struct fyai_cfg, tool_detail),
-	  tool_detail_vals, false, false, "display/tool_detail",
-	  "tool output detail" },
-	{ "transcript-system", FYAIOK_BOOL,
-	  offsetof(struct fyai_cfg, transcript_system),
-	  NULL, false, false, "display/transcript_system",
-	  "include system messages in transcripts" },
-	{ "markdown", FYAIOK_BOOL, offsetof(struct fyai_cfg, markdown),
-	  NULL, true, false, NULL, "markdown rendering" },
-	{ "stream", FYAIOK_BOOL, offsetof(struct fyai_cfg, stream),
-	  NULL, false, false, NULL, "response streaming" },
-	{ "thinking", FYAIOK_BOOL, offsetof(struct fyai_cfg, thinking),
-	  NULL, false, false, NULL, "display reasoning/thinking output" },
-	{ "sandbox", FYAIOK_BOOL, offsetof(struct fyai_cfg, enable_sandbox),
-	  NULL, false, false, NULL, "tool sandbox" },
-	{ "token-extents", FYAIOK_BOOL, offsetof(struct fyai_cfg, token_extents),
-	  NULL, false, false, NULL, "record streamed token extents" },
-	{ "print-stats", FYAIOK_BOOL, offsetof(struct fyai_cfg, stats),
-	  NULL, false, false, NULL, "end-of-run usage stats" },
-	{ "temperature", FYAIOK_FLOAT, offsetof(struct fyai_cfg, temperature),
-	  NULL, false, false, "temperature", "sampling temperature" },
-};
-
-static const char *const *slash_opt_values(const struct fyai_slash_opt *o)
-{
-	if (!strcmp(o->name, "theme"))
-		return markdown_theme_selectors();
-	return o->values;
-}
-
-static void session_opt_print(struct fyai_ctx *ctx,
-			      const struct fyai_slash_opt *o)
-{
-	const void *field = (const char *)ctx->cfg + o->off;
-	const char *s;
-
-	switch (o->kind) {
-	case FYAIOK_STR:
-		s = *(const char *const *)field;
-		fyai_result(ctx, "%s: %s\n", o->name, s && *s ? s : "(unset)");
-		break;
-	case FYAIOK_BOOL:
-		fyai_result(ctx, "%s: %s\n", o->name,
-		       *(const bool *)field ? "on" : "off");
-		break;
-	case FYAIOK_FLOAT:
-		fyai_result(ctx, "%s: %g\n", o->name, (double)*(const float *)field);
-		break;
-	}
-}
-
-static int session_opt_run(struct fyai_ctx *ctx,
-			   const struct fyai_slash_opt *o, const char *arg)
-{
-	struct fyai_cfg *cfg = ctx->cfg;
-	void *field = (char *)cfg + o->off;
-	const char *const *v;
-	const char *value;
-	char *endp;
-	float f;
-	int idx;
-
-	if (!arg || !*arg) {
-		session_opt_print(ctx, o);
-		return 0;
-	}
-	if (o->reasoning && cfg->api_mode == FYAI_API_MESSAGES) {
-		fyai_error(ctx, "%s: reasoning options are not supported with "
-			   "the Messages API yet", o->name);
-		return -1;
-	}
-
-	switch (o->kind) {
-	case FYAIOK_STR:
-		if (!strcmp(o->name, "theme") &&
-		    !markdown_theme_selector_valid(arg)) {
-			char names[256];
-
-			fyai_error(ctx, "%s: invalid value '%s' "
-				   "(%s[:auto|dark|light])",
-				   o->name, arg,
-				   markdown_theme_names(names, sizeof(names)));
-			return -1;
-		}
-		if (strcmp(o->name, "theme") && o->values &&
-		    str_in_set(arg, o->values) < 0) {
-			struct response_buffer vals = {0};
-
-			/* One diagnostic: the accepted set is part of the
-			 * complaint, not a separate one. */
-			for (v = o->values; *v; v++) {
-				if (v != o->values &&
-				    response_buffer_append(&vals, "|"))
-					break;
-				if (response_buffer_append(&vals, *v))
-					break;
-			}
-			fyai_error(ctx, "%s: invalid value '%s' (%s)", o->name,
-				   arg, vals.len ? vals.data : "");
-			free(vals.data);
-			return -1;
-		}
-		*(const char **)field = fy_gb_intern_string(cfg->gb, arg);
-		break;
-	case FYAIOK_BOOL:
-		idx = str_in_set(arg, bool_vals);
-		if (idx < 0) {
-			fyai_error(ctx, "%s: invalid value '%s' (on|off)", o->name, arg);
-			return -1;
-		}
-		*(bool *)field = !(idx & 1);
-		break;
-	case FYAIOK_FLOAT:
-		errno = 0;
-		f = strtof(arg, &endp);
-		if (errno || *endp) {
-			fyai_error(ctx, "%s: invalid number '%s'", o->name, arg);
-			return -1;
-		}
-		*(float *)field = f;
-		break;
-	}
-
-	if (o->restyle && cfg->markdown) {
-		fyai_markdown_load_style(cfg);
-		fyai_config_focus_bg_check(cfg);
-		fyai_error_check(ctx, !fyai_ui_update_prompt_style(ctx), err_out,
-				 "failed to update input bubble style");
-	}
-	if (o->ckey) {
-		value = arg;
-		if (o->kind == FYAIOK_STR)
-			value = fy_sprintfa("'%s'", arg);
-		else if (o->kind == FYAIOK_BOOL)
-			value = *(bool *)field ? "true" : "false";
-		session_persist(ctx, o->ckey, value);
-	}
-	session_opt_print(ctx, o);
-	return 0;
-
-err_out:
-	return -1;
-}
-
 /* ---- slash dispatch ------------------------------------------------------ */
-
-struct fyai_slash_cmd {
-	const char *name;
-	const char *args;
-	const char *help;
-	int (*run)(struct fyai_ctx *ctx, const char *arg);
-};
-
-/* Give a live tile the work pane and keyboard focus. */
-static int slash_zoom(struct fyai_ctx *ctx, const char *arg)
-{
-	const char *what;
-
-	while (arg && *arg == ' ')
-		arg++;
-	if (arg && !strcmp(arg, "off")) {
-		/* fyai_tools_unzoom() reports the focus change. */
-		fyai_tools_unzoom(ctx);
-		return 0;
-	}
-	what = fyai_tools_zoom(ctx, arg);
-	if (!what) {
-		fyai_result(ctx, arg && *arg ?
-			    "no live shell session or sub-agent is called that" :
-			    "nothing is running to zoom into");
-		return 0;
-	}
-	fyai_result(ctx, "typing into %s; Ctrl-Tab/Ctrl-T moves focus; "
-		    "Ctrl-] comes back",
-		    what);
-	return 0;
-}
-
-static int slash_sessions(struct fyai_ctx *ctx, const char *arg)
-{
-	if (arg && *arg) {
-		fyai_error(ctx, "usage: /sessions");
-		return -1;
-	}
-	return fyai_tools_sessions(ctx);
-}
-
-static int slash_kill(struct fyai_ctx *ctx, const char *arg)
-{
-	const char *end;
-	size_t len;
-	char name[FYAI_BRANCH_NAME_MAX + 1];
-
-	while (arg && (*arg == ' ' || *arg == '\t'))
-		arg++;
-	len = arg ? strcspn(arg, " \t") : 0;
-	end = arg ? arg + len : NULL;
-	while (end && (*end == ' ' || *end == '\t'))
-		end++;
-	if (!len || (end && *end) || len >= sizeof(name)) {
-		fyai_error(ctx, "usage: /kill NAME");
-		return -1;
-	}
-	memcpy(name, arg, len);
-	name[len] = '\0';
-	return fyai_tools_kill(ctx, name);
-}
-
-static int slash_clear(struct fyai_ctx *ctx, const char *arg)
-{
-	(void)arg;
-	return fyai_session_clear(ctx);
-}
-
-static int slash_compact(struct fyai_ctx *ctx, const char *arg)
-{
-	return fyai_session_compact(ctx, arg);
-}
-
-static int slash_model(struct fyai_ctx *ctx, const char *arg)
-{
-	return fyai_session_model(ctx, arg);
-}
-
-static int slash_api(struct fyai_ctx *ctx, const char *arg)
-{
-	return fyai_session_api(ctx, arg);
-}
-
-static int slash_context(struct fyai_ctx *ctx, const char *arg)
-{
-	(void)arg;
-	return fyai_session_context(ctx);
-}
-
-static int slash_stats(struct fyai_ctx *ctx, const char *arg)
-{
-	(void)arg;
-	return fyai_show_stats(ctx);
-}
-
-static int slash_status(struct fyai_ctx *ctx, const char *arg)
-{
-	(void)arg;
-	return fyai_session_status(ctx);
-}
-
-static int slash_usage(struct fyai_ctx *ctx, const char *arg)
-{
-	if (*arg) {
-		fyai_error(ctx, "usage: /usage takes no arguments");
-		return -1;
-	}
-	return fyai_auth_usage(ctx, false);
-}
-
-static int slash_tools(struct fyai_ctx *ctx, const char *arg)
-{
-	char input[512], *save, *word;
-	const char *agent;
-	bool full;
-
-	if (!arg)
-		arg = "";
-	if (strlen(arg) >= sizeof(input)) {
-		fyai_error(ctx, "tools: arguments are too long");
-		return -1;
-	}
-	strcpy(input, arg);
-	agent = NULL;
-	full = false;
-	word = strtok_r(input, " \t", &save);
-	while (word) {
-		if (!strcmp(word, "--full"))
-			full = true;
-		else if (!strcmp(word, "--brief"))
-			full = false;
-		else if (!agent)
-			agent = word;
-		else {
-			fyai_error(ctx, "tools: use /tools [agent] [--brief|--full]");
-			return -1;
-		}
-		word = strtok_r(NULL, " \t", &save);
-	}
-	return fyai_catalog_tools(ctx, agent, full);
-}
-
-static int slash_config(struct fyai_ctx *ctx, const char *arg)
-{
-	struct fyai_config_args *args = &ctx->cfg->cmd.args.config;
-	struct fyai_config_args saved = *args;
-	const char *key, *value;
-	size_t keylen, len;
-	int rc;
-
-	while (*arg == ' ' || *arg == '\t')
-		arg++;
-	len = strcspn(arg, " \t");
-	if (!len) {
-		args->type = FYAICT_SHOW;
-		args->key = NULL;
-		args->value = NULL;
-		rc = fyai_execute_config(ctx);
-		*args = saved;
-		return rc;
-	}
-	key = arg + len;
-	while (*key == ' ' || *key == '\t')
-		key++;
-	value = key + strcspn(key, " \t");
-	keylen = (size_t)(value - key);
-	while (*value == ' ' || *value == '\t')
-		value++;
-
-	if (len == 4 && !strncmp(arg, "show", len)) {
-		args->type = FYAICT_SHOW;
-		args->key = NULL;
-		args->value = NULL;
-	} else if (len == 9 && !strncmp(arg, "effective", len)) {
-		args->type = FYAICT_EFFECTIVE;
-		args->key = NULL;
-		args->value = NULL;
-	} else if (len == 4 && !strncmp(arg, "edit", len)) {
-		args->type = FYAICT_EDIT;
-		args->key = NULL;
-		args->value = NULL;
-	} else if (len == 8 && !strncmp(arg, "validate", len)) {
-		args->type = FYAICT_VALIDATE;
-		args->key = NULL;
-		args->value = NULL;
-	} else if (len == 6 && !strncmp(arg, "schema", len)) {
-		args->type = FYAICT_SCHEMA;
-		args->key = NULL;
-		args->value = NULL;
-	} else if (len == 8 && !strncmp(arg, "describe", len)) {
-		args->type = FYAICT_DESCRIBE;
-		args->key = *key ? fy_gb_intern_string(ctx->cfg->gb, key) : NULL;
-		args->value = NULL;
-	} else if (len == 3 && !strncmp(arg, "get", len)) {
-		if (!*key)
-			goto usage;
-		args->type = FYAICT_GET;
-		args->key = fy_gb_intern_string(ctx->cfg->gb, key);
-		args->value = NULL;
-	} else if (len == 6 && !strncmp(arg, "delete", len)) {
-		if (!*key)
-			goto usage;
-		args->type = FYAICT_DELETE;
-		args->key = fy_gb_intern_string(ctx->cfg->gb, key);
-		args->value = NULL;
-	} else if (len == 3 && !strncmp(arg, "set", len)) {
-		if (!*key || !*value)
-			goto usage;
-		args->type = FYAICT_SET;
-		args->key = fy_gb_intern_string(ctx->cfg->gb,
-						fy_sprintfa("%.*s",
-							(int)keylen, key));
-		args->value = fy_gb_intern_string(ctx->cfg->gb, value);
-	} else {
-		goto usage;
-	}
-
-	if (args->type == FYAICT_EDIT) {
-		if (ctx->config_edit) {
-			fyai_error(ctx, "configuration editor is already active");
-			*args = saved;
-			return -1;
-		}
-		ctx->config_edit = fyai_config_edit_submit(ctx);
-		*args = saved;
-		return ctx->config_edit ? 0 : -1;
-	}
-	rc = fyai_execute_config(ctx);
-	/*
-	 * A successful in-session mutation only touched the arena; refresh the
-	 * live derived cache (colours, renderer, model) so the change is visible
-	 * on the next prompt instead of only after a restart.
-	 */
-	if (!rc && (args->type == FYAICT_SET || args->type == FYAICT_DELETE ||
-		    args->type == FYAICT_EDIT || args->type == FYAICT_IMPORT))
-		rc = fyai_config_rederive(ctx);
-	*args = saved;
-	return rc;
-usage:
-	fyai_error(ctx, "config: use /config [show|effective|edit|validate|"
-		   "schema|describe [path]|get <key>|set <key> <value>|"
-		   "delete <key>]");
-	*args = saved;
-	return -1;
-}
-
-/* /catalog update [--curated] [--provider] [NAME]...: a program in a tile. */
-static int slash_catalog_update(struct fyai_ctx *ctx, const char *arg)
-{
-	const char *providers[FYAI_CATALOG_UPDATE_PROVIDERS_MAX];
-	const char *word;
-	size_t count, len;
-	bool curated;
-
-	fyai_error_check(ctx, !ctx->catalog_update, err,
-			 "catalog: an update is already running");
-	count = 0;
-	curated = false;
-	for (;;) {
-		while (*arg == ' ' || *arg == '\t')
-			arg++;
-		if (!*arg)
-			break;
-		len = strcspn(arg, " \t");
-		word = fy_gb_intern_string(ctx->cfg->gb,
-					   fy_sprintfa("%.*s", (int)len, arg));
-		arg += len;
-		fyai_error_check(ctx, word, err, "catalog: could not store "
-				 "the update selection");
-		if (!strcmp(word, "--curated")) {
-			curated = true;
-			continue;
-		}
-		if (!strcmp(word, "--provider"))
-			continue;
-		fyai_error_check(ctx, *word != '-', err, "catalog: use /catalog "
-				 "update [--curated] [--provider NAME]...");
-		fyai_error_check(ctx, count < ARRAY_SIZE(providers), err,
-				 "catalog: at most %zu providers in one update",
-				 ARRAY_SIZE(providers));
-		providers[count++] = word;
-	}
-	ctx->catalog_update = fyai_catalog_update_submit(ctx, providers, count,
-							 curated);
-	return ctx->catalog_update ? 0 : -1;
-err:
-	return -1;
-}
-
-static int slash_catalog(struct fyai_ctx *ctx, const char *arg)
-{
-	struct fyai_catalog_args *args = &ctx->cfg->cmd.args.catalog;
-	struct fyai_catalog_args saved = *args;
-	static const struct {
-		const char *name;
-		enum fyai_catalog_type type;
-		int operands;	/* 0 none, 1 optional, 2 required, 3 path and value */
-	} subs[] = {
-		{ "show", FYAICAT_SHOW, 0 },
-		{ "list", FYAICAT_LIST, 1 },
-		{ "tools", FYAICAT_TOOLS, 1 },
-		{ "get", FYAICAT_GET, 2 },
-		{ "set", FYAICAT_SET, 3 },
-		{ "delete", FYAICAT_DELETE, 2 },
-		{ "edit", FYAICAT_EDIT, 0 },
-		{ "validate", FYAICAT_VALIDATE, 0 },
-		{ "schema", FYAICAT_SCHEMA, 0 },
-		{ "import", FYAICAT_IMPORT, 2 },
-		{ "export", FYAICAT_EXPORT, 1 },
-		{ "reset", FYAICAT_RESET, 0 },
-	};
-	const char *key, *value;
-	size_t keylen, len, i;
-	int rc;
-
-	while (*arg == ' ' || *arg == '\t')
-		arg++;
-	len = strcspn(arg, " \t");
-	key = arg + len;
-	while (*key == ' ' || *key == '\t')
-		key++;
-	value = key + strcspn(key, " \t");
-	keylen = (size_t)(value - key);
-	while (*value == ' ' || *value == '\t')
-		value++;
-
-	/* The update runs a program: it runs in a tile of the work pane. */
-	if (len == 6 && !strncmp(arg, "update", len))
-		return slash_catalog_update(ctx, key);
-	for (i = 0; len && i < ARRAY_SIZE(subs); i++) {
-		if (strlen(subs[i].name) == len &&
-		    !strncmp(arg, subs[i].name, len))
-			break;
-	}
-	if (len && i == ARRAY_SIZE(subs))
-		goto usage;
-	memset(args, 0, sizeof(*args));
-	args->type = len ? subs[i].type : FYAICAT_SHOW;
-	if (len && subs[i].operands == 0 && *key)
-		goto usage;
-	if (len && subs[i].operands >= 2 && !*key)
-		goto usage;
-	if (len && subs[i].operands == 3) {
-		if (!*value)
-			goto usage;
-		args->arg = fy_gb_intern_string(ctx->cfg->gb,
-				fy_sprintfa("%.*s", (int)keylen, key));
-		args->value = fy_gb_intern_string(ctx->cfg->gb, value);
-	} else if (*key) {
-		args->arg = fy_gb_intern_string(ctx->cfg->gb, key);
-	}
-
-	if (args->type == FYAICAT_EDIT) {
-		*args = saved;
-		if (ctx->config_edit) {
-			fyai_error(ctx, "an editor is already active");
-			return -1;
-		}
-		ctx->config_edit = fyai_catalog_edit_submit(ctx);
-		return ctx->config_edit ? 0 : -1;
-	}
-	rc = fyai_execute_catalog(ctx);
-	/* The model_info block and the model resolution follow the catalogue. */
-	if (!rc && (args->type == FYAICAT_SET || args->type == FYAICAT_DELETE ||
-		    args->type == FYAICAT_IMPORT || args->type == FYAICAT_RESET))
-		rc = fyai_config_rederive(ctx);
-	*args = saved;
-	return rc;
-usage:
-	fyai_error(ctx, "catalog: use /catalog [show|list [what]|tools [agent]|"
-		   "get <path>|set <path> <value>|delete <path>|edit|validate|"
-		   "schema|import <file>|export [file]|reset|update "
-		   "[--curated] [--provider NAME]...]");
-	*args = saved;
-	return -1;
-}
-
-static int slash_list(struct fyai_ctx *ctx, const char *arg)
-{
-	struct fyai_list_args *args = &ctx->cfg->cmd.args.list;
-	struct fyai_list_args saved = *args;
-	static const struct {
-		const char *name;
-		enum fyai_list_type type;
-	} targets[] = {
-		{ "providers", FYAILT_PROVIDERS },
-		{ "models", FYAILT_MODELS },
-		{ "turns", FYAILT_TURNS },
-		{ "exchanges", FYAILT_EXCHANGES },
-	};
-	size_t i;
-	int rc;
-
-	if (!arg || !*arg)
-		arg = "providers";
-	for (i = 0; i < ARRAY_SIZE(targets); i++) {
-		if (strcmp(arg, targets[i].name))
-			continue;
-		args->type = targets[i].type;
-		args->format = FYAIOF_MARKDOWN;
-		args->full = false;
-		rc = fyai_execute_list(ctx);
-		*args = saved;
-		return rc;
-	}
-
-	fyai_error(ctx, "list: unknown target '%s' "
-		   "(providers|models|turns|exchanges|reflog)", arg);
-	return -1;
-}
-
-static int slash_history(struct fyai_ctx *ctx, const char *arg)
-{
-	struct fyai_display_args *args = &ctx->cfg->cmd.args.display;
-	const char *saved_detail = args->tool_detail;
-	char which[16];
-	unsigned long n, hi;
-	char *end;
-	const char *p;
-	bool sep;
-	int rc = -1;
-
-	args->raw = false;
-	args->tool_detail = NULL;
-	args->turn_sel.type = FYAITST_ALL;
-	if (arg && *arg) {
-		if (!strncmp(arg, "--tool-detail=", 14)) {
-			args->tool_detail = arg + 14;
-			arg += strcspn(arg, " \t");
-			while (*arg == ' ' || *arg == '\t')
-				arg++;
-		} else if (!strncmp(arg, "--tool-detail ", 14)) {
-			arg += 14;
-			args->tool_detail = arg;
-			arg += strcspn(arg, " \t");
-			while (*arg == ' ' || *arg == '\t')
-				arg++;
-		}
-		if (args->tool_detail) {
-			size_t len = strcspn(args->tool_detail, " \t");
-
-			if (!len || len >= sizeof(which)) {
-				fyai_error(ctx, "transcript: invalid tool detail");
-				goto out_restore;
-			}
-			memcpy(which, args->tool_detail, len);
-			which[len] = '\0';
-			args->tool_detail =
-				fy_gb_intern_string(ctx->transient_gb, which);
-			if (strcmp(which, "none") && strcmp(which, "brief") &&
-			    strcmp(which, "default") && strcmp(which, "full")) {
-				fyai_error(ctx,
-					   "transcript: invalid tool detail '%s'",
-					   which);
-				goto out_restore;
-			}
-		}
-		if (!*arg)
-			goto render;
-		if (sscanf(arg, "%15s", which) != 1)
-			goto render;
-		p = arg + strlen(which);
-		while (*p == ' ' || *p == '\t')
-			p++;
-		if (!strcmp(which, "all")) {
-			if (*p) {
-				fyai_error(ctx, "history: use all, first N, last N, "
-					   "or range A,B");
-				goto out_restore;
-			}
-			goto render;
-		} else if (!strcmp(which, "first")) {
-			n = strtoul(p, &end, 10);
-			args->turn_sel.type = FYAITST_FIRST;
-			args->turn_sel.first = n;
-		} else if (!strcmp(which, "last")) {
-			n = strtoul(p, &end, 10);
-			args->turn_sel.type = FYAITST_LAST;
-			args->turn_sel.last = n;
-		} else if (!strcmp(which, "range")) {
-			n = strtoul(p, &end, 10);
-			sep = *end == ',' || *end == ':';
-			if (sep)
-				end++;
-			if (*end < '0' || *end > '9') {
-				fyai_error(ctx, "history: use all, first N, "
-					   "last N, or range A,B");
-				goto out_restore;
-			}
-			hi = strtoul(end, &end, 10);
-			args->turn_sel.type = FYAITST_RANGE;
-			args->turn_sel.range_lo = n;
-			args->turn_sel.range_hi = hi;
-			if (!sep) {
-				fyai_error(ctx, "history: use all, first N, "
-					   "last N, or range A,B");
-				goto out_restore;
-			}
-		} else {
-			fyai_error(ctx, "history: use all, first N, last N, "
-				   "or range A,B");
-			goto out_restore;
-		}
-		while (*end == ' ' || *end == '\t')
-			end++;
-		if (*p < '0' || *p > '9' || *end) {
-			fyai_error(ctx, "history: use all, first N, last N, "
-				   "or range A,B");
-			goto out_restore;
-		}
-	}
-
-render:
-	rc = fyai_display_view(ctx);
-out_restore:
-	args->tool_detail = saved_detail;
-	args->turn_sel.type = FYAITST_ALL;
-	return rc;
-}
-
-static int slash_log(struct fyai_ctx *ctx, const char *arg)
-{
-	return fyai_log_control(ctx, arg);
-}
-
-static int slash_secret(struct fyai_ctx *ctx, const char *arg)
-{
-	char *copy, *action, *name = NULL, *extra;
-	enum fyai_secret_command command;
-	char *save = NULL;
-	int rc;
-
-	(void)ctx;
-	copy = strdup(arg ? arg : "");
-	if (!copy)
-		return -1;
-	action = strtok_r(copy, " \t", &save);
-	if (!action || fy_equal(action, "status"))
-		command = FYAI_SECRET_STATUS;
-	else if (fy_equal(action, "set"))
-		command = FYAI_SECRET_SET;
-	else if (fy_equal(action, "delete"))
-		command = FYAI_SECRET_DELETE;
-	else {
-		fyai_error(ctx, "secret: use status [name]|set <name>|delete <name>");
-		free(copy);
-		return -1;
-	}
-	if (action)
-		name = strtok_r(NULL, " \t", &save);
-	extra = strtok_r(NULL, " \t", &save);
-	if (extra || ((command == FYAI_SECRET_SET || command == FYAI_SECRET_DELETE) &&
-		      (!name || !*name))) {
-		fyai_error(ctx, "secret: invalid arguments");
-		free(copy);
-		return -1;
-	}
-	/* The slash line contains only the logical name. SET prompts separately
-	 * on /dev/tty, so secret material never enters linenoise history. */
-	rc = fyai_secret_action(ctx, command, name, false);
-	free(copy);
-	return rc;
-}
-
-static int slash_help(struct fyai_ctx *ctx, const char *arg);
-
-static int slash_auth(struct fyai_ctx *ctx, const char *arg)
-{
-	char *copy;
-	char *action;
-	char *extra;
-	char *save = NULL;
-	int rc;
-
-	copy = strdup(arg ? arg : "");
-	fyai_error_check(ctx, copy, err_out, "auth: out of memory");
-	action = strtok_r(copy, " \t", &save);
-	extra = strtok_r(NULL, " \t", &save);
-	fyai_error_check(ctx, !extra, err_free,
-			 "auth: use [status|login|logout]");
-
-	if (!action || fy_equal(action, "status"))
-		rc = fyai_auth_status(ctx, false, false);
-	else if (fy_equal(action, "login"))
-		rc = fyai_auth_login(ctx, false, false, false);
-	else if (fy_equal(action, "logout"))
-		rc = fyai_auth_logout(ctx);
-	else {
-		fyai_error(ctx, "auth: use [status|login|logout]");
-		rc = -1;
-	}
-	free(copy);
-	return rc;
-
-err_free:
-	free(copy);
-err_out:
-	return -1;
-}
-
-
-static int slash_mcp(struct fyai_ctx *ctx, const char *arg)
-{
-	struct fyai_cfg *cfg = ctx->cfg;
-	fy_generic key, server;
-	const char *server_name, *command;
-	char *copy;
-	char *action;
-	char *name;
-	char *extra;
-	char *save = NULL;
-	int rc;
-
-	copy = strdup(arg ? arg : "");
-	fyai_error_check(ctx, copy, err_out, "mcp: out of memory");
-	action = strtok_r(copy, " \t", &save);
-	name = strtok_r(NULL, " \t", &save);
-	extra = strtok_r(NULL, " \t", &save);
-	if (!action || !strcmp(action, "show") ||
-	    !strcmp(action, "status")) {
-		fyai_error_check(ctx, !name && !extra, err_free,
-				 "mcp: status takes no arguments");
-		rc = fyai_mcp_status(ctx);
-		if (rc <= 0) {
-			free(copy);
-			return rc;
-		}
-		fyai_result(ctx, "mcp: enabled=%s protocol=%s timeout=%d\n",
-			cfg->mcp_enabled ? "true" : "false",
-			cfg->mcp_protocol_version ? cfg->mcp_protocol_version : "-",
-			cfg->mcp_timeout);
-		if (fy_is_mapping(cfg->mcp_servers) &&
-		    fy_len(cfg->mcp_servers)) {
-			fy_foreach(key, cfg->mcp_servers) {
-				server_name = fy_castp(&key, "");
-				server = fy_get(cfg->mcp_servers, key, fy_invalid);
-				command = fy_get(server, "command", "");
-				if (*command)
-					fyai_result(ctx, "  %s: enabled=%s transport=stdio command=%s\n",
-						server_name,
-						fy_get(server, "enabled", true) ?
-						"true" : "false",
-						command);
-				else
-					fyai_result(ctx, "  %s: enabled=%s transport=http endpoint=%s\n",
-						server_name,
-						fy_get(server, "enabled", true) ?
-						"true" : "false",
-						fy_get(server, "endpoint", "(none)"));
-			}
-		} else {
-			fyai_result(ctx, "  default: endpoint=%s\n",
-				cfg->mcp_endpoint ? cfg->mcp_endpoint : "(none)");
-		}
-		free(copy);
-		return 0;
-	}
-	if (!strcmp(action, "login") || !strcmp(action, "logout")) {
-		fyai_error_check(ctx, name && *name && !extra, err_free,
-				 "mcp: login/logout requires one server name");
-		rc = !strcmp(action, "login") ?
-			fyai_mcp_login(ctx, name) :
-			fyai_mcp_logout(ctx, name);
-		free(copy);
-		return rc;
-	}
-	if (!strcmp(action, "on")) {
-		fyai_error_check(ctx, !name && !extra, err_free,
-				 "mcp: on takes no arguments");
-		if (cfg->mcp_enabled) {
-			fyai_result(ctx, "mcp: already enabled\n");
-			free(copy);
-			return 0;
-		}
-		cfg->mcp_enabled = true;
-		session_persist(ctx, "mcp/enabled", "true");
-		if (fyai_request_state_apply(ctx)) {
-			cfg->mcp_enabled = false;
-			free(copy);
-			return -1;
-		}
-		fyai_result(ctx, "mcp: enabled\n");
-		free(copy);
-		return 0;
-	}
-	if (!strcmp(action, "off")) {
-		fyai_error_check(ctx, !name && !extra, err_free,
-				 "mcp: off takes no arguments");
-		if (!cfg->mcp_enabled) {
-			fyai_result(ctx, "mcp: already disabled\n");
-			free(copy);
-			return 0;
-		}
-		cfg->mcp_enabled = false;
-		session_persist(ctx, "mcp/enabled", "false");
-		if (fyai_request_state_apply(ctx)) {
-			free(copy);
-			return -1;
-		}
-		fyai_result(ctx, "mcp: disabled\n");
-		free(copy);
-		return 0;
-	}
-	fyai_error(ctx,
-		   "mcp: use [status | login NAME | logout NAME | on | off]");
-	free(copy);
-	return -1;
-
-err_free:
-	free(copy);
-err_out:
-	return -1;
-}
 
 /*
  * Switch branch inside a live session. The conversation and the configuration
@@ -2445,9 +1467,6 @@ int fyai_session_branch_switch(struct fyai_ctx *ctx, const char *name,
 
 	fyai_session_banner_update(ctx);
 	fyai_ui_repaint(ctx);
-	/* A session the picker selected is named by the header. */
-	if (!keep_head)
-		fyai_result(ctx, "switched to branch %s\n", name);
 	return 0;
 
 rollback:
@@ -2466,268 +1485,7 @@ err_out:
 	return -1;
 }
 
-static const char *branch_word(const char **argp, size_t *lenp)
-{
-	const char *start, *p;
-
-	p = *argp;
-	while (isspace((unsigned char)*p))
-		p++;
-	start = p;
-	while (*p && !isspace((unsigned char)*p))
-		p++;
-	*argp = p;
-	*lenp = (size_t)(p - start);
-	return start;
-}
-
-static int slash_branch(struct fyai_ctx *ctx, const char *arg)
-{
-	const char *p, *start;
-	char *sub, *name, *rest;
-	size_t len, rest_len;
-	int rc;
-
-	if (!arg || !*arg)
-		return fyai_branch_list(ctx, NULL, false);
-
-	p = arg;
-	start = branch_word(&p, &len);
-	if (!len)
-		return fyai_branch_list(ctx, NULL, false);
-	sub = alloca(len + 1);
-	memcpy(sub, start, len);
-	sub[len] = '\0';
-	start = branch_word(&p, &len);
-	if (len) {
-		name = alloca(len + 1);
-		memcpy(name, start, len);
-		name[len] = '\0';
-	} else {
-		name = NULL;
-	}
-	while (isspace((unsigned char)*p))
-		p++;
-	if (*p) {
-		rest_len = strlen(p);
-		rest = alloca(rest_len + 1);
-		memcpy(rest, p, rest_len + 1);
-	} else {
-		rest = NULL;
-	}
-
-	if (!strcmp(sub, "list") || !strcmp(sub, "--all") || !strcmp(sub, "-a"))
-		return fyai_branch_list(ctx, name,
-					sub[0] == '-');
-	if (!strcmp(sub, "attach")) {
-		if (!name || rest || !fyai_agents_zoom(ctx, name, true)) {
-			fyai_error(ctx, "branch attach requires a reachable live agent name");
-			return -1;
-		}
-		return 0;
-	}
-	if (!strcmp(sub, "detach")) {
-		fyai_agents_detach(ctx);
-		return 0;
-	}
-	if (!strcmp(sub, "show"))
-		return fyai_branch_show(ctx, name);
-	if (!strcmp(sub, "new") || !strcmp(sub, "create")) {
-		fyai_error_check(ctx, name, err_out,
-				 "branch new: a name is required");
-		return fyai_branch_create(ctx, name, rest, NULL,
-					  true);
-	}
-	if (!strcmp(sub, "delete") || !strcmp(sub, "rm")) {
-		fyai_error_check(ctx, name, err_out,
-				 "branch delete: a name is required");
-		return fyai_branch_delete(ctx, name,
-					  rest && !strcmp(rest, "--force"));
-	}
-	if (!strcmp(sub, "rename") || !strcmp(sub, "mv")) {
-		fyai_error_check(ctx, name && rest, err_out,
-				 "branch rename: <old> <new> required");
-		return fyai_branch_rename(ctx, name, rest);
-	}
-	if (!strcmp(sub, "describe")) {
-		fyai_error_check(ctx, name, err_out,
-				 "branch describe: a name is required");
-		return fyai_branch_describe(ctx, name, rest ? rest : "");
-	}
-
-	/* Bare `/branch <name>`: switch, creating the branch if needed. */
-	fyai_error_check(ctx, !name, err_out,
-			 "branch: unexpected argument '%s'", name);
-	rc = fyai_session_branch_switch(ctx, sub, true, false);
-	fyai_error_check(ctx, !rc, err_out,
-			 "branch: could not switch to '%s'", sub);
-	return 0;
-
-err_out:
-	return -1;
-}
-
-static int slash_page(struct fyai_ctx *ctx, const char *arg)
-{
-	if (arg && *arg) {
-		fyai_error(ctx, "usage: /page");
-		return -1;
-	}
-	return fyai_ui_page_report(ctx);
-}
-
-/* Check out a branch, or fork a reflog snapshot into a new session branch. */
-static int slash_checkout(struct fyai_ctx *ctx, const char *arg)
-{
-	char name[FYAI_BRANCH_NAME_MAX + 1], ref_name[FYAI_BRANCH_NAME_MAX + 1];
-	const char *start = NULL, *word;
-	size_t len;
-	long long n;
-	int kind, rc;
-	bool rest_blank, spaced;
-
-	if (!arg || !*arg) {
-		fyai_error(ctx, "usage: /checkout [-b name] <branch|ref>");
-		return -1;
-	}
-	if (fyai_ui_busy(ctx) || fyai_tools_active(ctx) || fyai_agents_attached(ctx)) {
-		fyai_error(ctx, "branch changes require idle model and tool work");
-		return -1;
-	}
-	if (!strncmp(arg, "-b", 2) && (!arg[2] || isspace((unsigned char)arg[2]))) {
-		arg += 2;
-		word = branch_word(&arg, &len);
-		fyai_error_check(ctx, len && len <= FYAI_BRANCH_NAME_MAX, err,
-				 "usage: /checkout -b <name> <ref>");
-		memcpy(name, word, len);
-		name[len] = '\0';
-		word = branch_word(&arg, &len);
-		rest_blank = strspn(arg, " \t") == strlen(arg);
-		fyai_error_check(ctx, len && len < sizeof(ref_name) && rest_blank,
-				 err, "usage: /checkout -b <name> <ref>");
-		memcpy(ref_name, word, len);
-		ref_name[len] = '\0';
-		start = ref_name;
-		rc = fyai_branch_create(ctx, name, start, NULL, false);
-		fyai_error_check(ctx, !rc, err,
-				 "checkout: could not create branch '%s'", name);
-		rc = fyai_session_branch_switch(ctx, name, false, false);
-		fyai_error_check(ctx, !rc, err,
-				 "checkout: could not switch to branch '%s'", name);
-		return 0;
-	}
-	spaced = strpbrk(arg, " \t") != NULL;
-	fyai_error_check(ctx, !spaced, err,
-			 "usage: /checkout [-b name] <branch|ref>");
-	kind = fyai_ref_parse(arg, ref_name, sizeof(ref_name), &n);
-	fyai_error_check(ctx, kind >= 0, err,
-			 "checkout: invalid reference '%s'", arg);
-	if (!kind) {
-		rc = fyai_session_branch_switch(ctx,
-			!strcmp(arg, "HEAD") ? fyai_ctx_head_branch(ctx) : arg,
-			false, false);
-		fyai_error_check(ctx, !rc, err,
-				 "checkout: could not switch to '%s'", arg);
-		return 0;
-	}
-	rc = fyai_branch_session_name(ctx->arena_branches, name, sizeof(name));
-	fyai_error_check(ctx, !rc, err,
-			 "checkout: could not name a new session");
-	start = arg;
-	rc = fyai_branch_create(ctx, name, start, NULL, false);
-	fyai_error_check(ctx, !rc, err,
-			 "checkout: could not create branch '%s'", name);
-	rc = fyai_session_branch_switch(ctx, name, false, false);
-	fyai_error_check(ctx, !rc, err,
-			 "checkout: could not switch to branch '%s'", name);
-	return 0;
-err:
-	return -1;
-}
-
 /* /diff [from [to]]: the exports of two ref-log entries, compared. */
-static int slash_diff(struct fyai_ctx *ctx, const char *arg)
-{
-	const char *refs[2] = { "HEAD@{1}", "HEAD" };
-	const char *word;
-	bool unified;
-	size_t len, n;
-
-	unified = false;
-	for (n = 0; arg && *arg; ) {
-		while (*arg == ' ' || *arg == '\t')
-			arg++;
-		if (!*arg)
-			break;
-		len = strcspn(arg, " \t");
-		word = fy_gb_intern_string(ctx->cfg->gb,
-				fy_sprintfa("%.*s", (int)len, arg));
-		fyai_error_check(ctx, word, err,
-				 "diff: could not store the reference");
-		arg += len;
-		if (!strcmp(word, "-u") || !strcmp(word, "--unified")) {
-			unified = true;
-			continue;
-		}
-		fyai_error_check(ctx, n < 2 && *word != '-', err,
-				 "usage: /diff [-u] [<from> [<to>]]");
-		refs[n++] = word;
-	}
-	return fyai_export_diff(ctx, refs[0], refs[1], unified);
-err:
-	return -1;
-}
-
-static int slash_reset(struct fyai_ctx *ctx, const char *arg)
-{
-	int rc;
-
-	if (!arg || !*arg || strpbrk(arg, " \t")) {
-		fyai_error(ctx, "usage: /reset <ref> (or /rewind <ref>)");
-		return -1;
-	}
-	if (fyai_ui_busy(ctx) || fyai_tools_active(ctx) || fyai_agents_attached(ctx)) {
-		fyai_error(ctx, "branch changes require idle model and tool work");
-		return -1;
-	}
-	rc = fyai_branch_reset(ctx, arg);
-	fyai_error_check(ctx, !rc, err, "reset: could not move the branch head");
-	fyai_session_banner_update(ctx);
-	fyai_ui_repaint(ctx);
-	return 0;
-err:
-	return -1;
-}
-
-/*
- * Resume another session in this one: the picker with no argument, the
- * picker over every starting directory with --all, or the named session.
- * The session is selected for this invocation; HEAD does not move.
- */
-static int slash_resume(struct fyai_ctx *ctx, const char *arg)
-{
-	while (arg && isspace((unsigned char)*arg))
-		arg++;
-	if (!arg || !*arg)
-		return fyai_browser_open_switch(ctx, false);
-	if (!strcmp(arg, "--all"))
-		return fyai_browser_open_switch(ctx, true);
-	if (arg[0] == '-') {
-		fyai_error(ctx, "resume: unknown option '%s'", arg);
-		return -1;
-	}
-	return fyai_session_branch_switch(ctx, arg, false, true);
-}
-
-static int slash_branches(struct fyai_ctx *ctx, const char *arg)
-{
-	if (arg && *arg) {
-		fyai_error(ctx, "branches takes no arguments");
-		return -1;
-	}
-	return fyai_browser_open(ctx);
-}
-
 struct fyai_btw_run {
 	struct fyai_btw_run *next;
 	struct fyai_ctx *ctx;
@@ -2820,7 +1578,7 @@ err:
 	return -1;
 }
 
-static int slash_btw(struct fyai_ctx *ctx, const char *arg)
+int fyai_session_btw(struct fyai_ctx *ctx, const char *arg)
 {
 	struct fyai_btw_run *run;
 	fy_generic args, call;
@@ -2883,218 +1641,15 @@ err:
 	return -1;
 }
 
-static const struct fyai_slash_cmd fyai_slash_cmds[] = {
-	{ "branches", "", "open the branch browser", slash_branches },
-	{ "btw", "QUESTION", "ask on a side branch in a panel", slash_btw },
-	{ "branch", "[name|list|new|delete|rename|show|describe]",
-	  "list or switch branches", slash_branch },
-	{ "checkout", "[-b name] <branch|ref>",
-	  "check out a branch or fork a reference", slash_checkout },
-	{ "reset", "<ref>", "move the current branch to a reference", slash_reset },
-	{ "diff", "[-u] [from [to]]", "compare two ref-log entries", slash_diff },
-	{ "rewind", "<ref>", "alias for /reset", slash_reset },
-	{ "resume", "[session|--all]", "resume another session", slash_resume },
-	{ "switch", "[session|--all]", "alias for /resume", slash_resume },
-	{ "clear", "", "start a fresh conversation", slash_clear },
-	{ "compact", "[hint]", "summarize history into a fresh chain",
-	  slash_compact },
-	{ "model", "[name]", "show or switch the model", slash_model },
-	{ "api", "[mode]", "show or switch the API grammar", slash_api },
-	{ "config", "[show|effective|edit|get|set|delete]", "inspect or edit config",
-	  slash_config },
-	{ "catalog", "[show|list|get|set|delete|edit|validate|reset]",
-	  "inspect or edit the catalogue of the branch", slash_catalog },
-	{ "list", "[what]", "list providers, models, turns, exchanges, or reflog",
-	  slash_list },
-	{ "history", "[--tool-detail MODE] [last N]",
-	  "show conversation history", slash_history },
-	{ "transcript", "[--tool-detail MODE] [last N]",
-	  "show conversation transcript",
-	  slash_history },
-	{ "log", "[target action]", "control trace logging", slash_log },
-	{ "logging", "[target action]", "alias for /log", slash_log },
-	{ "secret", "[status [name]|set name|delete name]", "manage secrets (API keys: api-key/<provider>)", slash_secret },
-	{ "auth", "[status|login|logout]",
-	  "inspect or control provider authentication", slash_auth },
-	{ "mcp", "[status|login NAME|logout NAME|on|off]",
-	  "inspect or control MCP server connections", slash_mcp },
-	{ "zoom", "[name|off]",
-	  "type into a live shell session or sub-agent", slash_zoom },
-	{ "page", "", "show the page of the live screen and its state",
-	  slash_page },
-	{ "sessions", "", "list active shell sessions and sub-agents",
-	  slash_sessions },
-	{ "kill", "NAME", "stop an active shell session or sub-agent",
-	  slash_kill },
-	{ "context", "", "context fill and token estimate", slash_context },
-	{ "status", "", "model, provider, auth and usage overview", slash_status },
-	{ "stats", "", "this session's token usage", slash_stats },
-	{ "usage", "", "live subscription limits and credits", slash_usage },
-	{ "tools", "[agent] [--brief|--full]", "list catalog agent tools", slash_tools },
-	{ "help", "", "list slash commands", slash_help },
-	{ "exit", "", "leave the session", NULL },
-	{ "quit", "", "leave the session", NULL },
-};
-
-/* Render the slash-command reference as markdown, falling back to the plain
- * printer when the markdown renderer or the memory stream is unavailable. */
-static void slash_help_plain(struct fyai_ctx *ctx)
-{
-	const struct fyai_slash_cmd *c;
-	const struct fyai_slash_opt *o;
-	const char *const *v;
-	const char *const *values;
-	size_t i;
-
-	fyai_result(ctx, "commands:\n");
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_cmds); i++) {
-		c = &fyai_slash_cmds[i];
-		fyai_result(ctx, "  /%-16s %-8s %s\n", c->name, c->args, c->help);
-	}
-	fyai_result(ctx, "settings (no value prints the current one; selected settings "
-	       "persist to the config):\n");
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_opts); i++) {
-		o = &fyai_slash_opts[i];
-		fyai_result(ctx, "  /%-16s %s", o->name, o->help);
-		values = slash_opt_values(o);
-		if (values) {
-			fyai_result(ctx, " (");
-			for (v = values; *v; v++)
-				fyai_result(ctx, "%s%s", v == values ? "" : "|", *v);
-			fyai_result(ctx, ")");
-		} else if (o->kind == FYAIOK_BOOL) {
-			fyai_result(ctx, " (on|off)");
-		}
-		fyai_result(ctx, "\n");
-	}
-	fyai_result(ctx, "a line starting with // is sent to the model verbatim "
-	       "(minus one slash)\n");
-}
-
-static int slash_help(struct fyai_ctx *ctx, const char *arg)
-{
-	const struct fyai_slash_cmd *c;
-	const struct fyai_slash_opt *o;
-	const char *const *v;
-	const char *const *values;
-	char *buf = NULL;
-	size_t len = 0;
-	FILE *fp;
-	size_t i;
-
-	(void)arg;
-
-	if (!markdown_available(ctx->cfg)) {
-		slash_help_plain(ctx);
-		return 0;
-	}
-
-	fp = open_memstream(&buf, &len);
-	if (!fp) {
-		slash_help_plain(ctx);
-		return 0;
-	}
-
-	fprintf(fp, "## Commands\n\n");
-	fprintf(fp, "| Command | Description |\n");
-	fprintf(fp, "| --- | --- |\n");
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_cmds); i++) {
-		c = &fyai_slash_cmds[i];
-		fprintf(fp, "| `/%s%s%s` | %s |\n", c->name,
-			*c->args ? " " : "", c->args, c->help);
-	}
-
-	fprintf(fp, "\n## Settings\n\n");
-	fprintf(fp, "No value prints the current one; selected settings "
-		"persist to the config.\n\n");
-	fprintf(fp, "| Setting | Values | Description |\n");
-	fprintf(fp, "| --- | --- | --- |\n");
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_opts); i++) {
-		o = &fyai_slash_opts[i];
-		/* Values column: comma-separated (never `|`, which would break
-		 * the table cell), or a dash when the setting is free-form. */
-		fprintf(fp, "| `/%s` | ", o->name);
-		values = slash_opt_values(o);
-		if (values) {
-			for (v = values; *v; v++)
-				fprintf(fp, "%s%s", v == values ? "" : ", ",
-					*v);
-		} else if (o->kind == FYAIOK_BOOL) {
-			fprintf(fp, "on, off");
-		} else {
-			fprintf(fp, "—");
-		}
-		fprintf(fp, " | %s |\n", o->help);
-	}
-	fprintf(fp, "\nA line starting with `//` is sent to the model "
-		"verbatim (minus one slash).\n");
-	fclose(fp);
-
-	if (buf && fyai_print_markdown(buf, ctx->cfg))
-		slash_help_plain(ctx);
-	free(buf);
-	return 0;
-}
-
-/* Find the unique command or option matching @name (@len chars): exact match
- * wins, else a unique prefix. Sets *cmdp or *optp; -1 when unknown/ambiguous. */
-static int session_slash_lookup(const char *name, size_t len,
-				const struct fyai_slash_cmd **cmdp,
-				const struct fyai_slash_opt **optp)
-{
-	const struct fyai_slash_cmd *pc;
-	const struct fyai_slash_opt *po;
-	size_t i;
-	int hits;
-
-	*cmdp = NULL;
-	*optp = NULL;
-
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_cmds); i++)
-		if (strlen(fyai_slash_cmds[i].name) == len &&
-		    !strncmp(fyai_slash_cmds[i].name, name, len)) {
-			*cmdp = &fyai_slash_cmds[i];
-			return 0;
-		}
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_opts); i++)
-		if (strlen(fyai_slash_opts[i].name) == len &&
-		    !strncmp(fyai_slash_opts[i].name, name, len)) {
-			*optp = &fyai_slash_opts[i];
-			return 0;
-		}
-
-	hits = 0;
-	pc = NULL;
-	po = NULL;
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_cmds); i++)
-		if (!strncmp(fyai_slash_cmds[i].name, name, len)) {
-			pc = &fyai_slash_cmds[i];
-			hits++;
-		}
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_opts); i++)
-		if (!strncmp(fyai_slash_opts[i].name, name, len)) {
-			po = &fyai_slash_opts[i];
-			hits++;
-		}
-	if (hits != 1)
-		return -1;
-	if (pc)
-		*cmdp = pc;
-	else
-		*optp = po;
-	return 0;
-}
-
 int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 {
-	const struct fyai_slash_cmd *cmd;
-	const struct fyai_slash_opt *opt;
-	const char *name, *arg;
+	const char *name;
 	char title[64];
 	size_t len;
 	bool own_transient;
 	bool error;
 	bool pane_output;
+	bool view;
 	int rc;
 
 	name = line + 1;	/* skip '/' */
@@ -3103,17 +1658,15 @@ int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 		fyai_error(ctx, "unknown command '%s' (try /help)", line);
 		goto out_report;
 	}
-	arg = name + len;
-	while (*arg == ' ' || *arg == '\t')
-		arg++;
-
-	if (session_slash_lookup(name, len, &cmd, &opt)) {
+	/* The registry takes an exact name, else a unique prefix. */
+	if (!fyai_cmd_session_exact(name, len) &&
+	    fyai_cmd_session_prefix(name, len) != 1) {
 		fyai_error(ctx, "unknown or ambiguous command '%.*s' (try /help)",
 			   (int)(len + 1), line);
 		goto out_report;
 	}
-
-	if (cmd && !cmd->run)	/* /exit, /quit */
+	/* /exit and /quit end the session; they present nothing. */
+	if (fyai_cmd_session_ends(name))
 		return 1;
 
 	snprintf(title, sizeof(title), "%.*s", (int)len, name);
@@ -3126,10 +1679,8 @@ int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 		return 0;
 	}
 
-	if (cmd)
-		rc = cmd->run(ctx, arg);
-	else
-		rc = session_opt_run(ctx, opt, arg);
+	view = false;
+	rc = fyai_cmd_session_run(ctx, name, &view);
 	if (own_transient)
 		fyai_cleanup_transient_builder(ctx);
 
@@ -3143,15 +1694,7 @@ int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 	 * A view is a record the user reads and scrolls back to, not a
 	 * transient status: commit it to the scrollback instead of a pane.
 	 */
-	pane_output = opt ||
-		(cmd && strcmp(cmd->name, "history") &&
-		 strcmp(cmd->name, "transcript") &&
-		 strcmp(cmd->name, "help") &&
-		 strcmp(cmd->name, "page") &&
-		 strcmp(cmd->name, "list") &&
-		 strcmp(cmd->name, "branch") &&
-		 strcmp(cmd->name, "config") &&
-		 strcmp(cmd->name, "catalog"));
+	pane_output = !view;
 	fyai_ui_pane_end(ctx, title, error, pane_output);
 
 	/* Settings/model/context may have changed; reflect it in the footer. */
@@ -3178,115 +1721,14 @@ out_report:
  * prints its value (immediate); a value changes it (waits). Return true
  * when @line may run while @busy.
  */
-static bool session_slash_argless(const char *arg)
-{
-	while (arg && (*arg == ' ' || *arg == '\t'))
-		arg++;
-	return !arg || !*arg;
-}
-
-static bool session_slash_word(const char *arg, const char *word)
-{
-	const char *start;
-	size_t len;
-
-	while (arg && (*arg == ' ' || *arg == '\t'))
-		arg++;
-	if (!arg)
-		return false;
-	start = arg;
-	len = strcspn(start, " \t");
-	arg = start + len;
-	while (*arg == ' ' || *arg == '\t')
-		arg++;
-	return !*arg && strlen(word) == len && !strncmp(start, word, len);
-}
-
-static bool session_slash_subcommand(const char *arg, const char *const *words)
-{
-	const char *const *w;
-
-	for (w = words; w && *w; w++)
-		if (session_slash_word(arg, *w))
-			return true;
-	return false;
-}
-
 bool fyai_session_slash_immediate(struct fyai_ctx *ctx, const char *line,
 				  bool busy)
 {
-	const struct fyai_slash_cmd *cmd;
-	const struct fyai_slash_opt *opt;
-	const char *name, *arg;
-	size_t len;
-	/* Read-only branch views; creation, deletion, and switching wait. */
-	static const char *const branch_reads[] = {
-		"list", "--all", "-a", "show", "describe", NULL,
-	};
-	/* Read-only configuration views; set/delete/edit/import wait. */
-	static const char *const config_reads[] = {
-		"show", "effective", "validate", "schema", "describe",
-		"get", NULL,
-	};
-	static const char *const catalog_reads[] = {
-		"show", "list", "tools", "get", "validate", "schema", "export",
-		NULL,
-	};
-
 	if (!busy)
 		return true;
 	if (!ctx || !line || line[0] != '/' || line[1] == '/')
 		return false;
-	name = line + 1;
-	len = strcspn(name, " \t");
-	if (!len)
-		return false;
-	arg = name + len;
-	while (*arg == ' ' || *arg == '\t')
-		arg++;
-	if (session_slash_lookup(name, len, &cmd, &opt))
-		return false;
-	if (opt)
-		return session_slash_argless(arg);
-	if (!cmd)
-		return false;
-	if (!strcmp(cmd->name, "btw"))
-		return true;
-	if (!strcmp(cmd->name, "model") || !strcmp(cmd->name, "api"))
-		return session_slash_argless(arg);
-	if (!strcmp(cmd->name, "branch"))
-		return session_slash_argless(arg) ||
-			session_slash_subcommand(arg, branch_reads);
-	if (!strcmp(cmd->name, "config"))
-		return session_slash_argless(arg) ||
-			session_slash_subcommand(arg, config_reads);
-	if (!strcmp(cmd->name, "catalog"))
-		return session_slash_argless(arg) ||
-			session_slash_subcommand(arg, catalog_reads);
-	if (!strcmp(cmd->name, "secret"))
-		return session_slash_argless(arg) ||
-			session_slash_word(arg, "status");
-	if (!strcmp(cmd->name, "auth"))
-		return session_slash_argless(arg) ||
-			session_slash_word(arg, "status");
-	if (!strcmp(cmd->name, "mcp"))
-		return session_slash_argless(arg) ||
-			session_slash_word(arg, "show") ||
-			session_slash_word(arg, "status");
-	/* Mutations of the session, the configuration, or live work wait. */
-	return !strcmp(cmd->name, "help") ||
-		!strcmp(cmd->name, "status") ||
-		!strcmp(cmd->name, "context") ||
-		!strcmp(cmd->name, "stats") ||
-		!strcmp(cmd->name, "list") ||
-		!strcmp(cmd->name, "history") ||
-		!strcmp(cmd->name, "transcript") ||
-		!strcmp(cmd->name, "tools") ||
-		!strcmp(cmd->name, "sessions") ||
-		!strcmp(cmd->name, "page") ||
-		!strcmp(cmd->name, "log") ||
-		!strcmp(cmd->name, "logging") ||
-		!strcmp(cmd->name, "zoom");
+	return fyai_cmd_session_immediate(line + 1);
 }
 
 /* ---- tab completion ------------------------------------------------------ */
@@ -3311,376 +1753,17 @@ char *fyai_readline(struct fyai_ctx *ctx, const char *prompt)
 	return line;
 }
 
-static void session_complete_value(struct fytim_completions *lc, const char *cmd,
-				   size_t cmdlen, const char *word,
-				   const char *value)
+static void session_complete_add(void *arg, const char *value,
+				 const char *description)
 {
-	const char *cand;
-
-	if (strncmp(value, word, strlen(word)))
-		return;
-	cand = fy_sprintfa("/%.*s %s", (int)cmdlen, cmd, value);
-	(void)fytim_completion_add(lc, cand);
-}
-
-static void session_complete_values(struct fytim_completions *lc,
-				    const char *cmd, size_t cmdlen,
-				    const char *word,
-				    const char *const *values)
-{
-	const char *const *v;
-
-	for (v = values; v && *v; v++)
-		session_complete_value(lc, cmd, cmdlen, word, *v);
-}
-
-static void session_complete_command_names(struct fytim_completions *lc,
-					   const char *prefix, size_t len)
-{
-	const char *cand;
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_cmds); i++) {
-		if (!strncmp(fyai_slash_cmds[i].name, prefix, len)) {
-			cand = fy_sprintfa("/%s", fyai_slash_cmds[i].name);
-			(void)fytim_completion_add(lc, cand);
-		}
-	}
-	for (i = 0; i < ARRAY_SIZE(fyai_slash_opts); i++) {
-		if (!strncmp(fyai_slash_opts[i].name, prefix, len)) {
-			cand = fy_sprintfa("/%s", fyai_slash_opts[i].name);
-			(void)fytim_completion_add(lc, cand);
-		}
-	}
-}
-
-static void session_complete_models(struct fyai_ctx *ctx,
-					    struct fytim_completions *lc,
-					    const char *cmd, size_t cmdlen,
-					    const char *word)
-{
-	fy_generic cat, models, model, name;
-	fy_generic prov, providers, p, pname, offers, o, canon;
-	const char *s, *c, *pn, *mpart;
-	const char *slash;
-	char *pfx, *val;
-	size_t mlen;
-
-	cat = fyai_catalog_effective(ctx->cfg->catalog, ctx->cfg->gb);
-	slash = strchr(word, '/');
-	if (slash) {
-		/*
-		 * Provider-pinned form: complete the offerings of the named
-		 * provider as provider/canonical-id. The provider_model_id
-		 * is the wire id the provider itself uses, so it is not a
-		 * valid third segment here. Keep the typed provider
-		 * spelling; resolution matches it case-insensitively.
-		 */
-		pfx = strndup(word, (size_t)(slash - word));
-		if (!pfx)
-			return;
-		prov = fyai_catalog_provider(cat, pfx);
-		if (fy_is_valid(prov)) {
-			mpart = slash + 1;
-			mlen = strlen(mpart);
-			offers = fy_get(prov, "models");
-			fy_foreach(o, offers) {
-				canon = fy_get(o, "canonical_id");
-				c = fy_castp(&canon, "");
-				if (*c && !strncmp(c, mpart, mlen)) {
-					val = fy_sprintfa("%s/%s", pfx, c);
-					if (val)
-						session_complete_value(lc, cmd, cmdlen,
-								       word, val);
-				}
-			}
-		}
-		free(pfx);
-		return;
-	}
-	models = fy_get(cat, "models");
-	fy_foreach(model, models) {
-		name = fy_get(model, "name");
-		s = fy_castp(&name, "");
-		if (*s)
-			session_complete_value(lc, cmd, cmdlen, word, s);
-	}
-	/*
-	 * A bare provider prefix completes to provider/ to reach the pinned
-	 * form above.
-	 */
-	providers = fy_get(cat, "providers");
-	fy_foreach(p, providers) {
-		pname = fy_get(p, "name");
-		pn = fy_castp(&pname, "");
-		if (*pn) {
-			val = fy_sprintfa("%s/", pn);
-			if (val)
-				session_complete_value(lc, cmd, cmdlen,
-						       word, val);
-		}
-	}
-}
-
-static void session_complete_branch(struct fyai_ctx *ctx,
-					    struct fytim_completions *lc,
-					    const char *cmd, size_t cmdlen,
-					    const char *word)
-{
-	static const char *const values[] = {
-		"list", "new", "delete", "rename", "show", "describe", NULL,
-	};
-	const char *s;
-
-	session_complete_values(lc, cmd, cmdlen, word, values);
-	/* Existing branch names make switching one tab away. */
-	fy_foreach(s, ctx->arena_branches) {
-		if (!fy_str_empty(s))
-			session_complete_value(lc, cmd, cmdlen, word, s);
-	}
-}
-
-static void session_complete_resume(struct fyai_ctx *ctx,
-				    struct fytim_completions *lc,
-				    const char *cmd, size_t cmdlen,
-				    const char *word)
-{
-	const char *s;
-
-	session_complete_value(lc, cmd, cmdlen, word, "--all");
-	fy_foreach(s, ctx->arena_branches) {
-		if (!fy_str_empty(s))
-			session_complete_value(lc, cmd, cmdlen, word, s);
-	}
-}
-
-/* Complete @label~N and @label@{N} from the entry of one branch. */
-static void session_complete_branch_refs(struct fyai_ctx *ctx,
-					 struct fytim_completions *lc,
-					 const char *cmd, size_t cmdlen,
-					 const char *word, const char *prefix,
-					 const char *label,
-					 struct fyai_branch branch,
-					 size_t limit)
-{
-	struct fyai_branch prev;
-	long long turns;
-	size_t i;
-	char value[FYAI_BRANCH_NAME_MAX + 32];
-
-	turns = fyai_branch_turn_count(branch.head, (long long)limit);
-	for (i = 1; i <= (size_t)turns; i++) {
-		if (snprintf(value, sizeof(value), "%s%s~%zu",
-			     prefix, label, i) > 0)
-			session_complete_value(lc, cmd, cmdlen, word, value);
-	}
-	for (i = 1; i <= limit && fy_is_valid(branch.prev) &&
-			!fy_is_null(branch.prev); i++) {
-		if (!fyai_branch_entry_contained(ctx->durable_allocator,
-						branch.prev, 1) ||
-		    !fyai_branch_decode(branch.prev, &prev))
-			break;
-		branch = prev;
-		if (snprintf(value, sizeof(value), "%s%s@{%zu}",
-			     prefix, label, i) > 0)
-			session_complete_value(lc, cmd, cmdlen, word, value);
-	}
-}
-
-static void session_complete_refs(struct fyai_ctx *ctx,
-				  struct fytim_completions *lc,
-				  const char *cmd, size_t cmdlen,
-				  const char *word, const char *prefix)
-{
-	enum { REF_COMPLETION_LIMIT = 8 };
-	struct fyai_branch branch;
-	const char *s, *base;
-	char value[FYAI_BRANCH_NAME_MAX + 32];
-
-	base = fyai_ctx_branch(ctx);
-	snprintf(value, sizeof(value), "%sHEAD", prefix);
-	session_complete_value(lc, cmd, cmdlen, word, value);
-	fy_foreach(s, ctx->arena_branches) {
-		if (fy_str_empty(s) || !fyai_branch_lookup(ctx->arena_branches, s,
-							       &branch))
-			continue;
-		if (snprintf(value, sizeof(value), "%s%s", prefix, s) > 0)
-			session_complete_value(lc, cmd, cmdlen, word, value);
-		session_complete_branch_refs(ctx, lc, cmd, cmdlen, word, prefix,
-					     s, branch, REF_COMPLETION_LIMIT);
-	}
-	if (base && fyai_branch_lookup(ctx->arena_branches, base, &branch))
-		session_complete_branch_refs(ctx, lc, cmd, cmdlen, word, prefix,
-					     "HEAD", branch, REF_COMPLETION_LIMIT);
-}
-
-static void session_complete_tools(struct fyai_ctx *ctx,
-					   struct fytim_completions *lc,
-					   const char *cmd, size_t cmdlen,
-					   const char *word)
-{
-	fy_generic cat, agents, agent, name;
-	const char *s;
-
-	if (word[0] != '-') {
-		session_complete_value(lc, cmd, cmdlen, word, "fyai");
-		cat = fyai_catalog_effective(ctx->cfg->catalog, ctx->cfg->gb);
-		agents = fy_get(cat, "agents");
-		fy_foreach(agent, agents) {
-			name = fy_get(agent, "name");
-			s = fy_castp(&name, "");
-			if (*s)
-				session_complete_value(lc, cmd, cmdlen, word, s);
-		}
-	}
-	session_complete_value(lc, cmd, cmdlen, word, "--brief");
-	session_complete_value(lc, cmd, cmdlen, word, "--full");
-}
-
-struct session_completion_group {
-	const char *const *names;
-	const char *const *values;
-};
-
-static void session_complete_command_args(struct fyai_ctx *ctx,
-						  const struct fyai_slash_cmd *cmd,
-						  struct fytim_completions *lc,
-						  const char *command,
-						  size_t command_len,
-						  const char *word)
-{
-	static const char *const history_names[] = {
-		"history", "transcript", NULL,
-	};
-	static const char *const history_values[] = {
-		"all", "last", "first", "range", NULL,
-	};
-	static const char *const list_names[] = { "list", NULL };
-	static const char *const list_values[] = {
-		"models", "providers", "turns", "exchanges", "reflog", NULL,
-	};
-	static const char *const mcp_names[] = { "mcp", NULL };
-	static const char *const mcp_values[] = { "show", "on", "off", NULL };
-	static const char *const config_names[] = { "config", NULL };
-	static const char *const config_values[] = {
-		"show", "effective", "edit", "validate", "schema", "describe",
-		"get", "set", "delete", NULL,
-	};
-	static const char *const catalog_names[] = { "catalog", NULL };
-	static const char *const catalog_values[] = {
-		"show", "list", "tools", "get", "set", "delete", "edit",
-		"validate", "schema", "import", "export", "reset", "update",
-		NULL,
-	};
-	static const char *const api_names[] = { "api", NULL };
-	static const char *const api_values[] = {
-		"responses", "chat-completions", "messages", NULL,
-	};
-	static const char *const log_names[] = { "log", "logging", NULL };
-	static const char *const log_values[] = {
-		"wire", "stream", "conversation", "mcp", "all", "start", "stop",
-		"clear", "view", NULL,
-	};
-	static const struct session_completion_group groups[] = {
-		{ history_names, history_values },
-		{ list_names, list_values },
-		{ mcp_names, mcp_values },
-		{ config_names, config_values },
-		{ catalog_names, catalog_values },
-		{ api_names, api_values },
-		{ log_names, log_values },
-	};
-	size_t i;
-	const char *const *name;
-	const char *after, *s;
-	char prefix[FYAI_BRANCH_NAME_MAX + 8];
-
-	if (!cmd)
-		return;
-	if (!strcmp(cmd->name, "model")) {
-		session_complete_models(ctx, lc, command, command_len, word);
-		return;
-	}
-	if (!strcmp(cmd->name, "branch")) {
-		session_complete_branch(ctx, lc, command, command_len, word);
-		return;
-	}
-	if (cmd->run == slash_resume) {
-		session_complete_resume(ctx, lc, command, command_len, word);
-		return;
-	}
-	if (cmd->run == slash_checkout || cmd->run == slash_reset) {
-		if (cmd->run == slash_checkout) {
-			session_complete_value(lc, command, command_len,
-					       word, "-b ");
-			if (!strncmp(word, "-b ", 3)) {
-				after = word + 3;
-				s = strchr(after, ' ');
-				if (!s) {
-					session_complete_value(lc, command,
-						       command_len, word,
-						       "-b session/");
-					return;
-				}
-				if ((size_t)(s - word + 1) >= sizeof(prefix))
-					return;
-				memcpy(prefix, word, (size_t)(s - word + 1));
-				prefix[s - word + 1] = '\0';
-				session_complete_refs(ctx, lc, command,
-						      command_len, word, prefix);
-				return;
-			}
-		}
-		session_complete_refs(ctx, lc, command, command_len, word, "");
-		return;
-	}
-	if (!strcmp(cmd->name, "tools")) {
-		session_complete_tools(ctx, lc, command, command_len, word);
-		return;
-	}
-	for (i = 0; i < ARRAY_SIZE(groups); i++)
-		for (name = groups[i].names; *name; name++)
-			if (!strcmp(cmd->name, *name)) {
-				session_complete_values(lc, command, command_len,
-							word, groups[i].values);
-				return;
-			}
+	(void)description;
+	(void)fytim_completion_add(arg, value);
 }
 
 void fyai_session_completion(struct fyai_ctx *ctx, const char *buf,
 				     struct fytim_completions *lc)
 {
-	const struct fyai_slash_cmd *cmd;
-	const struct fyai_slash_opt *opt;
-	const char *sp, *word;
-	const char *const *v;
-	size_t len;
-
 	if (!ctx || buf[0] != '/')
 		return;
-
-	sp = strchr(buf, ' ');
-	if (!sp) {
-		/* Complete the command name itself. */
-		len = strlen(buf + 1);
-		session_complete_command_names(lc, buf + 1, len);
-		return;
-	}
-
-	len = (size_t)(sp - buf) - 1;
-	word = sp + 1;
-	while (*word == ' ')
-		word++;
-
-	if (session_slash_lookup(buf + 1, len, &cmd, &opt))
-		return;
-
-	if (opt) {
-		v = slash_opt_values(opt);
-		if (!v && opt->kind == FYAIOK_BOOL)
-			v = bool_vals;
-		session_complete_values(lc, buf + 1, len, word, v);
-		return;
-	}
-	session_complete_command_args(ctx, cmd, lc, buf + 1, len, word);
+	fyai_cmd_session_complete(ctx, buf, session_complete_add, lc);
 }

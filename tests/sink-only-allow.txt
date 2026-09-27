@@ -21,9 +21,6 @@ src/fyai_diag.c
 src/fyai_config.c
 src/fyai_schema.c
 
-# Argument errors, the usage text and the verb help run before the context.
-src/commands.c
-
 # The arena probe reads a root and a branch before a context exists, to decide
 # which configuration to load.
 src/fyai_storage.c

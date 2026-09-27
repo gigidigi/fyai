@@ -21,23 +21,6 @@ enum fyai_auth_mode {
 	FYAI_AUTH_CHATGPT,
 };
 
-enum fyai_auth_command {
-	FYAI_AUTH_STATUS,
-	FYAI_AUTH_INFO,
-	FYAI_AUTH_USAGE,
-	FYAI_AUTH_LOGIN,
-	FYAI_AUTH_LOGOUT,
-};
-
-struct fyai_auth_args {
-	enum fyai_auth_command command;
-	const char *provider;
-	bool device_code;
-	bool no_browser;
-	bool manual;
-	bool json;
-};
-
 /* all pointer are stable in the cfg builder */
 struct fyai_credentials {
 	const char *access_token;
@@ -52,15 +35,17 @@ struct fyai_credentials {
 };
 
 const char *fyai_auth_mode_string(enum fyai_auth_mode mode);
-int fyai_auth_execute(struct fyai_ctx *ctx);
 fy_generic fyai_auth_status_data(struct fyai_ctx *ctx,
 				 struct fy_generic_builder *gb, bool info);
-int fyai_auth_status(struct fyai_ctx *ctx, bool json, bool info);
 int fyai_auth_login(struct fyai_ctx *ctx, bool device_code,
 		    bool no_browser, bool manual);
 int fyai_auth_logout(struct fyai_ctx *ctx);
-/* Fetch and display the live limits for the active subscription. */
-int fyai_auth_usage(struct fyai_ctx *ctx, bool json);
+/*
+ * Fetch the live limits of the active subscription into @out_gb: the
+ * response as the provider sends it with @raw, else a summary of it.
+ */
+int fyai_auth_usage(struct fyai_ctx *ctx, struct fy_generic_builder *out_gb,
+		    bool raw, fy_generic *datap);
 int fyai_auth_resolve(struct fyai_ctx *ctx);
 int fyai_auth_refresh(struct fyai_ctx *ctx, bool force);
 struct fyai_auth_refresh_request *

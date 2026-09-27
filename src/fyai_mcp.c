@@ -2133,21 +2133,15 @@ static void mcp_oauth_operation_cancel(struct fyai_mcp_ctx *mcp)
 	mcp->state = MCP_SRV_FAILED;
 }
 
-int fyai_mcp_status(struct fyai_ctx *ctx)
+fy_generic fyai_mcp_status_data(struct fyai_ctx *ctx,
+				struct fy_generic_builder *gb)
 {
 	struct fyai_mcp_ctx *mcp;
-	struct fy_generic_builder *gb;
 	fy_generic rows;
-	fy_generic opts;
 	const char *state;
 	const char *oauth;
 	long long expires_in;
 
-	if (!ctx->mcp)
-		return 1;
-	gb = fyai_ctx_transient_gb(ctx);
-	fyai_error_check(ctx, gb, err_out,
-			 "could not build MCP status");
 	rows = fy_seq_empty;
 	for (mcp = ctx->mcp; mcp; mcp = mcp->next) {
 		state = mcp->state == MCP_SRV_READY ? "ready" :
@@ -2182,24 +2176,7 @@ int fyai_mcp_status(struct fyai_ctx *ctx)
 			"error", mcp->last_error ?
 				fy_value(gb, mcp->last_error) : fy_null));
 	}
-	opts = fy_mapping(gb,
-		"title", "MCP endpoints",
-		"keys", fy_sequence(gb, "server", "state", "transport",
-				    "auth", "tools", "expires", "endpoint",
-				    "error"),
-		"columns", fy_mapping(gb,
-			"server", fy_mapping(gb, "name", "Server"),
-			"state", fy_mapping(gb, "name", "State"),
-			"transport", fy_mapping(gb, "name", "Transport"),
-			"auth", fy_mapping(gb, "name", "Auth"),
-			"tools", fy_mapping(gb, "name", "Tools"),
-			"expires", fy_mapping(gb, "name", "Expires"),
-			"endpoint", fy_mapping(gb, "name", "Endpoint"),
-			"error", fy_mapping(gb, "name", "Last error")));
-	return fyai_generic_to_markdown(ctx, opts, rows);
-
-err_out:
-	return -1;
+	return rows;
 }
 
 int fyai_mcp_login(struct fyai_ctx *ctx, const char *name)
@@ -2232,7 +2209,6 @@ int fyai_mcp_login(struct fyai_ctx *ctx, const char *name)
 	rc = mcp_oauth_recovery_begin(mcp);
 	fyai_error_check(ctx, !rc, err_out,
 			 "could not start OAuth login for '%s'", name);
-	fyai_result(ctx, "mcp: login started for %s\n", name);
 	return 0;
 
 err_out:
@@ -2283,7 +2259,6 @@ int fyai_mcp_logout(struct fyai_ctx *ctx, const char *name)
 	mcp->auth_token = NULL;
 	mcp->oauth_force_login = false;
 	mcp->oauth_force_refresh = false;
-	fyai_result(ctx, "mcp: logged out %s\n", name);
 	return 0;
 
 err_out:

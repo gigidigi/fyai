@@ -1910,11 +1910,10 @@ int fyai_gc_storage(struct fyai_ctx *ctx)
 	int rc;
 
 	if (access(cfg->arena_dir, F_OK)) {
-		if (errno == ENOENT) {
-			fyai_result(ctx, "gc: no arena at %s\n", cfg->arena_dir);
-			return 0;
-		}
-		return -1;
+		fyai_error_check(ctx, errno == ENOENT, err,
+				 "gc: cannot reach %s: %s", cfg->arena_dir,
+				 strerror(errno));
+		return 1;
 	}
 	/*
 	 * Cut the ref log to the requested window before compacting, so the
@@ -1940,8 +1939,9 @@ int fyai_gc_storage(struct fyai_ctx *ctx)
 	}
 	if (rc)
 		return -1;
-	fyai_result(ctx, "gc: compacted %s\n", cfg->arena_dir);
 	return 0;
+err:
+	return -1;
 }
 
 /*

@@ -288,8 +288,6 @@ int raise_stack(size_t bytes, char **argv);
 const char *find_cli_option(int argc, char **argv, const char *long_opt, char short_opt);
 bool has_cli_flag(int argc, char **argv, const char *long_opt);
 char *read_all_stdin(void);
-void usage_print_option(FILE *fp, bool color, const char *opt);
-void usage_item(FILE *fp, bool color, const char *opt, const char *desc);
 
 /* >= 0 index in set, -1 not found */
 int str_in_set(const char *v, const char *const *opts);

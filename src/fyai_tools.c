@@ -5399,15 +5399,13 @@ bool fyai_tools_focus_next(struct fyai_ctx *ctx)
 	return fyai_workpane_focus_next(ctx->workpane);
 }
 
-int fyai_tools_sessions(struct fyai_ctx *ctx)
+fy_generic fyai_tools_sessions_data(struct fyai_ctx *ctx,
+				    struct fy_generic_builder *gb)
 {
-	struct fy_generic_builder *gb;
 	struct fyai_shell_session *sess;
 	struct fyai_tool_job *job;
-	fy_generic rows, opts, agents, agent;
+	fy_generic rows, agents, agent;
 
-	if (!ctx || !(gb = fyai_ctx_transient_gb(ctx)))
-		return -1;
 	rows = fy_gb_sequence(gb);
 	agents = fyai_agents_rows(ctx, gb);
 	fy_foreach(agent, agents) {
@@ -5441,21 +5439,11 @@ int fyai_tools_sessions(struct fyai_ctx *ctx)
 					job->surface ? "focused" :
 				job->wants_input ? "waiting" : "running"));
 	}
-	if (fy_empty(rows)) {
-		fyai_result(ctx, "no active sessions");
-		return 0;
-	}
-	opts = fy_mapping(gb,
-		"title", "Active sessions",
-		"keys", fy_sequence(gb, "name", "kind", "state"),
-		"columns", fy_mapping(gb,
-			"name", fy_mapping(gb, "name", "Name"),
-			"kind", fy_mapping(gb, "name", "Kind"),
-			"state", fy_mapping(gb, "name", "State")));
-	return fyai_generic_to_markdown(ctx, opts, rows);
+	return rows;
 }
 
-int fyai_tools_kill(struct fyai_ctx *ctx, const char *name)
+int fyai_tools_kill(struct fyai_ctx *ctx, const char *name,
+		    const char **actionp)
 {
 	struct fyai_shell_session *sess = NULL, *candidate;
 	struct fyai_tool_job *agent;
@@ -5488,7 +5476,7 @@ int fyai_tools_kill(struct fyai_ctx *ctx, const char *name)
 	}
 	if (!sess && !agent) {
 		if (!fyai_agents_kill(ctx, name)) {
-			fyai_result(ctx, "stopping agent %s", name);
+			*actionp = "stopping agent";
 			return 0;
 		}
 		fyai_error(ctx, "kill: no active shell session or sub-agent is "
@@ -5497,14 +5485,14 @@ int fyai_tools_kill(struct fyai_ctx *ctx, const char *name)
 	}
 	if (sess) {
 		fyai_shell_session_close(sess, false);
-		fyai_result(ctx, "stopping shell %s", name);
+		*actionp = "stopping shell";
 	} else {
 		if (agent->btw_panel) {
 			fyai_tool_job_discard(agent);
-			fyai_result(ctx, "closed btw panel %s", name);
+			*actionp = "closed btw panel";
 		} else {
 			fyai_tool_job_cancel(agent);
-			fyai_result(ctx, "stopping agent %s", name);
+			*actionp = "stopping agent";
 		}
 	}
 	return 0;

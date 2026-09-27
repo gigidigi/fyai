@@ -657,8 +657,6 @@ fy_generic fyai_branch_build(struct fy_generic_builder *gb,
 			  "store", store);
 }
 
-/* Cap on turns walked when counting or resolving a "~N" offset. */
-#define FYAI_BRANCH_WALK_MAX 1000000
 /* Cap on ref-log entries reported for one branch. */
 #define FYAI_BRANCH_REFLOG_MAX 4096
 
@@ -1060,11 +1058,10 @@ err_out:
 	return -1;
 }
 
-/* Build the rows for `branch list` in the transient builder. */
-static fy_generic branch_list_data(struct fyai_ctx *ctx, const char *under,
-				   bool all)
+fy_generic fyai_branch_list_data(struct fyai_ctx *ctx,
+				  struct fy_generic_builder *gb,
+				  const char *under, bool all)
 {
-	struct fy_generic_builder *gb = ctx->transient_gb;
 	struct fyai_branch b;
 	fy_generic out, name, entry;
 	const char *nm, *active;
@@ -1124,15 +1121,14 @@ int fyai_branch_list(struct fyai_ctx *ctx, const char *under, bool all)
 					      "format", "time"),
 			"description", fy_mapping(gb, "name", "Description",
 						  "align", "left")));
-	return fyai_generic_to_markdown(ctx, opts, branch_list_data(ctx, under,
-								    all));
+	return fyai_generic_to_markdown(ctx, opts,
+			fyai_branch_list_data(ctx, gb, under, all));
 }
 
-int fyai_branch_show(struct fyai_ctx *ctx, const char *name)
+int fyai_branch_show_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb,
+			  const char *name, fy_generic *datap)
 {
-	struct fy_generic_builder *gb = ctx->transient_gb;
 	struct fyai_branch b;
-	fy_generic data, opts;
 
 	if (!name)
 		name = fyai_ctx_branch(ctx);
@@ -1141,7 +1137,7 @@ int fyai_branch_show(struct fyai_ctx *ctx, const char *name)
 		return -1;
 	}
 
-	data = fy_mapping(gb,
+	*datap = fy_mapping(gb,
 		"branch", fy_value(gb, name),
 		"current", fy_value(gb, (bool)!strcmp(name,
 					fyai_ctx_branch(ctx))),
@@ -1154,6 +1150,21 @@ int fyai_branch_show(struct fyai_ctx *ctx, const char *name)
 		"description", fy_value(gb, fy_castp(&b.description, "-")),
 		"agent", fy_value(gb, fy_get(b.agent, "persona", "-")),
 		"reflog_entries", fy_value(gb, branch_chain_len(b.entry)));
+	fyai_error_check(ctx, fy_is_valid(*datap), err_out,
+			 "cannot build the details of branch '%s'", name);
+	return 0;
+
+err_out:
+	return -1;
+}
+
+int fyai_branch_show(struct fyai_ctx *ctx, const char *name)
+{
+	struct fy_generic_builder *gb = ctx->transient_gb;
+	fy_generic data, opts;
+
+	if (fyai_branch_show_data(ctx, gb, name, &data))
+		return -1;
 	opts = fy_mapping(gb, "title", "Branch", "key_header", "Field",
 			  "value_header", "Value",
 			  "columns", fy_mapping(gb,
@@ -1248,7 +1259,6 @@ int fyai_branch_create(struct fyai_ctx *ctx, const char *name,
 
 	if (switch_to)
 		return fyai_branch_checkout(ctx, name, false, NULL);
-	fyai_result(ctx, "created branch %s\n", name);
 	return 0;
 
 err_out:
@@ -1383,7 +1393,6 @@ int fyai_branch_delete(struct fyai_ctx *ctx, const char *name, bool force)
 	rc = branches_publish(ctx, branches);
 	fyai_error_check(ctx, !rc, err_out,
 			 "could not publish deletion of '%s'", name);
-	fyai_result(ctx, "deleted branch %s\n", name);
 	return 0;
 
 err_out:
@@ -1471,7 +1480,6 @@ int fyai_branch_rename(struct fyai_ctx *ctx, const char *from, const char *to)
 	rc = branches_publish(ctx, branches);
 	fyai_error_check(ctx, !rc, err_out,
 			 "could not publish rename of '%s'", from);
-	fyai_result(ctx, "renamed %s to %s\n", from, to);
 	return 0;
 
 err_out:
@@ -1541,7 +1549,6 @@ int fyai_branch_checkout(struct fyai_ctx *ctx, const char *name, bool create,
 	rc = fyai_publish_state(ctx);
 	fyai_error_check(ctx, !rc, err_out,
 			 "could not publish checkout of '%s'", name);
-	fyai_result(ctx, "switched to branch %s\n", name);
 	return 0;
 
 err_out:
@@ -1551,7 +1558,6 @@ err_out:
 int fyai_branch_reset(struct fyai_ctx *ctx, const char *spec)
 {
 	fy_generic head;
-	long long turns;
 
 	if (fyai_resolve_ref(ctx, spec, &head))
 		return -1;
@@ -1562,10 +1568,6 @@ int fyai_branch_reset(struct fyai_ctx *ctx, const char *spec)
 	if (fyai_publish_state(ctx))
 		return -1;
 
-	turns = fyai_branch_turn_count(head, FYAI_BRANCH_WALK_MAX);
-	fyai_result(ctx, "%s is now at %s (%lld turn%s); the previous head is %s@{1}\n",
-	       fyai_ctx_branch(ctx), spec, turns, turns == 1 ? "" : "s",
-	       fyai_ctx_branch(ctx));
 	return 0;
 }
 
@@ -1602,11 +1604,11 @@ int fyai_branch_describe(struct fyai_ctx *ctx, const char *name,
 }
 
 /* Report the current root or the root named by @spec. */
-int fyai_root_report(struct fyai_ctx *ctx, const char *spec, bool verbose)
+int fyai_root_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb,
+		   const char *spec, bool verbose, fy_generic *datap)
 {
-	struct fy_generic_builder *gb = ctx->transient_gb;
 	struct fyai_root r;
-	fy_generic root, data, opts;
+	fy_generic root;
 	const char *handle;
 	fy_generic_value v;
 	int rc;
@@ -1623,26 +1625,21 @@ int fyai_root_report(struct fyai_ctx *ctx, const char *spec, bool verbose)
 				 "'%s' names no root in this arena", spec);
 	}
 	handle = fy_sprintfa("%llx", (unsigned long long)v);
-
 	if (!verbose) {
-		fyai_result(ctx, "%s\n", handle);
+		*datap = fy_value(gb, handle);
 		return 0;
 	}
 
 	root = (fy_generic){ .v = v };
 	rc = fyai_root_decode(root, &r);
 	fyai_error_check(ctx, rc >= 0, err_out, "unrecognized arena root");
-	data = fy_mapping(gb,
+	*datap = fy_mapping(gb,
 		"root", fy_value(gb, handle),
 		"head", fy_value(gb, fyai_root_head_name(&r) ?
 				fyai_root_head_name(&r) : ""),
 		"branches", fy_value(gb, (long long)
 			fy_generic_mapping_get_pair_count(r.branches)),
 		"pinned", fy_value(gb, ctx->cfg->root_pinned));
-	opts = fy_mapping(gb, "title", "Root", "key_header", "Field",
-			  "value_header", "Value");
-	rc = fyai_generic_to_markdown(ctx, opts, data);
-	fyai_error_check(ctx, !rc, err_out, "could not render root");
 	return 0;
 
 err_out:

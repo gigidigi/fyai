@@ -452,17 +452,18 @@ struct fyai_cfg {
 	 * before fyai_run() declares a context, and raise a third of the
 	 * diagnostics in the tree.
 	 */
+	/*
+	 * The session layer: settings that this session changed and does not
+	 * store. It goes on top of the stored configuration, --config, and
+	 * --set, and lives in @gb.
+	 */
+	fy_generic config_session;
+
 	struct fyai_diag diag;
 };
 
-static inline const struct fyai_verb *
-fyai_cfg_verb(struct fyai_cfg *cfg)
-{
-	if (!cfg)
-		return NULL;
-
-	return fyai_id_to_verb(cfg->cmd.id);
-}
+/* The properties of what @cfg runs, or NULL before it is chosen. */
+const struct fyai_verb *fyai_cfg_verb(struct fyai_cfg *cfg);
 
 static inline bool
 fyai_cfg_no_requests(struct fyai_cfg *cfg)
@@ -484,6 +485,14 @@ fyai_cfg_no_storage(struct fyai_cfg *cfg)
 	return !v || (v->flags & FYAIVF_NO_STORAGE);
 }
 
+/* The verb opens the arena that exists and never creates one. */
+static inline bool
+fyai_cfg_storage_optional(struct fyai_cfg *cfg)
+{
+	const struct fyai_verb *v = fyai_cfg_verb(cfg);
+	return v && (v->flags & FYAIVF_STORAGE_OPTIONAL);
+}
+
 static inline bool
 fyai_cfg_uses_storage(struct fyai_cfg *cfg)
 {
@@ -491,6 +500,7 @@ fyai_cfg_uses_storage(struct fyai_cfg *cfg)
 }
 
 struct fyai_mcp_ctx;
+struct fyai_cmd_call;
 struct fyai_config_edit_request;
 struct fyai_catalog_update_request;
 
@@ -534,6 +544,7 @@ struct fyai_ctx {
 	long long agent_execution, agent_parent;
 	struct fyai_config_edit_request *config_edit;
 	struct fyai_catalog_update_request *catalog_update;
+	struct fyai_cmd_call *cmd_call;	/* the active async command */
 	/* The SIGINT handler can set this value. */
 	volatile sig_atomic_t interrupt_pending;
 	/* Count SIGINT edges while interrupt_pending remains set. */

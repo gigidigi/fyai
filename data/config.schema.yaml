@@ -9,7 +9,9 @@
 # i.e. true): this validates the shape/type/enum of keys fyai actually reads,
 # not a closed vocabulary - an unknown key is silently ignored by the loader
 # today, so rejecting it here would just be a second, divergent source of
-# truth. Wired into the commit-time validation gate
+# truth. `x-fyai-scope: session` on a key or a group says that a session
+# setting changes it for that session only, in the session layer; a key
+# without it is stored. Wired into the commit-time validation gate
 # (config_validate_report_shallow in src/fyai_config.c), so every commit
 # path (set/import/edit/--set) is checked against it; also available
 # directly via `fyai config validate` and `fyai config schema`.
@@ -26,6 +28,7 @@ properties:
       uses a saved ChatGPT login for the OpenAI Responses provider; api-key
       and chatgpt force the selected method.
   model:
+    x-fyai-complete: model
     type: string
     description: >-
       Selects the model; the catalogue maps it to provider/endpoint/grammar/
@@ -432,6 +435,7 @@ properties:
           descendant tree. The root grants admission before provider work
           starts. Excess calls fail so the caller can wait or change its task.
   sandbox:
+    x-fyai-scope: session
     default: false
     description: >-
       Landlock-confine shell-tool sub-executions (Linux only; a no-op
@@ -496,6 +500,7 @@ properties:
     default: -1
     description: Number of top log-probability candidates per token (-1 = unset).
   token_extents:
+    x-fyai-scope: session
     type: boolean
     default: false
     description: Record streamed token extents in turn metadata.
@@ -547,6 +552,7 @@ properties:
         default: false
         description: Log MCP lifecycle and JSON-RPC request metadata.
   display:
+    x-fyai-scope: session
     type: object
     description: >-
       Stylistic/output options; the only supported form is this nested
@@ -769,6 +775,7 @@ properties:
           tile gives it the keys and a click off the tiles gives them back to
           the prompt.
       tool_detail:
+        x-fyai-scope: stored
         type: string
         enum: [none, brief, default, full]
         default: default
@@ -777,6 +784,7 @@ properties:
           body, default hides read/write bodies, bounds shell output, and
           shows patches fully; full shows every body.
       transcript_system:
+        x-fyai-scope: stored
         type: boolean
         default: false
         description: Include system messages in transcript output.
@@ -801,6 +809,8 @@ properties:
         default: auto
         description: auto (colour iff a terminal) | off | on (force, even piped).
       theme:
+        x-fyai-scope: stored
+        x-fyai-complete: theme
         type: string
         default: "ember:auto"
         description: >-

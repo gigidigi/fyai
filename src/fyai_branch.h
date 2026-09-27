@@ -221,6 +221,9 @@ char *fyai_branch_pick_last(struct fyai_ctx *ctx, fy_generic branches,
  * Count the turns on a branch, capped at @limit so a listing of many branches
  * cannot walk unbounded history.
  */
+/* Cap on turns walked when counting or resolving a "~N" offset. */
+#define FYAI_BRANCH_WALK_MAX 1000000
+
 long long fyai_branch_turn_count(fy_generic head, long long limit);
 
 /*
@@ -258,6 +261,16 @@ int fyai_ref_parse(const char *spec, char *buf, size_t size, long long *np);
 /* Backends for the `branch` and `checkout` verbs and the /branch command. */
 int fyai_branch_list(struct fyai_ctx *ctx, const char *under, bool all);
 int fyai_branch_show(struct fyai_ctx *ctx, const char *name);
+/*
+ * The rows of `branch list` and the details of `branch show`, built in @gb.
+ * The status of a create, delete, rename, or checkout is the caller's to
+ * present: the backends below report only a failure.
+ */
+fy_generic fyai_branch_list_data(struct fyai_ctx *ctx,
+				 struct fy_generic_builder *gb,
+				 const char *under, bool all);
+int fyai_branch_show_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb,
+			  const char *name, fy_generic *datap);
 int fyai_branch_create(struct fyai_ctx *ctx, const char *name,
 		       const char *start, const char *description,
 		       bool switch_to);
@@ -278,7 +291,13 @@ int fyai_branch_checkout(struct fyai_ctx *ctx, const char *name, bool create,
 int fyai_branch_reset(struct fyai_ctx *ctx, const char *spec);
 
 /* Report the current root or the root behind @spec. */
-int fyai_root_report(struct fyai_ctx *ctx, const char *spec, bool verbose);
+/*
+ * The handle of the current root, or of the root that @spec was published in,
+ * built in @gb. @verbose gives a mapping of the root: the handle, the head
+ * branch, the number of branches, and whether it is pinned.
+ */
+int fyai_root_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb,
+		   const char *spec, bool verbose, fy_generic *datap);
 int fyai_branch_describe(struct fyai_ctx *ctx, const char *name,
 			 const char *description);
 

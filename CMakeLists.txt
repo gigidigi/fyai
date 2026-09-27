@@ -352,6 +352,10 @@ fyai_embed(FYAI_EMBEDDED_PAGE embedded_page.inc data/page.yaml)
 fyai_embed(FYAI_EMBEDDED_PAGE_SCHEMA embedded_page_schema.inc
     data/page.schema.yaml)
 
+# Embed the command definitions and their schema (src/fyai_cmd.c).
+fyai_embed(FYAI_EMBEDDED_COMMANDS embedded_commands.inc data/commands.yaml)
+fyai_embed(FYAI_EMBEDDED_COMMAND_SCHEMA embedded_command_schema.inc
+    data/command.schema.yaml)
 
 # Generate config.h
 configure_file(
@@ -448,13 +452,32 @@ set(FYAI_SOURCES
     src/fyai_oauth.c
     src/fyai_auth_util.c
     src/fyai_secret.c
-    src/commands.c
+    src/fyai_cmd.c
+    src/fyai_cmd_auth.c
+    src/fyai_cmd_branch.c
+    src/fyai_cmd_catalog.c
+    src/fyai_cmd_complete.c
+    src/fyai_cmd_config.c
+    src/fyai_cmd_help.c
+    src/fyai_cmd_mcp.c
+    src/fyai_cmd_session.c
+    src/fyai_cmd_misc.c
+    src/fyai_cmd_store.c
+    src/fyai_cmd_view.c
 )
 
 add_executable(fyai
     src/main.c
     ${FYAI_SOURCES}
 )
+# Write the command reference, doc/commands.md, from the definitions. The
+# case commands_reference fails when the file is out of date.
+add_custom_target(docs-commands
+    COMMAND sh -c "\"$<TARGET_FILE:fyai>\" help --markdown > \"${CMAKE_CURRENT_SOURCE_DIR}/doc/commands.md\""
+    DEPENDS fyai
+    COMMENT "Writing doc/commands.md"
+    VERBATIM)
+
 # The C23 __isoc23_* redirect wrappers exist only so portable mostly-static
 # glibc binaries do not require GLIBC_2.38; fully dynamic builds use the host
 # glibc directly (and the interposers break ASAN's own interceptors).

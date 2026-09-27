@@ -96,6 +96,11 @@ int fyai_peek_arena_config(const char *arena_dir_opt, const char *branch_opt,
 			   const char *root_spec, struct fy_generic_builder *gb,
 			   fy_generic *configp, fy_generic *catalogp,
 			   char **branchp, fy_generic_value *rootp);
+/*
+ * Compact the arena, after cutting the ref log to the count that the gc
+ * arguments keep. Returns 0 when compacted, 1 when there is no arena, and
+ * -1 with the cause raised.
+ */
 int fyai_gc_storage(struct fyai_ctx *ctx);
 
 #endif

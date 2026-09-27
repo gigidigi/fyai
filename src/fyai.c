@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include "fyai.h"
+#include "fyai_cmd.h"
 #include "fyai_agent.h"
 #include "fyai_catalog.h"
 #include "fyai_config.h"
@@ -2255,7 +2256,10 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 	if (fyai_signals_open(ctx))
 		goto err;
 
-	if (!fyai_cfg_no_storage(cfg)) {
+	/* A verb whose storage is optional runs without an arena that is not
+	 * there, and asks no question about making one. */
+	if (!fyai_cfg_no_storage(cfg) &&
+	    !(fyai_cfg_storage_optional(cfg) && access(cfg->arena_dir, F_OK))) {
 		if (fyai_setup_storage(ctx))
 			goto err;
 	}
@@ -2282,7 +2286,7 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 		goto err;
 
 	/* Start MCP here for non-interactive modes and apply its tools. */
-	if (!cfg->interactive && cfg->cmd.id != FYAIVID_AGENT) {
+	if (!cfg->interactive && !cfg->agent_child) {
 		rc = fyai_mcp_bringup(ctx);
 		fyai_error_check(ctx, !rc, err, "could not initialize MCP servers");
 		rc = fyai_request_state_apply(ctx);
@@ -2632,8 +2636,11 @@ static void fyai_interactive_finish_output(struct fyai_ctx *ctx)
  */
 static bool fyai_resume_picker(const struct fyai_cfg *cfg)
 {
-	return cfg->cmd.id == FYAIVID_RESUME &&
-	       !cfg->cmd.args.resume.branch && !cfg->cmd.args.resume.last;
+	const struct fyai_cmd_state *st = &cfg->cmd.reg;
+
+	return cfg->cmd.run == FYAI_RUN_CMD && fyai_cmd_state_is(st, "resume") &&
+	       !fy_is_valid(fy_get(st->args, "session", fy_invalid)) &&
+	       !fy_get(st->args, "last", false);
 }
 
 static void fyai_interactive_prepare(struct fyai_ctx *ctx,
@@ -2912,6 +2919,9 @@ static void fyai_interactive_process_interrupt(struct fyai_ctx *ctx,
 	}
 	if (run && !delivered)
 		fyai_turn_run_cancel(run);
+	/* A command that waits, such as a login, is stopped the same way. */
+	if (!delivered)
+		fyai_cmd_session_interrupt(ctx);
 	/* Keep a signal that arrived while this interrupt was handled. */
 	ctx->interrupt_pending = ctx->interrupt_seq != ctx->interrupt_seen;
 }
@@ -3153,7 +3163,7 @@ static int fyai_prompt_interactive_async(struct fyai_ctx *ctx)
 		}
 
 		/* Submit events only between turns. */
-		if (!run && gated && !ctx->config_edit &&
+		if (!run && gated && !ctx->config_edit && !ctx->cmd_call &&
 		    fyai_event_queued(ctx)) {
 			/*
 			 * A wait whose owner settled since the poll is
@@ -3179,7 +3189,11 @@ static int fyai_prompt_interactive_async(struct fyai_ctx *ctx)
 		 * stays queued behind it. Without a waiting line the read
 		 * would only block the pump.
 		 */
-		if ((!run || fyai_ui_has_line(ctx)) && gated && !ctx->config_edit) {
+		/* A finished async command presents between turns. */
+		if (!run)
+			(void)fyai_cmd_session_step(ctx);
+		if ((!run || fyai_ui_has_line(ctx)) && gated &&
+		    !ctx->config_edit && !ctx->cmd_call) {
 			line_result = fyai_interactive_read_line(ctx, histfile, &run);
 			if (line_result == FYAILR_QUIT) {
 				quit = true;
@@ -3217,6 +3231,7 @@ out:
 	}
 	fyai_catalog_update_destroy(ctx->catalog_update);
 	ctx->catalog_update = NULL;
+	fyai_cmd_session_cancel(ctx);
 	/* Reclaim the active turn's builder or a lingering idle scratch one. */
 	fyai_cleanup_transient_builder(ctx);
 	if (!fyai_mcp_stop(ctx)) {
@@ -3437,6 +3452,81 @@ int fyai_prompt(struct fyai_ctx *ctx)
 	if (cfg->stats && !fyai_agent_delegated(ctx))
 		fyai_print_usage_stats(ctx);
 	return 0;
+}
+
+/*
+ * A bare --set, --get, or --delete run: fyai_run() applied the operations
+ * before it executes, so nothing is left to do.
+ */
+static int execute_config_ops(struct fyai_ctx *ctx)
+{
+	(void)ctx;
+	return 0;
+}
+
+static const struct fyai_verb run_prompt = {
+	.name	 = "prompt",
+	.execute = fyai_prompt,
+	.flags	 = FYAIVF_INTERACTIVE,
+};
+
+static const struct fyai_verb run_config = {
+	.name	 = "config",
+	.execute = execute_config_ops,
+	.flags	 = FYAIVF_BATCH | FYAIVF_NO_REQUESTS,
+};
+
+const struct fyai_verb *fyai_cfg_verb(struct fyai_cfg *cfg)
+{
+	if (!cfg)
+		return NULL;
+	switch (cfg->cmd.run) {
+	case FYAI_RUN_PROMPT:
+		return &run_prompt;
+	case FYAI_RUN_CONFIG:
+		return &run_config;
+	case FYAI_RUN_CMD:
+		return &cfg->cmd.reg.verb;
+	default:
+		return NULL;
+	}
+}
+
+int fyai_run(struct fyai_cfg *cfg)
+{
+	struct fyai_ctx ctx;
+	int rc;
+
+	/*
+	 * Scoped to cfg, not ctx: a failed setup may not have left one. Each of
+	 * these is the stage noticing its callee failed, so it is demoted to
+	 * debug whenever the callee said why - and stays the reported error when
+	 * nothing else did.
+	 */
+	rc = fyai_setup(&ctx, cfg);
+	fyai_cfg_error_check(cfg, !rc, err_out, "failed to initialize fyai");
+
+	/* Persist/replay any global --set/--delete/--get before the verb runs. */
+	rc = fyai_apply_config_ops(&ctx);
+	fyai_cfg_error_check(cfg, !rc, err_out, "config operation failed");
+
+	rc = fyai_execute(&ctx);
+	fyai_cfg_error_check(cfg, !rc, err_out, "fyai execution failed");
+
+out:
+	/*
+	 * The backstop: err_out falls through here, so one drain covers every
+	 * path out of a verb and nothing collected can be dropped unreported.
+	 */
+	fyai_diag_drain(&cfg->diag);
+	fyai_cleanup(&ctx);
+	/* Teardown can report after the first drain. */
+	fyai_diag_drain(&cfg->diag);
+	return rc ? -1 : 0;
+
+err_out:
+	rc = -1;
+	goto out;
 }
 
 int fyai_execute(struct fyai_ctx *ctx)

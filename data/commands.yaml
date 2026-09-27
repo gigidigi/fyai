@@ -1,0 +1,2459 @@
+# SPDX-License-Identifier: MIT
+#
+# Command definitions: one source for the parser, validation, completion, and
+# help of a verb (`fyai branch new x`) and a slash command (`/branch new x`).
+# data/command.schema.yaml describes this document; doc/command-schema-plan.md
+# describes the design.
+#
+# A command has either `commands` (a group) or a `handler`. `arguments` is a
+# JSON Schema of the argument mapping; the x-fyai-* keywords bind each
+# property to the command line.
+
+global:
+  title: options of every invocation
+  description: |
+    Global options go before the verb. With no verb, the remaining arguments
+    are the prompt; with no arguments, fyai starts an interactive session.
+  arguments:
+    type: object
+    properties:
+      help:
+        type: boolean
+        description: show the help, as fyai help does with the words that follow
+        x-fyai-short: h
+      version:
+        type: boolean
+        description: print the fyai version
+      config:
+        type: string
+        description: load an explicit configuration file
+        x-fyai-short: C
+        x-fyai-meta: FILE
+        x-fyai-complete: file
+      env:
+        type: string
+        description: source a .env file (only the variables that are used)
+        x-fyai-short: e
+        x-fyai-meta: FILE
+        x-fyai-complete: file
+      model:
+        type: string
+        description: model, optionally as provider/model
+        x-fyai-short: m
+        x-fyai-meta: MODEL
+        x-fyai-complete: model
+      branch:
+        type: string
+        description: work on this branch (else $FYAI_BRANCH, else HEAD)
+        x-fyai-short: b
+        x-fyai-meta: BRANCH
+        x-fyai-complete: branch
+      root:
+        type: string
+        description: read one exact state by root handle (read-only)
+        x-fyai-meta: HANDLE
+      set:
+        type: array
+        items: {type: string}
+        description: set a configuration key for this run and store it
+        x-fyai-repeat: true
+        x-fyai-meta: KEY=VALUE
+        x-fyai-complete: config-assign
+      get:
+        type: string
+        description: print a configuration key as one-line flow
+        x-fyai-meta: KEY
+        x-fyai-complete: config-path
+      delete:
+        type: array
+        items: {type: string}
+        description: delete a configuration key
+        x-fyai-repeat: true
+        x-fyai-meta: KEY
+        x-fyai-complete: config-path
+      transient:
+        type: boolean
+        description: keep the edits and the state of this run in memory only
+      api-key:
+        type: string
+        description: API key (else the PROVIDER_API_KEY variable)
+        x-fyai-short: k
+        x-fyai-meta: KEY
+      new:
+        type: boolean
+        description: start a new conversation
+      sandbox:
+        type: boolean
+        description: confine shell tools with Landlock (Linux)
+      color:
+        type: string
+        enum: [auto, "off", "on"]
+        description: colour output
+      theme:
+        type: string
+        description: Markdown theme
+        x-fyai-meta: THEME
+        x-fyai-complete: theme
+      interactive:
+        type: boolean
+        description: interactive prompt loop
+        x-fyai-short: i
+      answer:
+        type: array
+        items: {type: string}
+        description: supply an ask_user answer in advance
+        x-fyai-repeat: true
+        x-fyai-meta: TEXT
+      debug:
+        type: boolean
+        description: increase the debug verbosity
+        x-fyai-short: d
+
+topics:
+  - topic: refs
+    title: the reference syntax
+    description: |
+      A reference names one stored state of a branch. Only symbolic
+      references exist:
+
+      - `<branch>`: the head of the branch. `HEAD` names the current branch.
+      - `<branch>~N`: N stored turns before the head. One exchange of a user
+        and the assistant is normally two turns.
+      - `<branch>^`, `<branch>^^`: one caret for each turn back.
+      - `<branch>@{N}`: the Nth earlier entry of the ref log of the branch.
+        `<branch>@{1}` is the state before the last change.
+
+      A branch name is slash-separated: `feature/x` is below `feature`.
+      Names that start with `session/` are interactive sessions; a name that
+      holds `agent:` is the conversation of a sub-agent.
+  - topic: config-paths
+    title: configuration paths and values
+    description: |
+      A configuration path is a slash-separated list of keys, such as
+      `display/theme` or `reasoning/effort`. A value is a YAML flow
+      document: `on`, `42`, `'a string'`, `[a, b]`, `{k: v}`.
+
+      `data/config.schema.yaml` defines the keys and their types;
+      `fyai config describe [PATH]` shows them.
+  - topic: api-key
+    title: how an API key is configured
+    description: |
+      fyai never stores a raw API key. The `api_key` setting names the
+      environment variable that holds the key:
+
+          api_key: {type: env, value: OPENAI_API_KEY}
+
+      Without a setting, fyai reads `<PROVIDER>_API_KEY`. `--api-key` gives
+      a key for one invocation only.
+  - topic: output
+    title: machine-readable output
+    description: |
+      Each verb that is defined in the command registry accepts
+      `--output FORMAT`. `markdown`, the default, renders the result.
+      `json` writes it as one compact JSON document, and `yaml` as a YAML
+      document. A command that streams writes one document for each item:
+      JSON Lines, or a YAML stream.
+  - topic: completion
+    title: shell completion
+    description: |
+      `fyai completion bash`, `zsh`, or `fish` writes a script that
+      completes fyai in that shell. Load it from the start-up file:
+
+          source <(fyai completion bash)      # ~/.bashrc
+          source <(fyai completion zsh)       # ~/.zshrc
+          fyai completion fish | source       # config.fish
+
+      The script asks `fyai __complete` for the candidates, so branches,
+      models, and configuration paths come from the arena.
+
+commands:
+  - command: help
+    title: describe commands and topics
+    description: |
+      With no argument, list the commands. With a command path, describe
+      that command. With a topic name, show the topic.
+    surfaces: [cli, session]
+    handler: help
+    mode: result
+    flags: [no-storage]
+    view: true
+    while_busy: run
+    examples:
+      - args: help branch new
+        text: describe the command that creates a branch
+      - args: help refs
+        text: explain the reference syntax
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        topic:
+          type: array
+          items: {type: string}
+          description: a command path or a topic name
+          x-fyai-positional: 0
+          x-fyai-meta: TOPIC
+          x-fyai-complete: help-topic
+        markdown:
+          type: boolean
+          description: write the whole reference as Markdown
+          x-fyai-surfaces: [cli]
+        man:
+          type: boolean
+          description: write the whole reference as the manual page fyai(1)
+          x-fyai-surfaces: [cli]
+
+  - command: branch
+    title: list, create, and manage branches
+    description: |
+      A branch holds one conversation and the configuration that goes with
+      it. See `help refs` for the reference syntax.
+    surfaces: [cli, session]
+    default: list
+    fallback: {cli: list, session: switch}
+    see_also: [checkout, refs]
+    commands:
+      - command: list
+        title: list the branches
+        description: |
+          List the branches. With a name, list only the branches below it.
+          Sub-agent branches are hidden unless `--all` is given.
+        handler: branch_list
+        flags: [transient]
+        view: true
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            under:
+              type: string
+              description: list only the branches below this name
+              x-fyai-positional: 0
+              x-fyai-meta: BRANCH
+              x-fyai-complete: branch
+            all:
+              type: boolean
+              description: include sub-agent branches
+              x-fyai-short: a
+        render:
+          table:
+            title: Branches
+            empty: no branches
+            keys: [current, branch, turns, model, updated, description]
+            columns:
+              current: {name: "*", format: mark}
+              branch: {name: Branch, align: left}
+              turns: {name: Turns}
+              model: {name: Model, align: left}
+              updated: {name: Updated, align: left, format: time}
+              description: {name: Description, align: left}
+
+      - command: new
+        aliases: [create]
+        title: create a branch
+        description: |
+          Create a branch at a reference. The new branch takes the
+          conversation and the configuration of that reference. In a
+          session, the session then switches to the new branch.
+        handler: branch_new
+        examples:
+          - args: branch new feature main~2
+            text: start a branch two turns before the head of main
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: name of the new branch
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+            ref:
+              type: string
+              description: start point (default the current head)
+              x-fyai-positional: 1
+              x-fyai-meta: REF
+              x-fyai-complete: ref
+        render:
+          message:
+            - "created branch {branch}"
+            - "switched to branch {switched}"
+
+      - command: delete
+        aliases: [rm]
+        title: delete a branch
+        description: |
+          Delete a branch. The current branch cannot be deleted. A branch
+          with branches below it needs `--force`.
+        handler: branch_delete
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the branch to delete
+              x-fyai-positional: 0
+              x-fyai-meta: BRANCH
+              x-fyai-complete: branch
+            force:
+              type: boolean
+              description: also delete a branch that has branches below it
+              x-fyai-short: f
+        render:
+          message: "deleted branch {branch}"
+
+      - command: rename
+        aliases: [mv]
+        title: rename a branch
+        description: Give a branch a new name. Its ref log goes with it.
+        handler: branch_rename
+        arguments:
+          type: object
+          required: [name, new_name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the branch to rename
+              x-fyai-positional: 0
+              x-fyai-meta: BRANCH
+              x-fyai-complete: branch
+            new_name:
+              type: string
+              minLength: 1
+              description: the new name
+              x-fyai-positional: 1
+              x-fyai-meta: NEW
+        render:
+          message: "renamed {from} to {to}"
+
+      - command: show
+        title: show the details of a branch
+        description: Show the details of a branch, by default the current one.
+        handler: branch_show
+        flags: [transient]
+        view: true
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              description: the branch (default the current branch)
+              x-fyai-positional: 0
+              x-fyai-meta: BRANCH
+              x-fyai-complete: branch
+        render:
+          table:
+            title: Branch
+            key_header: Field
+            value_header: Value
+            columns:
+              created: {format: time}
+              updated: {format: time}
+
+      - command: describe
+        title: set the description of a branch
+        description: |
+          Set the description of a branch. With no text, remove it.
+        handler: branch_describe
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the branch
+              x-fyai-positional: 0
+              x-fyai-meta: BRANCH
+              x-fyai-complete: branch
+            text:
+              type: string
+              description: the description
+              x-fyai-positional: 1
+              x-fyai-rest: true
+              x-fyai-meta: TEXT
+        render:
+          message: "described branch {branch}"
+
+      - command: switch
+        title: switch the session to a branch
+        description: |
+          Switch the session to a branch, and create the branch when it does
+          not exist. The conversation and the configuration of the branch
+          replace those of the session. `/branch NAME` is the same command.
+        surfaces: [session]
+        handler: branch_switch
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the branch
+              x-fyai-positional: 0
+              x-fyai-meta: BRANCH
+              x-fyai-complete: branch
+        render:
+          message:
+            - "created branch {created}"
+            - "switched to branch {branch}"
+
+      - command: attach
+        title: show the screen of a live sub-agent
+        description: Give the tile of a running sub-agent the pane and the keys.
+        surfaces: [session]
+        handler: branch_attach
+        while_busy: run
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the branch of the sub-agent
+              x-fyai-positional: 0
+              x-fyai-meta: AGENT
+              x-fyai-complete: agent-branch
+
+      - command: detach
+        title: leave the screen of a sub-agent
+        description: Return the keys from an attached sub-agent to the prompt.
+        surfaces: [session]
+        handler: branch_detach
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+
+  - command: checkout
+    title: switch to a branch or fork a reference
+    description: |
+      Select a branch and move the stored `HEAD` to it. With `-b`, create
+      the branch first, at START or at the current head.
+
+      In a session, a reference to an earlier state (`main~2`,
+      `main@{1}`) is not moved: the session starts a new `session/` branch
+      at that state and switches to it.
+    surfaces: [cli, session]
+    handler: checkout
+    see_also: [branch, refs]
+    examples:
+      - args: checkout -b fix main@{1}
+        text: create the branch fix at the state before the last change
+    arguments:
+      type: object
+      required: [target]
+      additionalProperties: false
+      properties:
+        create:
+          type: boolean
+          description: create the branch TARGET first
+          x-fyai-short: b
+          x-fyai-long: create
+        target:
+          type: string
+          minLength: 1
+          description: the branch, or a reference in a session
+          x-fyai-positional: 0
+          x-fyai-meta: BRANCH
+          x-fyai-complete: ref
+        start:
+          type: string
+          description: the start point of a branch that -b creates
+          x-fyai-positional: 1
+          x-fyai-meta: START
+          x-fyai-complete: ref
+    render:
+      message:
+        - "created branch {created}"
+        - "switched to branch {branch}"
+
+  - command: model
+    title: show or select the model
+    description: |
+      With no name, show the model, its provider, the API grammar, and the
+      context window. With a name, select that model and store it in the
+      configuration of the branch. `provider/model` selects the offering of
+      one provider.
+    surfaces: [cli, session]
+    handler: model
+    while_busy: bare
+    see_also: [config-paths]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: the model to select
+          x-fyai-positional: 0
+          x-fyai-meta: MODEL
+          x-fyai-complete: model
+    render:
+      message: "model: {model} (provider {provider}, api {api})"
+
+  - command: init
+    title: create the arena in this directory
+    description: |
+      Create ./.fyai/arena/ and publish its first root. FILE, or
+      config.yaml when it exists, is stored as the configuration; `--force`
+      stores it over an existing configuration.
+    surfaces: [cli]
+    handler: init
+    prepare: init
+    flags: [no-storage]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        force:
+          type: boolean
+          description: store the configuration over an existing one
+          x-fyai-short: f
+        file:
+          type: string
+          description: the configuration file
+          x-fyai-positional: 0
+          x-fyai-meta: FILE
+          x-fyai-complete: file
+
+  - command: dump
+    title: write the stored conversation as YAML
+    description: |
+      Write the stored conversation as YAML: `state`, the canonical and
+      provider-independent conversation; `anchors`, the whole turn graph;
+      or `providers`, the wire streams of each turn. `--first`, `--last`,
+      and `--range` select turns (from 0, inclusive).
+    surfaces: [cli]
+    handler: dump
+    flags: [transient]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        what:
+          type: string
+          enum: [state, anchors, providers]
+          default: state
+          description: what to write
+          x-fyai-positional: 0
+          x-fyai-meta: WHAT
+        first:
+          type: integer
+          minimum: 0
+          description: the first N turns
+          x-fyai-meta: N
+        last:
+          type: integer
+          minimum: 0
+          description: the last N turns
+          x-fyai-meta: N
+        range:
+          type: string
+          pattern: "^[0-9]+[,:][0-9]+$"
+          description: the turns A to B
+          x-fyai-meta: A,B
+        decorate:
+          type: boolean
+          description: add comments that name each part
+
+  - command: import
+    title: read a conversation into the branch
+    description: |
+      Read a textual export from standard input or `--input`, and replay its
+      publish boundaries into the branch. `--branch` selects an empty
+      destination. Compaction markers make provider requests;
+      `--ignore-compact` skips them.
+
+      `--from` reads the sessions of another program: `auto`,
+      `claude-code`, or `codex`. `--list` finds its sessions (`--all` in
+      every directory), `--session ID` imports one, and `--dry-run` checks a
+      file without storing it. `--source-root` names the state directory of
+      a concrete source.
+    surfaces: [cli]
+    handler: import
+    flags: [transient]
+    see_also: [export]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        input:
+          type: string
+          description: the input file (default standard input)
+          x-fyai-short: i
+          x-fyai-meta: FILE
+          x-fyai-complete: file
+        ignore_compact:
+          type: boolean
+          description: skip the compaction markers
+        from:
+          type: string
+          enum: [fyai, auto, claude-code, codex]
+          description: the program that wrote the input
+          x-fyai-meta: SOURCE
+        source_root:
+          type: string
+          description: the state directory of the source
+          x-fyai-meta: DIR
+          x-fyai-complete: dir
+        session:
+          type: string
+          description: the ID of the session to import
+          x-fyai-meta: ID
+        dry_run:
+          type: boolean
+          description: check the input and store nothing
+        list:
+          type: boolean
+          description: list the sessions of the source
+        all:
+          type: boolean
+          description: list the sessions of every directory
+        json:
+          type: boolean
+          description: write the list or the check as JSON
+
+  - command: replay
+    title: send the user turns of the branch again
+    description: |
+      Send the user turns of the branch again, against the configuration
+      and the tools as they are now.
+    surfaces: [cli]
+    handler: replay
+    flags: [model]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        ignore_compact:
+          type: boolean
+          description: skip the compaction markers
+
+  - command: tool
+    title: run one built-in tool
+    description: |
+      Run one built-in tool, such as `shell` or `read_file`, in a sandboxed
+      child and write its result. JSON is the object of arguments; without
+      it, the object is read from standard input.
+    surfaces: [cli]
+    handler: tool
+    arguments:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: the tool
+          x-fyai-positional: 0
+          x-fyai-meta: NAME
+        json:
+          type: string
+          description: the arguments, as a JSON object
+          x-fyai-positional: 1
+          x-fyai-rest: true
+          x-fyai-meta: JSON
+
+  - command: term
+    title: run a terminal that fyai draws
+    description: |
+      Run a shell, or COMMAND, in a full-screen terminal that fyai draws.
+      `^\ q` leaves it.
+    surfaces: [cli]
+    handler: term
+    prepare: term
+    flags: [no-storage, interactive]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        command:
+          type: string
+          description: the command, as `sh -c` takes it
+          x-fyai-short: c
+          x-fyai-meta: COMMAND
+        shell:
+          type: string
+          description: the shell (default $SHELL)
+          x-fyai-meta: PATH
+          x-fyai-complete: file
+        login:
+          type: boolean
+          description: run the shell as a login shell
+          x-fyai-short: l
+        hold:
+          type: boolean
+          description: keep the last screen until a key
+        rows:
+          type: integer
+          minimum: 1
+          description: the rows, for a run with no terminal
+          x-fyai-meta: N
+        cols:
+          type: integer
+          minimum: 1
+          description: the columns, for a run with no terminal
+          x-fyai-meta: N
+        screen:
+          type: string
+          description: write the last screen as text to FILE
+          x-fyai-meta: FILE
+          x-fyai-complete: file
+
+  - command: reset
+    aliases: [rewind]
+    title: move the head of the branch to a reference
+    description: |
+      Move the head of the current branch to REF. The previous head stays
+      in the ref log as `<branch>@{1}`.
+    surfaces: [cli, session]
+    handler: reset
+    see_also: [refs, checkout]
+    render:
+      message: "{branch} is now at {ref} ({turns} turns); the previous head is {previous}"
+    examples:
+      - args: reset HEAD~2
+        text: drop the last exchange
+    arguments:
+      type: object
+      required: [ref]
+      additionalProperties: false
+      properties:
+        ref:
+          type: string
+          minLength: 1
+          description: the new head
+          x-fyai-positional: 0
+          x-fyai-meta: REF
+          x-fyai-complete: ref
+
+  - command: clear
+    title: start a fresh conversation
+    description: |
+      Publish an empty head on the current branch. The earlier turns stay
+      in the ref log.
+    surfaces: [cli, session]
+    handler: clear
+    render:
+      message: "conversation cleared"
+
+  - command: api
+    title: show or select the API grammar
+    description: |
+      With no mode, show the API grammar, the model, the provider, the URL,
+      and max_tokens. With a mode, select that grammar of the provider and
+      store it in the configuration.
+    surfaces: [cli, session]
+    handler: api
+    while_busy: bare
+    render:
+      message:
+        - "api: already {api}{?unchanged}"
+        - "api: {api} (model {model}, provider {provider}, url {url}, max_tokens {max_tokens}){?shown}"
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+          enum: [responses, chat-completions, chat, messages]
+          description: the API grammar
+          x-fyai-positional: 0
+          x-fyai-meta: MODE
+
+  - command: context
+    title: show the context fill and the token estimate
+    description: |
+      Show the context window of the model and the projected fill of the
+      next request: the larger of the last measured input and an estimate
+      of the prompt, and the output allowance.
+    surfaces: [cli, session]
+    handler: context
+    flags: [transient]
+    while_busy: run
+    render:
+      table:
+        title: Context
+        columns:
+          api: {name: API}
+
+  - command: stats
+    title: show the token use and the cost
+    description: |
+      Show the token use and the cost, summed over the stored turns of the
+      branch.
+    surfaces: [cli, session]
+    handler: stats
+    while_busy: run
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        raw:
+          type: boolean
+          description: write the Markdown source, not the rendering
+          x-fyai-surfaces: [cli]
+
+  - command: list
+    title: list providers, models, turns, exchanges, or the ref log
+    description: |
+      List the configured providers, the models of the catalogue, the
+      stored turns, the exchanges, or the ref log of the branch.
+    surfaces: [cli, session]
+    handler: list
+    flags: [transient]
+    view: true
+    while_busy: run
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        what:
+          type: string
+          enum: [providers, models, turns, exchanges, reflog]
+          default: providers
+          description: what to list
+          x-fyai-positional: 0
+          x-fyai-meta: WHAT
+        full:
+          type: boolean
+          description: include the details of each item
+        brief:
+          type: boolean
+          description: a summary of each item (the default)
+          x-fyai-hidden: true
+        json:
+          type: boolean
+          description: write JSON
+          x-fyai-surfaces: [cli]
+          x-fyai-hidden: true
+        yaml:
+          type: boolean
+          description: write YAML
+          x-fyai-surfaces: [cli]
+          x-fyai-hidden: true
+        raw:
+          type: boolean
+          description: write the Markdown source, not the rendering
+          x-fyai-surfaces: [cli]
+        markdown:
+          type: boolean
+          description: render the Markdown (the default)
+          x-fyai-surfaces: [cli]
+          x-fyai-hidden: true
+
+  - command: diff
+    title: compare two ref-log entries
+    description: |
+      Compare the exports of two ref-log entries, by default `HEAD@{1}`
+      and `HEAD`: the change that the last operation made.
+    surfaces: [cli, session]
+    handler: diff
+    flags: [transient]
+    view: true
+    while_busy: run
+    see_also: [refs]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        unified:
+          type: boolean
+          description: write unified rows, coloured on a terminal
+          x-fyai-short: u
+        from:
+          type: string
+          default: "HEAD@{1}"
+          description: the older entry
+          x-fyai-positional: 0
+          x-fyai-meta: FROM
+          x-fyai-complete: ref
+        to:
+          type: string
+          default: HEAD
+          description: the newer entry
+          x-fyai-positional: 1
+          x-fyai-meta: TO
+          x-fyai-complete: ref
+
+  - command: root
+    title: print the arena root, a handle for one exact state
+    description: |
+      Print the handle of the current arena root, or of the root that REF
+      was published in. `--root HANDLE` reads that exact state.
+    surfaces: [cli]
+    default: print
+    commands:
+      - command: print
+        title: print the root handle
+        description: Print the root handle.
+        handler: root
+        flags: [transient]
+        render:
+          document: flow
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            ref:
+              type: string
+              description: a ref-log entry
+              x-fyai-positional: 0
+              x-fyai-meta: REF
+              x-fyai-complete: ref
+      - command: show
+        title: show the root and what it holds
+        description: Show the root handle and the state it holds.
+        handler: root
+        flags: [transient]
+        render:
+          table:
+            title: Root
+            key_header: Field
+            value_header: Value
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            ref:
+              type: string
+              description: a ref-log entry
+              x-fyai-positional: 0
+              x-fyai-meta: REF
+              x-fyai-complete: ref
+
+  - command: rebase
+    title: put the exchanges of this branch after those of another
+    description: |
+      Append the exchanges of BRANCH to this branch, then the exchanges of
+      this branch after them.
+    surfaces: [cli]
+    handler: join
+    see_also: [merge]
+    arguments:
+      type: object
+      required: [branch]
+      additionalProperties: false
+      properties:
+        branch:
+          type: string
+          minLength: 1
+          description: the other branch
+          x-fyai-positional: 0
+          x-fyai-meta: BRANCH
+          x-fyai-complete: branch
+        allow_unrelated:
+          type: boolean
+          description: join branches that have no common base
+
+  - command: merge
+    title: interleave the exchanges of two branches by time
+    description: |
+      Interleave the exchanges of BRANCH with the exchanges of this branch,
+      in the order in which they happened.
+    surfaces: [cli]
+    handler: join
+    see_also: [rebase]
+    arguments:
+      type: object
+      required: [branch]
+      additionalProperties: false
+      properties:
+        branch:
+          type: string
+          minLength: 1
+          description: the other branch
+          x-fyai-positional: 0
+          x-fyai-meta: BRANCH
+          x-fyai-complete: branch
+        allow_unrelated:
+          type: boolean
+          description: join branches that have no common base
+
+  - command: gc
+    title: collect the garbage of the arena
+    description: |
+      Compact the arena. `--keep-reflogs N` also cuts the ref log to the
+      last N entries.
+    surfaces: [cli]
+    handler: gc
+    render:
+      message:
+        - "gc: compacted {arena}{?compacted}"
+        - "gc: no arena at {arena}{?missing}"
+    flags: [no-storage]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        keep_reflogs:
+          type: integer
+          minimum: 1
+          description: keep only the last N ref-log entries
+          x-fyai-meta: N
+
+  - command: export
+    title: write the conversation in the textual export format
+    description: |
+      Write the branch in the textual export format that `import` reads,
+      to standard output or to FILE. REF exports the branch as it was at
+      that ref-log entry.
+    surfaces: [cli]
+    handler: export
+    flags: [transient]
+    see_also: [refs]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        file:
+          type: string
+          description: the output file
+          x-fyai-short: o
+          x-fyai-meta: FILE
+          x-fyai-complete: file
+        ref:
+          type: string
+          description: a ref-log entry
+          x-fyai-positional: 0
+          x-fyai-meta: REF
+          x-fyai-complete: ref
+
+  - command: log
+    aliases: [logging]
+    title: control the trace logs
+    description: |
+      Show, start, stop, clear, or view the logs under .fyai/logs. TARGET is
+      wire, stream, conversation, mcp, or all.
+    surfaces: [cli, session]
+    default: show
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        target:
+          type: string
+          enum: [wire, stream, conversation, mcp, all]
+          default: all
+          description: the log
+          x-fyai-positional: 0
+          x-fyai-meta: TARGET
+    commands:
+      - command: show
+        title: show which logs are on
+        description: Show which logs are on.
+        handler: log
+        render:
+          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}"
+        while_busy: run
+      - command: start
+        aliases: ["on"]
+        title: start logging
+        description: Start writing the log.
+        handler: log
+        render:
+          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}"
+        while_busy: run
+      - command: stop
+        aliases: ["off"]
+        title: stop logging
+        description: Stop writing the log.
+        handler: log
+        render:
+          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}"
+        while_busy: run
+      - command: clear
+        title: empty the log
+        description: Remove the content of the log.
+        handler: log
+        render:
+          message: "logging: cleared {cleared}"
+      - command: view
+        title: view the log
+        description: Open the log in a viewer.
+        handler: log
+
+  - command: secret
+    title: manage secrets without showing their values
+    description: |
+      Manage logical secrets in the machine-local secret store. A provider
+      API key is conventionally named `api-key/<provider>`. A value is read
+      from the terminal with no echo, or from standard input with `--stdin`;
+      never from the command line.
+    surfaces: [cli, session]
+    default: status
+    see_also: [api-key]
+    commands:
+      - command: status
+        title: show the backend, or whether a secret exists
+        description: Show the secret backend, or whether NAME exists.
+        handler: secret
+        render:
+          message:
+            - "secret backend: {backend}"
+            - "secret {name}: {state}"
+        flags: [no-storage]
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              description: the logical name
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+      - command: set
+        title: store a secret
+        description: Store the value of NAME, read from the terminal.
+        handler: secret
+        flags: [no-storage]
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the logical name
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+            stdin:
+              type: boolean
+              description: read the value from standard input
+              x-fyai-surfaces: [cli]
+      - command: delete
+        title: remove a secret
+        description: Remove NAME from the secret store.
+        handler: secret
+        flags: [no-storage]
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the logical name
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+
+  - command: compact
+    title: summarize the conversation into a fresh chain
+    description: |
+      Compact the conversation and start a new chain; the old head is kept
+      as `compacted_from`. The Responses grammar can compact at the server;
+      the other grammars summarize with one model request. HINT guides the
+      summary.
+    surfaces: [cli, session]
+    handler: compact
+    flags: [model, transient]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        hint:
+          type: string
+          description: what the summary must keep
+          x-fyai-positional: 0
+          x-fyai-rest: true
+          x-fyai-meta: HINT
+
+  - command: config
+    title: inspect or change the configuration of the branch
+    description: |
+      The configuration is a document stored with each branch. Paths are
+      slash-separated keys, and values are YAML flow documents; see
+      `help config-paths`.
+    surfaces: [cli, session]
+    default: show
+    see_also: [config-paths, model]
+    commands:
+      - command: show
+        title: write the stored configuration
+        description: Write the configuration document of the branch as YAML.
+        handler: config_show
+        view: true
+        while_busy: run
+        render:
+          document: yaml
+
+      - command: effective
+        title: write the merged configuration
+        description: |
+          Write the configuration that this run uses: the branch
+          configuration, then `--config`, then `--set`. Derived values, such
+          as the endpoint, are not in it.
+        handler: config_effective
+        view: true
+        while_busy: run
+        render:
+          document: yaml
+
+      - command: get
+        title: write the value of a key
+        description: Write the value of a key as one line of YAML flow.
+        handler: config_get
+        while_busy: run
+        arguments:
+          type: object
+          required: [key]
+          additionalProperties: false
+          properties:
+            key:
+              type: string
+              minLength: 1
+              description: the configuration path
+              x-fyai-positional: 0
+              x-fyai-meta: KEY
+              x-fyai-complete: config-path
+        render:
+          document: flow
+
+      - command: set
+        title: set the value of a key
+        description: |
+          Set a key to a value. The value is parsed as a YAML flow
+          document and checked against the configuration schema.
+        handler: config_set
+        examples:
+          - args: config set display/theme 'ember:auto'
+            text: select a palette theme
+        arguments:
+          type: object
+          required: [key, value]
+          additionalProperties: false
+          properties:
+            key:
+              type: string
+              minLength: 1
+              description: the configuration path
+              x-fyai-positional: 0
+              x-fyai-meta: KEY
+              x-fyai-complete: config-path
+            value:
+              type: string
+              description: the value, as a YAML flow document
+              x-fyai-positional: 1
+              x-fyai-rest: true
+              x-fyai-meta: VALUE
+              x-fyai-complete: config-value
+        render:
+          message: []
+
+      - command: delete
+        title: remove a key
+        description: Remove a key from the configuration of the branch.
+        handler: config_delete
+        arguments:
+          type: object
+          required: [key]
+          additionalProperties: false
+          properties:
+            key:
+              type: string
+              minLength: 1
+              description: the configuration path
+              x-fyai-positional: 0
+              x-fyai-meta: KEY
+              x-fyai-complete: config-path
+        render:
+          message: []
+
+      - command: import
+        title: store a configuration file
+        description: |
+          Check a YAML configuration file against the schema and store it as
+          the configuration of the branch.
+        handler: config_import
+        arguments:
+          type: object
+          required: [file]
+          additionalProperties: false
+          properties:
+            file:
+              type: string
+              minLength: 1
+              description: the YAML file
+              x-fyai-positional: 0
+              x-fyai-meta: FILE
+              x-fyai-complete: file
+        render:
+          message: "config: imported {file}"
+
+      - command: export
+        title: write the configuration to a file
+        description: |
+          Write the configuration of the branch as YAML to FILE, or to
+          standard output.
+        handler: config_export
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            file:
+              type: string
+              description: the output file
+              x-fyai-positional: 0
+              x-fyai-meta: FILE
+              x-fyai-complete: file
+        render:
+          document: yaml
+
+      - command: edit
+        title: edit the configuration in an editor
+        description: |
+          Edit the configuration with $VISUAL or $EDITOR. A session runs the
+          editor in the work pane and applies the edit when it ends.
+        handler: config_edit
+
+      - command: validate
+        title: check the configuration against the schema
+        description: Check the stored configuration against its JSON Schema.
+        handler: config_validate
+        while_busy: run
+        render:
+          message: "config: valid"
+
+      - command: schema
+        title: write the configuration schema
+        description: Write the JSON Schema of the configuration document.
+        handler: config_schema
+        flags: [no-storage]
+        view: true
+        while_busy: run
+        render:
+          document: yaml
+
+      - command: describe
+        title: describe the keys of the configuration
+        description: |
+          Show a table of the keys below PATH: the type, the constraints,
+          the default, and the description. With no path, describe the whole
+          document.
+        handler: config_describe
+        flags: [no-storage]
+        view: true
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            path:
+              type: string
+              description: the configuration path
+              x-fyai-positional: 0
+              x-fyai-meta: PATH
+              x-fyai-complete: config-path
+
+  - command: sandbox
+    title: show or set the stored sandbox policy
+    description: |
+      Show or change the `sandbox` key of the configuration. `on` stores a
+      policy that denies secrets and ~/.ssh and allows port 443; `edit`
+      edits the whole configuration. In a session, `/sandbox` is the setting
+      of the session instead.
+    surfaces: [cli]
+    default: show
+    see_also: [config]
+    commands:
+      - command: show
+        aliases: [get]
+        title: write the stored sandbox value
+        description: Write the stored sandbox value as YAML.
+        handler: sandbox_show
+        render:
+          document: yaml
+      - command: "on"
+        aliases: [enable]
+        title: store the default sandbox policy
+        description: Store the default sandbox policy.
+        handler: sandbox_set
+        render:
+          message: []
+      - command: "off"
+        aliases: [disable]
+        title: store no sandbox
+        description: Store `sandbox false`.
+        handler: sandbox_set
+        render:
+          message: []
+      - command: edit
+        title: edit the configuration in an editor
+        description: Edit the configuration with $VISUAL or $EDITOR.
+        handler: config_edit
+
+  - command: catalog
+    title: inspect or change the model catalogue of the branch
+    description: |
+      The catalogue lists the providers, their endpoints, and the models
+      they offer. Each branch owns its catalogue. A path is slash-separated;
+      an item of a list is named by its name, such as
+      `providers/openai/models/gpt-5`.
+    surfaces: [cli, session]
+    default: show
+    see_also: [model, config]
+    commands:
+      - command: show
+        title: summarize the catalogue
+        description: Show a summary of the catalogue of the branch.
+        handler: catalog_show
+        view: true
+        while_busy: run
+        render:
+          document: yaml
+
+      - command: list
+        title: list the models or the providers
+        description: List the models, or the providers, of the catalogue.
+        handler: catalog_list
+        view: true
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            what:
+              type: string
+              enum: [models, providers]
+              default: models
+              description: what to list
+              x-fyai-positional: 0
+              x-fyai-meta: WHAT
+
+      - command: tools
+        title: list the tools of a coding agent
+        description: List the tools of the coding agents of the catalogue.
+        handler: catalog_tools
+        view: true
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            agent:
+              type: string
+              description: the agent
+              x-fyai-positional: 0
+              x-fyai-meta: AGENT
+              x-fyai-complete: catalog-agent
+            full:
+              type: boolean
+              description: show the complete tool descriptions
+            brief:
+              type: boolean
+              description: show the summary of each tool (the default)
+              x-fyai-hidden: true
+
+      - command: get
+        title: write the value at a path
+        description: Write the value at a path of the catalogue as YAML.
+        handler: catalog_get
+        while_busy: run
+        render:
+          document: yaml
+        arguments:
+          type: object
+          required: [path]
+          additionalProperties: false
+          properties:
+            path:
+              type: string
+              minLength: 1
+              description: the catalogue path
+              x-fyai-positional: 0
+              x-fyai-meta: PATH
+              x-fyai-complete: catalog-path
+
+      - command: set
+        title: set the value at a path
+        description: |
+          Set the value at a path. The value is a YAML flow document; the
+          catalogue is checked against its schema before it is stored.
+        handler: catalog_set
+        arguments:
+          type: object
+          required: [path, value]
+          additionalProperties: false
+          properties:
+            path:
+              type: string
+              minLength: 1
+              description: the catalogue path
+              x-fyai-positional: 0
+              x-fyai-meta: PATH
+              x-fyai-complete: catalog-path
+            value:
+              type: string
+              description: the value, as a YAML flow document
+              x-fyai-positional: 1
+              x-fyai-rest: true
+              x-fyai-meta: VALUE
+              x-fyai-complete: catalog-value
+
+      - command: delete
+        title: remove the value at a path
+        description: Remove the value at a path of the catalogue.
+        handler: catalog_delete
+        arguments:
+          type: object
+          required: [path]
+          additionalProperties: false
+          properties:
+            path:
+              type: string
+              minLength: 1
+              description: the catalogue path
+              x-fyai-positional: 0
+              x-fyai-meta: PATH
+              x-fyai-complete: catalog-path
+
+      - command: import
+        title: store a catalogue file
+        description: Check a catalogue file against the schema and store it.
+        handler: catalog_import
+        render:
+          message: "catalog: imported {file} ({models} models, {providers} providers)"
+        arguments:
+          type: object
+          required: [file]
+          additionalProperties: false
+          properties:
+            file:
+              type: string
+              minLength: 1
+              description: the catalogue file
+              x-fyai-positional: 0
+              x-fyai-meta: FILE
+              x-fyai-complete: file
+
+      - command: export
+        title: write the catalogue to a file
+        description: Write the catalogue as YAML to FILE, or to standard output.
+        handler: catalog_export
+        render:
+          document: yaml
+        while_busy: run
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            file:
+              type: string
+              description: the output file
+              x-fyai-positional: 0
+              x-fyai-meta: FILE
+              x-fyai-complete: file
+
+      - command: edit
+        title: edit the catalogue in an editor
+        description: |
+          Edit the catalogue with $VISUAL or $EDITOR. A session runs the
+          editor in the work pane and applies the edit when it ends.
+        handler: catalog_edit
+
+      - command: validate
+        title: check the catalogue against the schema
+        description: Check the catalogue of the branch against its schema.
+        handler: catalog_validate
+        while_busy: run
+        render:
+          message: "catalog: valid"
+
+      - command: schema
+        title: write the catalogue schema
+        description: Write the JSON Schema of the catalogue.
+        handler: catalog_schema
+        flags: [no-storage]
+        view: true
+        while_busy: run
+        render:
+          document: yaml
+
+      - command: reset
+        title: return to the embedded catalogue
+        description: Remove the catalogue of the branch; the embedded one applies.
+        handler: catalog_reset
+        render:
+          message: "catalog: the branch uses the embedded catalogue"
+
+      - command: update
+        title: update the catalogue from the providers
+        description: |
+          Run `catalog_update/command` and store its output. The program
+          keeps only the credentials that `catalog_update/credentials`
+          names. A session runs it in the work pane.
+        handler: catalog_update
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            curated:
+              type: boolean
+              description: keep only the curated models
+            provider:
+              type: array
+              items: {type: string}
+              description: update only this provider
+              x-fyai-repeat: true
+              x-fyai-meta: NAME
+              x-fyai-complete: provider
+            names:
+              type: array
+              items: {type: string}
+              description: update only these providers
+              x-fyai-positional: 0
+              x-fyai-meta: PROVIDER
+              x-fyai-complete: provider
+
+  - command: history
+    aliases: [transcript, display]
+    title: show the conversation of the branch
+    description: |
+      Render the stored conversation: the exchanges, the tool calls, and
+      their results. Select the exchanges with `--first N`, `--last N`, or
+      `--range A,B` (from 0, inclusive), or in a session with `all`,
+      `first N`, `last N`, or `range A,B`.
+
+      With `--output json` or `--output yaml`, write each stored message as
+      one document, as it streams.
+    surfaces: [cli, session]
+    handler: history
+    mode: stream
+    view: true
+    while_busy: run
+    see_also: [output]
+    examples:
+      - args: history --last 2
+        text: show the last two exchanges
+      - args: history --output json
+        text: write the messages as JSON Lines
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        select:
+          type: array
+          items: {type: string}
+          description: all, first N, last N, or range A,B
+          x-fyai-positional: 0
+          x-fyai-meta: SELECTION
+          x-fyai-complete: history-select
+        first:
+          type: integer
+          minimum: 0
+          description: the first N exchanges
+          x-fyai-meta: N
+        last:
+          type: integer
+          minimum: 0
+          description: the last N exchanges
+          x-fyai-meta: N
+        range:
+          type: string
+          pattern: "^[0-9]+[,:][0-9]+$"
+          description: the exchanges A to B, from 0, inclusive
+          x-fyai-meta: A,B
+        raw:
+          type: boolean
+          description: write the Markdown source, not the rendering
+          x-fyai-surfaces: [cli]
+        tool_detail:
+          type: string
+          enum: [none, brief, default, full]
+          description: how much of each tool result to show
+          x-fyai-meta: MODE
+    stream:
+      item: {type: object}
+      render: markdown
+
+  - command: auth
+    title: manage the subscription login of a provider
+    description: |
+      Manage the machine-local ChatGPT subscription credentials. PROVIDER
+      names the subscription provider; only `openai` is supported.
+    surfaces: [cli, session]
+    default: status
+    see_also: [api-key]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          default: openai
+          description: the subscription provider
+          x-fyai-positional: 0
+          x-fyai-meta: PROVIDER
+          x-fyai-complete: provider
+    commands:
+      - command: status
+        title: show the login and the health of the credentials
+        description: Show the login and the health of the stored credentials.
+        flags: [no-storage, transient]
+        handler: auth_status
+        while_busy: run
+        render:
+          table:
+            title: Authentication
+            columns:
+              status: {format: humanize}
+              account_id: {name: Account}
+              plan: {name: Subscription}
+              expires_at: {name: Token expires}
+              fedramp: {name: FedRAMP account}
+              storage: {name: Credential storage}
+
+      - command: info
+        title: show the subscription and the account
+        description: Show the details of the subscription and the account.
+        flags: [no-storage, transient]
+        handler: auth_status
+        while_busy: run
+        render:
+          table:
+            title: Authentication
+            columns:
+              status: {format: humanize}
+              account_id: {name: Account}
+              plan: {name: Subscription}
+              expires_at: {name: Token expires}
+              fedramp: {name: FedRAMP account}
+              storage: {name: Credential storage}
+
+      - command: usage
+        title: show the live limits and credits
+        description: Fetch and show the live limits and credits of the subscription.
+        flags: [no-storage, transient]
+        handler: auth_usage
+        render:
+          table: {title: OpenAI subscription usage}
+
+      - command: login
+        title: sign in to the subscription
+        description: |
+          Sign in with the browser and a loopback callback. `--device-code`
+          uses the device-code flow, `--no-browser` writes the URL and does
+          not start a browser, and `--manual` reads a pasted redirect URL,
+          for a browser on another machine. `^C` or Escape cancels.
+        flags: [no-storage, transient]
+        handler: auth_login
+        mode: async
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            device_code:
+              type: boolean
+              description: use the headless device-code flow
+            no_browser:
+              type: boolean
+              description: write the URL and start no browser
+            manual:
+              type: boolean
+              description: paste the redirect URL back
+              x-fyai-surfaces: [cli]
+        render:
+          message: "auth: login succeeded"
+
+      - command: logout
+        title: sign out and remove the credentials
+        description: |
+          Revoke the login when the provider allows it, and remove the local
+          credentials.
+        flags: [no-storage, transient]
+        handler: auth_logout
+        render:
+          message: "auth: logged out"
+
+  - command: mcp
+    title: inspect and control the MCP servers
+    description: |
+      In a session, show the MCP servers, sign in to or out of one, or turn
+      them all on or off. A verb imports the OAuth client of a server.
+    surfaces: [cli, session]
+    default: {session: status}
+    commands:
+      - command: status
+        aliases: [show]
+        title: show the MCP servers and their state
+        description: Show the live MCP connections, or the configured servers.
+        surfaces: [session]
+        handler: mcp_status
+        view: true
+        while_busy: run
+      - command: login
+        title: sign in to an MCP server
+        description: Start the OAuth sign-in of the server NAME.
+        surfaces: [session]
+        handler: mcp_login
+        render:
+          message: "mcp: login started for {server}"
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the server
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: mcp-server
+      - command: logout
+        title: sign out of an MCP server
+        description: Remove the credentials of the server NAME.
+        surfaces: [session]
+        handler: mcp_login
+        render:
+          message: "mcp: logged out {server}"
+        arguments:
+          type: object
+          required: [name]
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              minLength: 1
+              description: the server
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: mcp-server
+      - command: "on"
+        title: turn the MCP servers on
+        description: Turn the MCP servers on and store `mcp/enabled`.
+        surfaces: [session]
+        handler: mcp_enable
+        render:
+          message:
+            - "mcp: {state}{?changed}"
+            - "mcp: already {state}{?unchanged}"
+      - command: "off"
+        title: turn the MCP servers off
+        description: Turn the MCP servers off and store `mcp/enabled`.
+        surfaces: [session]
+        handler: mcp_enable
+        render:
+          message:
+            - "mcp: {state}{?changed}"
+            - "mcp: already {state}{?unchanged}"
+      - command: oauth
+        title: manage the OAuth clients of MCP servers
+        description: Manage the pre-registered OAuth clients of MCP servers.
+        surfaces: [cli]
+        commands:
+          - command: import-client
+            title: import a pre-registered OAuth client
+            description: |
+              Import the OAuth client of the server NAME from FILE. The
+              client secret goes to the machine-local secret store;
+              `--secret-env` stores a reference to a variable instead.
+            handler: mcp_import_client
+            arguments:
+              type: object
+              required: [name, file, endpoint, scope]
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  description: the server
+                  x-fyai-positional: 0
+                  x-fyai-meta: NAME
+                  x-fyai-complete: mcp-server
+                file:
+                  type: string
+                  minLength: 1
+                  description: the client file
+                  x-fyai-positional: 1
+                  x-fyai-meta: FILE
+                  x-fyai-complete: file
+                endpoint:
+                  type: string
+                  minLength: 1
+                  description: the endpoint of the server
+                  x-fyai-meta: URL
+                scope:
+                  type: array
+                  minItems: 1
+                  items: {type: string}
+                  description: an OAuth scope to request
+                  x-fyai-repeat: true
+                  x-fyai-meta: SCOPE
+                secret_env:
+                  type: string
+                  description: store a reference to this variable
+                  x-fyai-meta: NAME
+                force:
+                  type: boolean
+                  description: replace an existing server
+
+  - command: btw
+    title: ask a side question in a tile
+    description: |
+      Ask QUESTION on a side branch, `agent:btw-N`, forked from the head,
+      while a turn runs. The answer stays in its tile until Escape, the
+      close button, or `/kill`.
+    surfaces: [session]
+    handler: btw
+    while_busy: run
+    arguments:
+      type: object
+      required: [question]
+      additionalProperties: false
+      properties:
+        question:
+          type: string
+          minLength: 1
+          description: the question
+          x-fyai-positional: 0
+          x-fyai-rest: true
+          x-fyai-meta: QUESTION
+
+  - command: branches
+    title: open the branch browser
+    description: Open the browser of the branches of the arena.
+    surfaces: [session]
+    handler: branches
+
+  - command: resume
+    aliases: [switch]
+    title: resume another session
+    description: |
+      Continue a stored session, selected for this invocation: HEAD does
+      not move, and the working directory does not change. SESSION names
+      it; with none, the picker selects. `--last` resumes the session
+      updated last. The sessions that started in this directory are
+      offered; `--all` offers every one.
+    surfaces: [cli, session]
+    handler: resume
+    early: resume
+    prepare: resume
+    flags: [model, interactive]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        all:
+          type: boolean
+          description: offer the sessions of every directory
+        last:
+          type: boolean
+          description: resume the session updated last
+          x-fyai-surfaces: [cli]
+        session:
+          type: string
+          description: the session
+          x-fyai-positional: 0
+          x-fyai-meta: SESSION
+          x-fyai-complete: session
+
+  - command: zoom
+    title: give a live tile the pane and the keys
+    description: |
+      Give the tile NAME, or the newest tile, the pane and the keys, to
+      type into a shell or a sub-agent. `Ctrl-]` comes back; `/zoom off`
+      shows every tile again.
+    surfaces: [session]
+    handler: zoom
+    render:
+      message:
+        - "typing into {zoomed}; Ctrl-Tab/Ctrl-T moves focus; Ctrl-] comes back"
+        - "no live shell session or sub-agent is called that{?unknown}"
+        - "nothing is running to zoom into{?idle}"
+    while_busy: run
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: the tile, or off
+          x-fyai-positional: 0
+          x-fyai-meta: NAME
+
+  - command: page
+    title: show the page of the screen and its state
+    description: Show the page document in use, and the state, source, and regions of the last frame.
+    surfaces: [session]
+    handler: page
+    view: true
+    while_busy: run
+
+  - command: sessions
+    title: list the live shell sessions and sub-agents
+    description: List the live shell sessions and sub-agents of the work pane.
+    surfaces: [session]
+    handler: sessions
+    while_busy: run
+    render:
+      table:
+        title: Active sessions
+        empty: no active sessions
+        keys: [name, kind, state]
+
+  - command: kill
+    title: stop a shell session or sub-agent
+    description: Stop the live shell session or sub-agent NAME.
+    surfaces: [session]
+    handler: kill
+    render:
+      message: "{action} {name}"
+    arguments:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: the session or sub-agent
+          x-fyai-positional: 0
+          x-fyai-meta: NAME
+
+  - command: status
+    title: show the model, provider, login, and use
+    description: Show the model, the provider, the login, and the token use of the session.
+    surfaces: [session]
+    handler: status
+    while_busy: run
+    render:
+      table:
+        title: Session
+        columns:
+          api: {name: API}
+
+  - command: usage
+    title: show the live limits and credits
+    description: Fetch and show the live limits and credits of the subscription.
+    surfaces: [session]
+    handler: auth_usage
+    render:
+      table: {title: OpenAI subscription usage}
+    flags: [transient]
+
+  - command: tools
+    title: list the tools of a coding agent
+    description: List the tools of the coding agents of the catalogue; `/catalog tools` is the same.
+    surfaces: [session]
+    handler: catalog_tools
+    while_busy: run
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        agent:
+          type: string
+          description: the agent
+          x-fyai-positional: 0
+          x-fyai-meta: AGENT
+          x-fyai-complete: catalog-agent
+        full:
+          type: boolean
+          description: show the complete tool descriptions
+        brief:
+          type: boolean
+          description: show the summary of each tool (the default)
+          x-fyai-hidden: true
+
+  - command: exit
+    aliases: [quit]
+    title: leave the session
+    description: Leave the session.
+    surfaces: [session]
+    handler: exit
+    ends_session: true
+
+  - command: agent
+    title: run one sub-agent on a task
+    description: |
+      Run one autonomous sub-agent on TASK and write its final report. The
+      agent runs its own tool loop with the built-in persona and tools; it
+      cannot ask questions or start further agents. It shares the workspace,
+      and stores its run on the branch unless `--transient` is given.
+
+      With `--rpc` it takes no task and serves the sub-agent control
+      protocol, JSON-RPC 2.0 framed by lines, on standard input and output:
+      initialize, agent/run, and shutdown. See doc/agent-protocol.md.
+    surfaces: [cli]
+    handler: agent
+    prepare: agent
+    flags: [model]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        rpc:
+          type: boolean
+          description: serve the sub-agent control protocol
+        tool_child:
+          type: boolean
+          description: run as the executed tool child of a session
+          x-fyai-hidden: true
+        pty:
+          type: boolean
+          description: the tool child has a terminal
+          x-fyai-hidden: true
+        arena:
+          type: string
+          description: the arena of the parent session
+          x-fyai-hidden: true
+        task:
+          type: string
+          description: the task
+          x-fyai-positional: 0
+          x-fyai-rest: true
+          x-fyai-meta: TASK
+
+  - command: reasoning-effort
+    aliases: [effort]
+    title: the reasoning effort of the model
+    description: |
+      With no value, show the reasoning effort of the model. With a value,
+      change it; the configuration schema gives the values. `reasoning/effort` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: reasoning/effort}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: reasoning-summary
+    aliases: [summary]
+    title: the reasoning summary that the model writes
+    description: |
+      With no value, show the reasoning summary that the model writes. With a value,
+      change it; the configuration schema gives the values. `reasoning/summary` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: reasoning/summary}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: temperature
+    title: the sampling temperature
+    description: |
+      With no value, show the sampling temperature. With a value,
+      change it; the configuration schema gives the values. `temperature` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: temperature}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: theme
+    title: the Markdown theme, name[:auto|dark|light]
+    description: |
+      With no value, show the Markdown theme, name[:auto|dark|light]. With a value,
+      change it; the configuration schema gives the values. `display/theme` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/theme}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: tool-detail
+    title: how much of each tool result to show
+    description: |
+      With no value, show how much of each tool result to show. With a value,
+      change it; the configuration schema gives the values. `display/tool_detail` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/tool_detail}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: transcript-system
+    title: show the system messages in transcripts
+    description: |
+      With no value, show show the system messages in transcripts. With a value,
+      change it; the configuration schema gives the values. `display/transcript_system` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/transcript_system}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: markdown
+    title: render Markdown
+    description: |
+      With no value, show render Markdown. With a value,
+      change it; the configuration schema gives the values. `display/markdown` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/markdown}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: stream
+    title: stream the response as it arrives
+    description: |
+      With no value, show stream the response as it arrives. With a value,
+      change it; the configuration schema gives the values. `display/stream` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/stream}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: thinking
+    title: show the reasoning of the model
+    description: |
+      With no value, show show the reasoning of the model. With a value,
+      change it; the configuration schema gives the values. `display/thinking` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/thinking}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: print-stats
+    title: show the token use at the end of a run
+    description: |
+      With no value, show show the token use at the end of a run. With a value,
+      change it; the configuration schema gives the values. `display/stats` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/stats}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: sandbox
+    title: confine the shell tools
+    description: |
+      With no value, show confine the shell tools. With a value,
+      change it; the configuration schema gives the values. `sandbox/enabled` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: sandbox/enabled}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: token-extents
+    title: record the extents of streamed tokens
+    description: |
+      With no value, show record the extents of streamed tokens. With a value,
+      change it; the configuration schema gives the values. `token_extents` is the
+      key; a session-scoped key changes for this session only, any other
+      key is stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: token_extents}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: completion
+    title: write a shell completion script
+    description: |
+      Write a completion script for the shell to standard output. See
+      `help completion` to load it.
+    surfaces: [cli]
+    handler: completion
+    flags: [no-storage]
+    arguments:
+      type: object
+      required: [shell]
+      additionalProperties: false
+      properties:
+        shell:
+          type: string
+          enum: [bash, zsh, fish]
+          description: the shell
+          x-fyai-positional: 0
+          x-fyai-meta: SHELL
+
+  - command: __complete
+    title: list the completion candidates of a command line
+    description: |
+      Write the candidates for the last word of the command line WORDS,
+      one on each line as `value<TAB>description`, then one directive line
+      that starts with `:`. The completion scripts call this command.
+    surfaces: [cli]
+    handler: complete
+    hidden: true
+    flags: [storage-optional]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        words:
+          type: array
+          items: {type: string}
+          description: the words of the command line after `fyai`
+          x-fyai-positional: 0
+          x-fyai-meta: WORDS

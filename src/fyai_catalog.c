@@ -324,12 +324,7 @@ int fyai_catalog_import(struct fyai_ctx *ctx, const char *path)
 		fyai_error(ctx, "cannot parse %s", path);
 		return -1;
 	}
-	if (fyai_catalog_commit(ctx, doc, path))
-		return -1;
-	fyai_result(ctx, "catalog: imported %s (%zu models, %zu providers)\n",
-		    path, fy_len(fy_get(doc, "models")),
-		    fy_len(fy_get(doc, "providers")));
-	return 0;
+	return fyai_catalog_commit(ctx, doc, path);
 }
 
 /*
@@ -478,11 +473,12 @@ static fy_generic catalog_current(struct fyai_ctx *ctx)
 	return fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb);
 }
 
-int fyai_catalog_get(struct fyai_ctx *ctx, const char *path)
+int fyai_catalog_value(struct fyai_ctx *ctx, const char *path,
+		       fy_generic *valuep)
 {
 	char *segs[CATALOG_PATH_MAX_DEPTH];
 	char *copy;
-	fy_generic v, emitted;
+	fy_generic v;
 	int n;
 
 	copy = strdup(path);
@@ -494,18 +490,7 @@ int fyai_catalog_get(struct fyai_ctx *ctx, const char *path)
 			 path);
 	fyai_error_check(ctx, fy_is_valid(v), err_out,
 			 "catalogue has nothing at '%s'", path);
-	if (fy_is_mapping(v) || fy_is_sequence(v)) {
-		emit_generic_to_stdout(ctx, NULL, v, true);
-		return 0;
-	}
-	/* A scalar is one flow line, as `config get` prints it. */
-	emitted = fy_emit(ctx->cfg->gb, v, FYOPEF_DISABLE_DIRECTORY |
-			  FYOPEF_OUTPUT_TYPE_STRING | FYOPEF_MODE_YAML_1_2 |
-			  FYOPEF_STYLE_ONELINE | FYOPEF_WIDTH_INF |
-			  FYOPEF_NO_ENDING_NEWLINE, NULL);
-	fyai_error_check(ctx, fy_is_valid(emitted), err_out,
-			 "cannot format the value at '%s'", path);
-	fyai_result(ctx, "%s\n", fy_castp(&emitted, ""));
+	*valuep = v;
 	return 0;
 
 err_out:
@@ -575,21 +560,14 @@ int fyai_catalog_validate(struct fyai_ctx *ctx)
 			  "the catalogue of the branch" :
 			  "the embedded catalogue"))
 		return -1;
-	fyai_result(ctx, "catalog: valid\n");
 	return 0;
 }
 
 int fyai_catalog_reset(struct fyai_ctx *ctx)
 {
-	if (fy_is_invalid(ctx->arena_catalog)) {
-		fyai_result(ctx, "catalog: the branch uses the embedded "
-			    "catalogue\n");
+	if (fy_is_invalid(ctx->arena_catalog))
 		return 0;
-	}
-	if (fyai_catalog_commit(ctx, fy_null, "the embedded catalogue"))
-		return -1;
-	fyai_result(ctx, "catalog: the branch uses the embedded catalogue\n");
-	return 0;
+	return fyai_catalog_commit(ctx, fy_null, "the embedded catalogue");
 }
 
 /* Quote @s for /bin/sh into @out. */
@@ -953,10 +931,6 @@ int fyai_catalog_export(struct fyai_ctx *ctx, const char *path)
 		fyai_error(ctx, "none available");
 		return -1;
 	}
-	if (!path) {
-		emit_generic_to_stdout(ctx, NULL, cat, true);
-		return 0;
-	}
 	emitted = fy_emit(cat,
 			  FYAI_YAML_EMIT_FLAGS, NULL);
 	if (fy_is_invalid(emitted))
@@ -969,54 +943,16 @@ int fyai_catalog_export(struct fyai_ctx *ctx, const char *path)
 	return 0;
 }
 
-int fyai_catalog_show(struct fyai_ctx *ctx)
+int fyai_catalog_document(struct fyai_ctx *ctx, fy_generic *catp)
 {
-	fy_generic cat;
-
-	cat = fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb);
-	if (fy_is_invalid(cat)) {
-		fyai_error(ctx, "none available");
-		return -1;
-	}
+	*catp = fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb);
+	fyai_error_check(ctx, fy_is_valid(*catp), err, "none available");
 	if (fy_is_invalid(ctx->arena_catalog))
-		fyai_report(ctx, "# embedded snapshot (no catalog on this branch)\n");
-	emit_generic_to_stdout(ctx, NULL, cat, true);
+		fyai_report(ctx, "# embedded snapshot (no catalog on this "
+			    "branch)\n");
 	return 0;
-}
-
-static void catalog_list_models(struct fyai_ctx *ctx, fy_generic cat)
-{
-	fy_generic models, m;
-
-	models = fy_get(cat, "models");
-	fyai_result(ctx, "%-40s %10s %10s\n", "MODEL", "CONTEXT", "MAX-OUT");
-	fy_foreach(m, models) {
-		fyai_result(ctx, "%-40s %10lld %10lld\n",
-		       fy_get(m, "name", ""),
-		       fy_get(m, "context_window", 0LL),
-		       fy_get(m, "max_output_tokens", 0LL));
-	}
-}
-
-static void catalog_list_providers(struct fyai_ctx *ctx, fy_generic cat)
-{
-	fy_generic providers, p, eps, e;
-	size_t j;
-
-	providers = fy_get(cat, "providers");
-	fyai_result(ctx, "%-14s %-40s %s\n", "PROVIDER", "ROOT-URL", "PROTOCOLS");
-	fy_foreach(p, providers) {
-		fyai_result(ctx, "%-14s %-40s ",
-		       fy_get(p, "name", ""), fy_get(p, "root_url", ""));
-		eps = fy_get(p, "endpoints");
-		j = 0;
-		fy_foreach(e, eps) {
-			fyai_result(ctx, "%s%s", j ? "," : "",
-			       fy_get(e, "protocol", ""));
-			j++;
-		}
-		fyai_result(ctx, "\n");
-	}
+err:
+	return -1;
 }
 
 static void catalog_md_cell(FILE *fp, const char *s)
@@ -1177,55 +1113,30 @@ static void catalog_builtin_tools_markdown(FILE *mf,
 	}
 }
 
-int fyai_catalog_tools(struct fyai_ctx *ctx, const char *agent_name, bool full)
+char *fyai_catalog_tools_markdown(struct fyai_ctx *ctx, const char *agent_name,
+				  bool full)
 {
 	fy_generic cat, agents, a;
 	char *md;
 	size_t mdlen;
 	FILE *mf;
 	bool found;
-	int rc;
 
 	cat = fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb);
-	if (fy_is_invalid(cat)) {
-		fyai_error(ctx, "none available");
-		return -1;
-	}
-	if (!agent_name || !*agent_name || !strcmp(agent_name, "fyai")) {
-		md = NULL;
-		mdlen = 0;
-		mf = open_memstream(&md, &mdlen);
-		if (!mf)
-			return -1;
-		catalog_builtin_tools_markdown(mf, ctx, full);
-		fclose(mf);
-		rc = 0;
-		if (ctx->cfg->markdown) {
-			rc = fyai_print_markdown(md, ctx->cfg);
-			if (rc)
-				(void)fyai_result(ctx, "%s", md);
-		} else {
-			(void)fyai_result(ctx, "%s", md);
-		}
-		free(md);
-		return 0;
-	}
-	agents = fy_get(cat, "agents");
-	if (!fy_is_sequence(agents)) {
-		fyai_error(ctx, "no agents section");
-		return -1;
-	}
-
+	fyai_error_check(ctx, fy_is_valid(cat), err, "none available");
 	md = NULL;
 	mdlen = 0;
 	mf = open_memstream(&md, &mdlen);
-	if (!mf)
-		return -1;
-
+	fyai_error_check(ctx, mf, err, "cannot build the tool list");
+	if (!agent_name || !*agent_name || !strcmp(agent_name, "fyai")) {
+		catalog_builtin_tools_markdown(mf, ctx, full);
+		fclose(mf);
+		return md;
+	}
+	agents = fy_get(cat, "agents");
 	found = false;
 	fy_foreach(a, agents) {
-		if (agent_name && *agent_name &&
-		    !fy_equal(fy_get(a, "name"), agent_name))
+		if (!fy_equal(fy_get(a, "name"), agent_name))
 			continue;
 		if (found)
 			fprintf(mf, "\n");
@@ -1233,36 +1144,47 @@ int fyai_catalog_tools(struct fyai_ctx *ctx, const char *agent_name, bool full)
 		found = true;
 	}
 	fclose(mf);
-
 	if (!found) {
-		fyai_error(ctx, "no such agent '%s'", agent_name);
 		free(md);
-		return -1;
+		fyai_error(ctx, fy_is_sequence(agents) ?
+			   "no such agent '%s'" : "no agents section; no "
+			   "agent '%s'", agent_name);
+		return NULL;
 	}
-	rc = 0;
-	if (ctx->cfg->markdown) {
-		rc = fyai_print_markdown(md, ctx->cfg);
-		if (rc)
-			(void)fyai_result(ctx, "%s", md);
-	} else {
-		(void)fyai_result(ctx, "%s", md);
-	}
-	free(md);
-	return 0;
+	return md;
+err:
+	return NULL;
 }
 
-int fyai_catalog_list(struct fyai_ctx *ctx, const char *what)
+fy_generic fyai_catalog_list_data(struct fyai_ctx *ctx,
+				  struct fy_generic_builder *gb,
+				  const char *what)
 {
-	fy_generic cat;
+	fy_generic cat, rows, m, p, e, protocols;
 
 	cat = fyai_catalog_effective(ctx->arena_catalog, ctx->cfg->gb);
-	if (fy_is_invalid(cat)) {
-		fyai_error(ctx, "none available");
-		return -1;
+	fyai_error_check(ctx, fy_is_valid(cat), err, "none available");
+	rows = fy_seq_empty;
+	if (!strcmp(what, "providers")) {
+		fy_foreach(p, fy_get(cat, "providers", fy_invalid)) {
+			protocols = fy_seq_empty;
+			fy_foreach(e, fy_get(p, "endpoints", fy_invalid))
+				protocols = fy_append(gb, protocols,
+					fy_get(e, "protocol", fy_invalid));
+			rows = fy_append(gb, rows, fy_mapping(gb,
+				"name", fy_get(p, "name", fy_invalid),
+				"root_url", fy_get(p, "root_url", ""),
+				"protocols", protocols));
+		}
+		return rows;
 	}
-	if (!what || !strcmp(what, "models"))
-		catalog_list_models(ctx, cat);
-	if (!what || !strcmp(what, "providers"))
-		catalog_list_providers(ctx, cat);
-	return 0;
+	fy_foreach(m, fy_get(cat, "models", fy_invalid))
+		rows = fy_append(gb, rows, fy_mapping(gb,
+			"name", fy_get(m, "name", fy_invalid),
+			"context_window", fy_get(m, "context_window", 0LL),
+			"max_output_tokens", fy_get(m, "max_output_tokens",
+						    0LL)));
+	return rows;
+err:
+	return fy_invalid;
 }

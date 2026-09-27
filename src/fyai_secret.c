@@ -307,6 +307,32 @@ int fyai_secret_kernel_delete(const char *name)
 #define FYAI_SECRET_BACKEND_NAME "unavailable"
 #endif
 
+fy_generic fyai_secret_status_data(struct fyai_ctx *ctx,
+				   struct fy_generic_builder *gb,
+				   const char *name)
+{
+	char *probe = NULL;
+	size_t probe_len = 0;
+	int rc;
+
+	(void)ctx;
+	if (!name || !*name) {
+		rc = fyai_secret_kernel_get("fyai:__probe__", &probe,
+					    &probe_len);
+		fyai_secret_clear_and_free(&probe, &probe_len);
+		return fy_mapping(gb, "backend",
+				  rc == FYAI_SECRET_UNSUPPORTED ?
+				  "unavailable" : FYAI_SECRET_BACKEND_NAME);
+	}
+	rc = fyai_secret_kernel_get(fy_sprintfa("fyai:%s", name), &probe,
+				    &probe_len);
+	fyai_secret_clear_and_free(&probe, &probe_len);
+	return fy_mapping(gb, "name", name, "state",
+			  rc == FYAI_SECRET_OK ? "present" :
+			  rc == FYAI_SECRET_NOT_FOUND ? "absent" :
+			  "unavailable");
+}
+
 int fyai_secret_action(struct fyai_ctx *ctx,
 		       enum fyai_secret_command command, const char *name,
 		       bool stdin_value)

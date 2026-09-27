@@ -13,6 +13,8 @@
 
 /* Cancel and release side questions before the interactive loop closes. */
 void fyai_session_btw_close(struct fyai_ctx *ctx);
+/* Ask @question on a side branch, in a tile of the work pane. */
+int fyai_session_btw(struct fyai_ctx *ctx, const char *question);
 
 /*
  * Shared backends for the interactive slash commands and their CLI verb
@@ -22,7 +24,7 @@ void fyai_session_btw_close(struct fyai_ctx *ctx);
  */
 
 /* Reset the conversation: head -> null (durable), fresh system turn when a
- * request session is live. */
+ * request session is live. The caller presents the result. */
 int fyai_session_clear(struct fyai_ctx *ctx);
 
 /* Summarize the history with one model call and restart the chain from the
@@ -32,17 +34,30 @@ int fyai_session_compact(struct fyai_ctx *ctx, const char *hint);
 /* Return true when compaction uses a Responses input trigger. */
 bool fyai_session_compact_v2(const struct fyai_cfg *cfg);
 
-/* Print the current model (@name NULL/empty) or switch to @name
- * mid-session: re-resolve against the catalogue and rebuild request state. */
-int fyai_session_model(struct fyai_ctx *ctx, const char *name);
+/*
+ * Select the model @name: resolve it against the catalogue, rebuild the
+ * request state of a live session, and store it in the branch configuration.
+ * A @live session must have a credential for the new provider; a verb only
+ * stores the choice. A failure leaves the configuration as it was. The
+ * caller presents the result.
+ */
+int fyai_session_model(struct fyai_ctx *ctx, const char *name, bool live);
 
-/* Print the current API grammar (@arg NULL/empty) or switch to it
- * mid-session: re-resolve the same provider's endpoint for the new grammar
- * and rebuild request state. */
-int fyai_session_api(struct fyai_ctx *ctx, const char *arg);
+/*
+ * Switch to the API grammar @arg: resolve the endpoint of the same provider
+ * for it, rebuild the request state, and store it. With no @arg, or the
+ * grammar in use, nothing changes. A @live session must have a credential
+ * for the provider. The caller presents the result.
+ */
+int fyai_session_api(struct fyai_ctx *ctx, const char *arg, bool live);
 
-/* Report projected next-request context fill and its prompt/output parts. */
-int fyai_session_context(struct fyai_ctx *ctx);
+/*
+ * The context fill and the token estimate of the session, built in @gb: the
+ * model, the provider, the grammar, the window, the prompt, and the output
+ * allowance.
+ */
+fy_generic fyai_session_context_data(struct fyai_ctx *ctx,
+				     struct fy_generic_builder *gb);
 
 /* Return the active context window, or zero if it is not specified. */
 long long fyai_context_window(struct fyai_ctx *ctx);
@@ -81,12 +96,19 @@ long long fyai_context_output_tokens(struct fyai_ctx *ctx, long long prompt,
 				     long long window);
 
 /* Overview: model/provider selection, request shaping, auth, token usage. */
-int fyai_session_status(struct fyai_ctx *ctx);
+/*
+ * The overview of the session, built in @gb: the model selection, request
+ * shaping, and context fill, with the login under `auth` and the token use
+ * under `usage`.
+ */
+fy_generic fyai_session_status_data(struct fyai_ctx *ctx,
+				    struct fy_generic_builder *gb);
 /*
  * Switch the live session to @name: the conversation, the configuration, the
  * authentication and the display change together, and a failure restores the
  * branch that was there. @create makes a branch that is absent. @keep_head
- * selects the branch for this invocation only, which publishes nothing.
+ * selects the branch for this invocation only, which publishes nothing. The
+ * caller reports the switch.
  */
 int fyai_session_branch_switch(struct fyai_ctx *ctx, const char *name,
 			       bool create, bool keep_head);
@@ -131,5 +153,6 @@ bool fyai_session_slash_immediate(struct fyai_ctx *ctx, const char *line,
 struct fytim_completions;
 void fyai_session_completion(struct fyai_ctx *ctx, const char *buf,
 			     struct fytim_completions *comps);
+
 
 #endif

@@ -37,6 +37,7 @@
 #include "fyai_markdown.h"
 #include "fyai_storage.h"
 #include "commands.h"
+#include "fyai_cmd.h"
 #include "utils.h"
 
 /* FYAI_EMBEDDED_CONFIG_SCHEMA[] / FYAI_EMBEDDED_CONFIG_SCHEMA_LEN - the
@@ -2197,10 +2198,96 @@ int fyai_config_rederive(struct fyai_ctx *ctx)
 
 	if (!cfg || !cfg->gb)
 		return -1;
-	/* Arena changes replace the document after an in-session mutation. */
+	/* Arena changes replace the document after an in-session mutation;
+	 * the session layer stays on top. */
 	doc = fy_is_valid(ctx->arena_config) ?
 		ctx->arena_config : cfg->config_doc;
+	doc = config_merge(cfg->gb, doc, cfg->config_session);
 	return config_rederive_doc(ctx, doc);
+}
+
+fy_generic fyai_config_schema_node(const char *path)
+{
+	fy_generic node;
+	const char *p, *slash;
+	char key[128];
+	size_t len;
+
+	node = fyai_config_schema(NULL);
+	for (p = path; p && *p; p = slash ? slash + 1 : p + len) {
+		slash = strchr(p, '/');
+		len = slash ? (size_t)(slash - p) : strlen(p);
+		if (!len || len >= sizeof(key))
+			return fy_invalid;
+		memcpy(key, p, len);
+		key[len] = '\0';
+		node = fy_get(fy_get(node, "properties", fy_invalid), key,
+			      fy_invalid);
+		if (!slash)
+			break;
+	}
+	return node;
+}
+
+bool fyai_config_session_scoped(const char *path)
+{
+	fy_generic node, scope;
+	const char *p, *slash;
+	char key[128];
+	size_t len;
+	bool session;
+
+	/* The nearest scope on the path decides. */
+	session = false;
+	node = fyai_config_schema(NULL);
+	for (p = path; p && *p; p = slash + 1) {
+		slash = strchr(p, '/');
+		len = slash ? (size_t)(slash - p) : strlen(p);
+		if (!len || len >= sizeof(key))
+			return false;
+		memcpy(key, p, len);
+		key[len] = '\0';
+		node = fy_get(fy_get(node, "properties", fy_invalid), key,
+			      fy_invalid);
+		/* A key below a scoped node inherits its scope, also where the
+		 * schema does not name it (a member of a oneOf branch). */
+		if (!fy_is_valid(node))
+			return session;
+		scope = fy_get(node, "x-fyai-scope", fy_invalid);
+		if (fy_is_string(scope))
+			session = fy_equal(scope, "session");
+		if (!slash)
+			break;
+	}
+	return session;
+}
+
+int fyai_config_session_set(struct fyai_ctx *ctx, const char *key,
+			    fy_generic value)
+{
+	struct fyai_cfg *cfg = ctx->cfg;
+	fy_generic layer, base, doc, report;
+
+	fyai_error_check(ctx, fyai_config_session_scoped(key), err,
+			 "%s is stored configuration; it has no session value",
+			 key);
+	layer = fy_is_valid(cfg->config_session) ? cfg->config_session :
+		fy_map_empty;
+	layer = fy_set_at_pathstr(cfg->gb, layer, key, value);
+	fyai_error_check(ctx, fy_is_valid(layer), err,
+			 "%s: cannot set the value", key);
+	base = fy_is_valid(ctx->arena_config) ? ctx->arena_config :
+	       cfg->config_doc;
+	doc = config_merge(cfg->gb, base, layer);
+	report = fyai_config_validate_report(cfg, doc, key);
+	if (!fyai_schema_valid(report)) {
+		fyai_config_report_problems(cfg, report);
+		return -1;
+	}
+	cfg->config_session = layer;
+	return config_rederive_doc(ctx, doc);
+err:
+	return -1;
 }
 
 int fyai_config_adopt_catalog(struct fyai_ctx *ctx)
@@ -2234,8 +2321,10 @@ int fyai_config_adopt_arena(struct fyai_ctx *ctx)
 		return -1;
 	if (fyai_config_adopt_catalog(ctx))
 		return -1;
-	/* The prepared document contains --config and --set as higher layers. */
+	/* The prepared document contains --config and --set as higher layers,
+	 * and the session layer is above them. */
 	doc = config_merge(cfg->gb, ctx->arena_config, cfg->config_doc);
+	doc = config_merge(cfg->gb, doc, cfg->config_session);
 	return config_rederive_doc(ctx, doc);
 }
 
@@ -2351,7 +2440,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->mcp_protocol_version = "2024-11-05";
 	cfg->mcp_servers = fy_invalid;
 	cfg->mcp_timeout = 30;
-	cfg->cmd.id = FYAIVID_INVALID;
+	cfg->cmd.run = FYAI_RUN_NONE;
 }
 
 void fyai_config_cleanup(struct fyai_cfg *cfg)
@@ -2361,8 +2450,6 @@ void fyai_config_cleanup(struct fyai_cfg *cfg)
 
 	/* Drains whatever no earlier boundary reported. */
 	fyai_diag_cleanup(&cfg->diag);
-	if (cfg->cmd.id == FYAIVID_MCP)
-		free(cfg->cmd.args.mcp.scopes);
 	free(cfg->branch);
 	free(cfg->root_spec);
 	free(cfg->terminal_input);
@@ -2810,6 +2897,7 @@ struct config_cli_options {
 	const char *env;
 	const char *api_key;
 	int arg_index;
+	bool help;
 };
 
 static int config_parse_set_option(struct fyai_cfg *cfg, int argc, char *argv[])
@@ -2844,6 +2932,7 @@ static int config_parse_cli_options(struct fyai_cfg *cfg, int argc, char *argv[]
 	options->config = NULL;
 	options->env = NULL;
 	options->api_key = NULL;
+	options->help = false;
 
 	optind = 0;
 	optarg = NULL;
@@ -2853,8 +2942,8 @@ static int config_parse_cli_options(struct fyai_cfg *cfg, int argc, char *argv[]
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'h':
-			fyai_usage(stdout, "fyai", cfg->color);
-			return 1;
+			options->help = true;
+			break;
 		case OPT_VERSION:
 			printf("fyai %s\n", VERSION);
 			return 1;
@@ -2937,7 +3026,8 @@ static int config_parse_cli_options(struct fyai_cfg *cfg, int argc, char *argv[]
 			cfg->transient = true;
 			break;
 		default:
-			fyai_usage(stderr, "fyai", cfg->color);
+			fyai_cfg_error(cfg, "run 'fyai help' for the commands and "
+				   "options");
 			return -1;
 		}
 	}
@@ -2946,21 +3036,17 @@ static int config_parse_cli_options(struct fyai_cfg *cfg, int argc, char *argv[]
 }
 
 /*
- * Select the branch the resume verb names, before the configuration is loaded.
- * The branch is selected for this invocation only, exactly as --branch is, so
- * stored HEAD does not move. Returns 0 on success, -1 with a diagnostic
- * raised.
+ * Select the branch that the resume verb names, before the configuration is
+ * loaded. The branch is selected for this invocation only, exactly as --branch
+ * is, so stored HEAD does not move. With no branch and no --last, the picker
+ * selects during the session. Returns 0, or -1 with a diagnostic raised.
  */
-static int config_select_resume(struct fyai_cfg *cfg, int argc, char *argv[])
+int fyai_config_select_resume(struct fyai_cfg *cfg)
 {
 	struct fyai_resume_args *args = &cfg->cmd.args.resume;
 	char cwd[PATH_MAX];
 	char *name;
 
-	if (fyai_resume_parse(cfg, argc, argv))
-		return -1;
-
-	/* No branch and no --last: the picker selects during the session. */
 	if (args->branch)
 		return fyai_cfg_set_branch(cfg, args->branch);
 	if (!args->last)
@@ -2996,8 +3082,8 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 	bool stdin_prompt;
 	char *prompt = NULL;
 	int ret = -1;
-	char tmp_prompt[16];
-	char *tmp_argv[2];
+	char **help_argv = NULL;
+	int i;
 
 	if (!cfg)
 		return -1;
@@ -3016,6 +3102,7 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		goto err_out;
 
 	fyai_config_set_defaults(cfg);
+	cfg->config_session = fy_invalid;
 
 	rc = config_parse_cli_options(cfg, argc, argv, &cli);
 	if (rc > 0) {
@@ -3027,6 +3114,24 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 	arg_index = cli.arg_index;
 
 	/*
+	 * -h is the help command: `fyai -h WORDS` is `fyai help WORDS`. The
+	 * registry copies the words it parses, so the vector lives only for
+	 * this call.
+	 */
+	if (cli.help) {
+		help_argv = calloc((size_t)(argc - arg_index) + 2,
+				   sizeof(*help_argv));
+		fyai_cfg_error_check(cfg, help_argv, err_out,
+				     "cannot make the arguments of help");
+		help_argv[0] = (char *)"help";
+		for (i = arg_index; i < argc; i++)
+			help_argv[1 + i - arg_index] = argv[i];
+		argc = 1 + argc - arg_index;
+		argv = help_argv;
+		arg_index = 0;
+	}
+
+	/*
 	 * $FYAI_BRANCH backs --branch and must be settled before the config is
 	 * loaded: the config lives in the branch entry, so the branch has to be
 	 * known to read the right one.
@@ -3035,11 +3140,12 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		goto err_out;
 
 	/*
-	 * The resume verb selects a branch for the same reason, so it is
-	 * settled here too, before the configuration of that branch is read.
+	 * A verb of the registry is parsed here, and its early hook runs: the
+	 * resume verb selects a branch for the same reason, before the
+	 * configuration of that branch is read.
 	 */
-	if (arg_index < argc && !strcmp(argv[arg_index], "resume") &&
-	    config_select_resume(cfg, argc - arg_index, argv + arg_index))
+	if (arg_index < argc && fyai_cmd_is_verb(argv[arg_index]) &&
+	    fyai_cmd_early(cfg, argc - arg_index, argv + arg_index))
 		goto err_out;
 
 	rc = fyai_config_load(cfg, cli.config, cli.env);
@@ -3080,8 +3186,12 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		def_arena_dir = NULL;
 	}
 
-	/* A known verb at optind dispatches; otherwise it's a prompt. */
-	verb = arg_index < argc && fyai_is_verb(argv[arg_index]) ? argv[arg_index] : NULL;
+	/*
+	 * A known verb at optind dispatches; otherwise it's a prompt. A command
+	 * of the registry hides a table verb of the same name.
+	 */
+	verb = arg_index < argc && fyai_cmd_is_verb(argv[arg_index]) ?
+	       argv[arg_index] : NULL;
 
 	if (!verb && arg_index >= argc && !cfg->interactive &&
 	    config_has_command_ops(cfg)) {
@@ -3093,15 +3203,16 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		 * interactive prompt loop even with pending --set ops queued -
 		 * those still run in fyai_run either way.
 		 */
-		cfg->cmd.id = FYAIVID_CONFIG;
+		cfg->cmd.run = FYAI_RUN_CONFIG;
 		ret = 0;
 	} else if (verb) {
-		cfg->cmd.id = fyai_get_verb_id(verb);
 		argv += arg_index;
 		argc -= arg_index;
-		/* Resume continues a session at the prompt, as a verb of its own. */
-		if (cfg->cmd.id == FYAIVID_RESUME)
-			cfg->interactive = true;
+		/* The flags of a registry command come from its definition,
+		 * and the gate below reads them. */
+		if (fyai_cmd_configure(cfg, argc, argv))
+			goto err_out;
+		ret = 0;
 	} else {
 		stdin_prompt = (!cfg->interactive && arg_index >= argc &&
 				!terminal_is_tty(STDIN_FILENO)) ||
@@ -3139,14 +3250,8 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		free(prompt);
 		prompt = NULL;
 
-		cfg->cmd.id = FYAIVID_PROMPT;
-
-		strncpy(tmp_prompt, "prompt", sizeof(tmp_prompt));
-		tmp_argv[0] = tmp_prompt;
-		tmp_argv[1] = NULL;
-
-		argc = 1;
-		argv = tmp_argv;
+		cfg->cmd.run = FYAI_RUN_PROMPT;
+		ret = 0;
 	}
 
 	/*
@@ -3160,15 +3265,11 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 	if (fyai_cfg_makes_requests(cfg) && fyai_config_messages_gate(cfg))
 		goto err_out;
 
-	if (ret < 0) {
-		ret = fyai_configure(cfg, argc, argv);
-		if (ret)
-			goto err_out;
-	}
-
+	free(help_argv);
 	return ret;
 
 out:
+	free(help_argv);
 	fyai_config_cleanup(cfg);
 	return ret;
 

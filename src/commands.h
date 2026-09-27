@@ -1,5 +1,5 @@
 /*
- * commands.h - fyai verb dispatch
+ * commands.h - what an invocation runs, and the arguments backends read
  *
  * Copyright (c) 2026 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
  *
@@ -18,58 +18,16 @@
 #include "fyai_secret.h"
 
 /* fwd decl */
-struct fyai_verb;
 struct fyai_cfg;
 struct fyai_ctx;
 
-enum fyai_verb_id {
-	FYAIVID_INVALID = -1,
-	FYAIVID_PROMPT = 0,	/* this is the default, prompt mode */
-	FYAIVID_INIT,
-	FYAIVID_DUMP,
-	FYAIVID_DISPLAY,
-	FYAIVID_HISTORY,
-	FYAIVID_TRANSCRIPT,
-	FYAIVID_STATS,
-	FYAIVID_CONFIG,
-	FYAIVID_LIST,
-	FYAIVID_CATALOG,
-	FYAIVID_BRANCH,
-	FYAIVID_CHECKOUT,
-	FYAIVID_RESET,
-	FYAIVID_ROOT,
-	FYAIVID_REBASE,
-	FYAIVID_MERGE,
-	FYAIVID_CLEAR,
-	FYAIVID_COMPACT,
-	FYAIVID_CONTEXT,
-	FYAIVID_API,
-	FYAIVID_LOG,
-	FYAIVID_SANDBOX,
-	FYAIVID_AUTH,
-	FYAIVID_SECRET,
-	FYAIVID_MCP,
-	FYAIVID_GC,
-	FYAIVID_TOOL,
-	FYAIVID_AGENT,
-	FYAIVID_EXPORT,
-	FYAIVID_DIFF,
-	FYAIVID_IMPORT,
-	FYAIVID_REPLAY,
-	FYAIVID_RESUME,
-	FYAIVID_TERM,
-	FYAIVID_HELP,
+/* What one invocation runs. */
+enum fyai_run {
+	FYAI_RUN_NONE = -1,
+	FYAI_RUN_PROMPT = 0,	/* a prompt, or the interactive session */
+	FYAI_RUN_CONFIG,	/* only the global --set, --get, and --delete */
+	FYAI_RUN_CMD,		/* a command of the registry, fyai_cmd.h */
 };
-#define FYAI_VERB_COUNT (FYAIVID_HELP + 1)
-
-/* find the fyai_verb that matches the name or NULL */
-const struct fyai_verb *fyai_find_verb(const char *name);
-
-/* return the verb id or FYAIVID_INVALID if invalid */
-enum fyai_verb_id fyai_get_verb_id(const char *name);
-
-/* True if @name is a known verb (init, dump, stats, config, gc, init). */
-bool fyai_is_verb(const char *name);
 
 enum fyai_output_format {
 	FYAIOF_MARKDOWN,
@@ -78,34 +36,12 @@ enum fyai_output_format {
 	FYAIOF_YAML,
 };
 
-const struct fyai_verb *fyai_id_to_verb(enum fyai_verb_id id);
-
 /*
  * Run a single model invocation (prompt or interactive) to completion:
  * setup, execute, print --stats, cleanup. @cfg must already carry the prompt
  * and any run options. Returns 0 on success, -1 on failure.
  */
 int fyai_run(struct fyai_cfg *cfg);
-
-/*
- * Configure a verb. @argc/@argv are the verb's own slice (argv[0] is the verb
- * name, argv[1..] its arguments). @cfg carries the resolved global options.
- * Returns 0 on success, -1 on error
- */
-int fyai_configure(struct fyai_cfg *cfg, int argc, char *argv[]);
-
-/*
- * Parse the `resume` verb's own arguments into @cfg. Called before the
- * configuration is loaded, because the branch it selects decides which
- * configuration the run reads.
- */
-int fyai_resume_parse(struct fyai_cfg *cfg, int argc, char *argv[]);
-
-/* Print the top-level usage (verbs + global options) to @fp. */
-void fyai_usage(FILE *fp, const char *progname, const char *color_mode);
-int fyai_execute_list(struct fyai_ctx *ctx);
-int fyai_execute_config(struct fyai_ctx *ctx);
-int fyai_execute_catalog(struct fyai_ctx *ctx);
 
 /* per verb arguments */
 
@@ -183,105 +119,11 @@ struct fyai_stats_args {
 	enum fyai_output_format format;
 };
 
-enum fyai_config_type {
-	FYAICT_SHOW,
-	FYAICT_EFFECTIVE,
-	FYAICT_GET,
-	FYAICT_SET,
-	FYAICT_DELETE,
-	FYAICT_EDIT,
-	FYAICT_IMPORT,
-	FYAICT_EXPORT,
-	FYAICT_VALIDATE,
-	FYAICT_SCHEMA,
-	FYAICT_DESCRIBE,
-	/*
-	 * Not user-typable: synthesized for a bare --set/--get/--delete run with
-	 * no verb, so storage opens (no API key, no requests) and the global ops
-	 * run in fyai_run while the verb itself does nothing. Kept last so it does
-	 * not perturb the types[] subcommand table.
-	 */
-	FYAICT_NOOP,
-};
-
-struct fyai_config_args {
-	enum fyai_config_type type;
-	const char *key;
-	const char *value;
-};
-
-enum fyai_catalog_type {
-	FYAICAT_SHOW,
-	FYAICAT_LIST,
-	FYAICAT_TOOLS,
-	FYAICAT_IMPORT,
-	FYAICAT_EXPORT,
-	FYAICAT_GET,
-	FYAICAT_SET,
-	FYAICAT_DELETE,
-	FYAICAT_EDIT,
-	FYAICAT_VALIDATE,
-	FYAICAT_SCHEMA,
-	FYAICAT_RESET,
-	FYAICAT_UPDATE,
-};
-
-/* Most --provider options that one catalog update takes. */
-#define FYAI_CATALOG_UPDATE_PROVIDERS_MAX 32
-
-struct fyai_catalog_args {
-	enum fyai_catalog_type type;
-	const char *arg;	/* import file, list selector or path */
-	const char *value;	/* set: the YAML flow value */
-	bool full;		/* --full: show complete tool descriptions */
-	bool curated;		/* update: --curated */
-	/* update: the --provider names, in the configuration builder */
-	const char *providers[FYAI_CATALOG_UPDATE_PROVIDERS_MAX];
-	size_t provider_count;
-};
-
-enum fyai_list_type {
-	FYAILT_PROVIDERS,
-	FYAILT_MODELS,
-	FYAILT_TURNS,
-	FYAILT_EXCHANGES,
-	FYAILT_REFLOG,
-};
-
-struct fyai_list_args {
-	enum fyai_list_type type;
-	enum fyai_output_format format;
-	bool full;	/* --full: include per-item detail; --brief (default): summary */
-};
-
 struct fyai_gc_args {
 	/* Retain at most this many ref-log entries (current root + N-1
 	 * predecessors); the rest are cut from the chain and freed. -1 keeps
 	 * the whole chain. */
 	int keep_reflogs;
-};
-
-enum fyai_branch_cmd_type {
-	FYAIBCT_LIST,
-	FYAIBCT_CREATE,
-	FYAIBCT_DELETE,
-	FYAIBCT_RENAME,
-	FYAIBCT_SHOW,
-	FYAIBCT_DESCRIBE,
-};
-
-struct fyai_branch_args {
-	enum fyai_branch_cmd_type type;
-	const char *name;	/* branch to act on */
-	const char *arg;	/* start point, new name or description */
-	bool all;		/* list sub-agent branches too */
-	bool force;		/* delete a branch that has turns */
-};
-
-struct fyai_checkout_args {
-	const char *name;
-	const char *start;	/* optional start point, with -b */
-	bool create;		/* -b: create the branch and switch to it */
 };
 
 struct fyai_diff_args {
@@ -340,10 +182,6 @@ struct fyai_term_args {
 	bool hold;		/* stay on the last screen until a key */
 };
 
-struct fyai_help_args {
-	const char *verb;
-};
-
 struct fyai_tool_args {
 	const char *name;	/* tool name, e.g. read_file */
 	const char *args_json;	/* JSON args, or NULL to read stdin */
@@ -366,12 +204,7 @@ union fyai_cmd_args {
 	struct fyai_dump_args dump;
 	struct fyai_display_args display;
 	struct fyai_stats_args stats;
-	struct fyai_config_args config;
-	struct fyai_catalog_args catalog;
-	struct fyai_list_args list;
 	struct fyai_gc_args gc;
-	struct fyai_branch_args branch;
-	struct fyai_checkout_args checkout;
 	struct fyai_reset_args reset;
 	struct fyai_root_args root;
 	struct fyai_join_args join;
@@ -380,9 +213,7 @@ union fyai_cmd_args {
 	struct fyai_context_args context;
 	struct fyai_api_args api;
 	struct fyai_log_args log;
-	struct fyai_help_args help;
 	struct fyai_tool_args tool;
-	struct fyai_auth_args auth;
 	struct fyai_secret_args secret;
 	struct fyai_mcp_args mcp;
 	struct fyai_export_args export;
@@ -393,32 +224,45 @@ union fyai_cmd_args {
 	struct fyai_term_args term;
 };
 
-/* combined */
-struct fyai_cmd_info {
-	enum fyai_verb_id id;
-	union fyai_cmd_args args;
-};
-
 /* finally declare the verb */
 enum fyai_verb_flags {
 	FYAIVF_BATCH		= 0,		/* is batch only */
 	FYAIVF_INTERACTIVE	= FY_BIT(0),	/* is interactive */
-	FYAIVF_NEEDS_API_KEYS	= FY_BIT(1),	/* makes authenticated requests */
 	FYAIVF_NO_STORAGE	= FY_BIT(2),	/* does not need storage */
 	FYAIVF_NO_REQUESTS	= FY_BIT(3),	/* does not make requests */
 	FYAIVF_NEEDS_TRANSIENT_BUILDER = FY_BIT(4),
+	FYAIVF_STORAGE_OPTIONAL	= FY_BIT(5),	/* storage only when it exists */
 };
 
+/* The properties of what an invocation runs, which setup reads. */
 struct fyai_verb {
-	int id;
 	const char *name;
-	int (*configure)(int argc, char **argv, struct fyai_cfg *cfg);
 	int (*execute)(struct fyai_ctx *ctx);
-	const char *synopsis;
-	const char *help;
 	enum fyai_verb_flags flags;
-	union fyai_cmd_args default_args;	/* the default args */
 };
+
+/*
+ * A command of the registry, parsed for this invocation: its definition, its
+ * validated arguments, and the verb properties that setup reads. The values
+ * live in cfg->gb. See fyai_cmd.h.
+ */
+struct fyai_cmd_state {
+	fy_generic def;
+	const char *path;		/* "branch new" */
+	fy_generic args;
+	int format;			/* enum fyai_cmd_format */
+	bool help;			/* --help: show the help, run nothing */
+	struct fyai_verb verb;		/* flags from the definition */
+};
+
+/* combined */
+struct fyai_cmd_info {
+	enum fyai_run run;
+	union fyai_cmd_args args;
+
+	struct fyai_cmd_state reg;	/* FYAI_RUN_CMD */
+};
+
 
 
 #endif

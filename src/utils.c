@@ -1619,50 +1619,6 @@ char *read_all_stdin(void)
 	return buf;
 }
 
-/* Print @opt, coloring "--long"/"-s" cyan/green and "<arg>" green. */
-void usage_print_option(FILE *fp, bool color, const char *opt)
-{
-	const char *s, *e, *style;
-	size_t len;
-
-	for (s = opt; *s; s = e) {
-		if (*s == ' ' || *s == ',') {
-			fputc(*s, fp);
-			e = s + 1;
-			continue;
-		}
-		for (e = s; *e && *e != ' ' && *e != ','; e++)
-			;
-		len = (size_t)(e - s);
-
-		style = NULL;
-		if (len >= 2 && s[0] == '-' && s[1] == '-')
-			style = FYAI_ANSI_CYAN;
-		else if (s[0] == '-')
-			style = FYAI_ANSI_GREEN;
-		else if (s[0] == '<' && s[len - 1] == '>')
-			style = FYAI_ANSI_GREEN;
-
-		if (color && style)
-			fputs(style, fp);
-		fwrite(s, 1, len, fp);
-		if (color && style)
-			fputs(FYAI_ANSI_RESET, fp);
-	}
-}
-
-void usage_item(FILE *fp, bool color, const char *opt, const char *desc)
-{
-	size_t len, i;
-
-	fputs("  ", fp);
-	usage_print_option(fp, color, opt);
-	len = strlen(opt);
-	for (i = len; i < 26; i++)
-		fputc(' ', fp);
-	fprintf(fp, " : %s\n", desc);
-}
-
 int str_in_set(const char *v, const char *const *opts)
 {
 	int i;
