@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "fyai_branch.h"
+#include "fyai_diff.h"
 #include "fyai_config.h"
 #include "fyai_display.h"
 #include "fyai_markdown.h"
@@ -635,8 +636,12 @@ err:
 	return -1;
 }
 
-int fyai_export_view(struct fyai_ctx *ctx, const char *path,
-		     const char *ref)
+/*
+ * Write the branch ending at @start, a ref-log entry, to @fp. @what names the
+ * destination in a diagnostic.
+ */
+static int fyai_export_write(struct fyai_ctx *ctx, FILE *fp, const char *what,
+			     fy_generic start)
 {
 	struct fyai_turn_stack stack;
 	struct fy_generic_builder *gb;
@@ -644,37 +649,21 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path,
 	struct fyai_export_entries entries;
 	struct fyai_branch branch;
 	fy_generic messages;
-	const char *conversation_path;
-	FILE *fp;
 	size_t i, entry_index;
 	int rc;
-	int close_rc;
 	fy_generic entry;
-	fy_generic start;
 	fy_generic previous_store;
 	fy_generic store;
 	fy_generic previous_head;
 	fy_generic meta;
 	bool decoded;
+	bool done = false;
 
 	memset(&stack, 0, sizeof(stack));
 	memset(&calls, 0, sizeof(calls));
 	memset(&entries, 0, sizeof(entries));
-	fp = NULL;
 	gb = ctx->transient_gb;
 	assert(gb);
-	rc = -1;
-	/* A reference names the ref-log entry that the export ends at. */
-	start = ctx->branch_prev;
-	if (ref && fyai_resolve_ref_entry(ctx, ref, &start))
-		return -1;
-	/* No path is stdout, so an export composes with a pipe by default. */
-	conversation_path = path ? path : "standard output";
-	if (path) {
-		fp = fopen(path, "wb");
-		fyai_error_check(ctx, fp, out, "export: cannot write %s", path);
-	} else
-		fp = stdout;
 	rc = fyai_export_directive(ctx, fp,
 		fy_mapping(gb, "format", 2LL, "kind", "conversation"));
 	fyai_error_check(ctx, !rc, out, "export: cannot write the document header");
@@ -743,17 +732,183 @@ int fyai_export_view(struct fyai_ctx *ctx, const char *path,
 		previous_store = store;
 		previous_head = branch.head;
 	}
-	close_rc = fp == stdout ? fflush(fp) : fclose(fp);
-	fp = NULL;
-	fyai_error_check(ctx, !close_rc, out, "export: cannot write %s",
-			 conversation_path);
-	rc = 0;
+	rc = ferror(fp) ? -1 : 0;
+	fyai_error_check(ctx, !rc, out, "export: cannot write %s", what);
+	done = true;
 out:
-	if (fp && fp != stdout)
-		fclose(fp);
 	fyai_export_calls_cleanup(&calls);
 	fyai_export_entries_cleanup(&entries);
 	fyai_turn_stack_cleanup(&stack);
+	return done ? 0 : -1;
+}
+
+int fyai_export_view(struct fyai_ctx *ctx, const char *path,
+		     const char *ref)
+{
+	const char *what;
+	fy_generic start;
+	FILE *fp;
+	int rc;
+
+	/* A reference names the ref-log entry that the export ends at. */
+	start = ctx->branch_prev;
+	if (ref && fyai_resolve_ref_entry(ctx, ref, &start))
+		return -1;
+	/* No path is stdout, so an export composes with a pipe by default. */
+	what = path ? path : "standard output";
+	if (path) {
+		fp = fopen(path, "wb");
+		fyai_error_check(ctx, fp, err, "export: cannot write %s", path);
+	} else {
+		fp = stdout;
+	}
+	rc = fyai_export_write(ctx, fp, what, start);
+	if (fp == stdout) {
+		if (fflush(fp))
+			rc = -1;
+	} else if (fclose(fp)) {
+		rc = -1;
+	}
+	fyai_error_check(ctx, !rc, err, "export: cannot write %s", what);
+	return 0;
+err:
+	return -1;
+}
+
+/* Write the export of @ref to a heap string; NULL with a diagnostic. */
+static char *fyai_export_text(struct fyai_ctx *ctx, const char *ref,
+			      size_t *lenp)
+{
+	fy_generic start;
+	char *buf = NULL;
+	size_t size = 0;
+	FILE *fp;
+	int rc;
+
+	if (fyai_resolve_ref_entry(ctx, ref, &start))
+		return NULL;
+	fp = open_memstream(&buf, &size);
+	fyai_error_check(ctx, fp, err, "diff: could not allocate the export "
+			 "of %s", ref);
+	rc = fyai_export_write(ctx, fp, ref, start);
+	if (fclose(fp))
+		rc = -1;
+	fyai_error_check(ctx, !rc && buf, err, "diff: could not export %s",
+			 ref);
+	*lenp = size;
+	return buf;
+err:
+	free(buf);
+	return NULL;
+}
+
+/*
+ * Write @diff with each row in the colour of its kind. The colour is the
+ * foreground of the diff roles of the palette: a row keeps the background of
+ * the terminal, where a wash of the theme ground would not match it.
+ */
+static int fyai_diff_present(struct fyai_ctx *ctx, const char *diff)
+{
+	const struct fyai_cfg *cfg = ctx->cfg;
+	struct response_buffer out = {0};
+	const char *line, *nl, *role, *fallback;
+	size_t len;
+	int rc;
+
+	rc = 0;
+	for (line = diff; !rc && *line; line = nl ? nl + 1 : line + len) {
+		nl = strchr(line, '\n');
+		len = nl ? (size_t)(nl - line) : strlen(line);
+		if (!strncmp(line, "--- ", 4) || !strncmp(line, "+++ ", 4)) {
+			role = "diff.file";
+			fallback = FYAI_ANSI_CYAN;
+		} else if (*line == '@' || *line == '\\') {
+			role = "diff.hunk";
+			fallback = FYAI_ANSI_DIM;
+		} else if (*line == '+') {
+			role = "diff.lineno.add";
+			fallback = FYAI_ANSI_GREEN;
+		} else if (*line == '-') {
+			role = "diff.lineno.del";
+			fallback = FYAI_ANSI_RED;
+		} else {
+			role = NULL;
+			fallback = NULL;
+		}
+		if (role)
+			rc = response_buffer_append(&out,
+					markdown_role_on(cfg, role, fallback));
+		if (!rc)
+			rc = response_buffer_append_data(&out, line, len);
+		if (!rc && role)
+			rc = response_buffer_append(&out,
+					markdown_role_off(cfg, role,
+							  FYAI_ANSI_RESET));
+		if (!rc)
+			rc = response_buffer_append(&out, "\n");
+	}
+	fyai_error_check(ctx, !rc, out, "diff: out of memory colouring the "
+			 "diff");
+	rc = fyai_sink_write(ctx->sink, FYAI_SINK_NOTICE, out.data ? out.data : "",
+			     out.len);
+out:
+	free(out.data);
+	return rc;
+}
+
+/* The diff view of libfymd4c, the whole diff at the width of the output. */
+static int fyai_diff_view(struct fyai_ctx *ctx, const char *diff)
+{
+	char *out = NULL;
+	size_t len;
+	int rc;
+
+	rc = markdown_diff_render(ctx->cfg, diff, strlen(diff), &out, &len);
+	if (rc)
+		return -1;	/* markdown_diff_render() says why */
+	rc = fyai_sink_write(ctx->sink, FYAI_SINK_NOTICE, out, len);
+	fymd_free(out);
+	return rc;
+}
+
+int fyai_export_diff(struct fyai_ctx *ctx, const char *from, const char *to,
+		     bool unified)
+{
+	char *a = NULL, *b = NULL, *diff = NULL;
+	size_t alen, blen;
+	int rc;
+
+	rc = -1;
+	a = fyai_export_text(ctx, from, &alen);
+	if (!a)
+		goto out;
+	b = fyai_export_text(ctx, to, &blen);
+	if (!b)
+		goto out;
+	rc = fyai_diff_unified(a, alen, b, blen, from, to, 3, &diff);
+	fyai_error_check(ctx, !rc, out, "diff: out of memory comparing %s "
+			 "and %s", from, to);
+	rc = -1;
+	if (!*diff) {
+		fyai_result(ctx, "diff: %s and %s are the same\n", from, to);
+		rc = 0;
+		goto out;
+	}
+	/*
+	 * A file or a pipe takes the unified text as it is. A terminal shows
+	 * the diff view, or with @unified the unified rows in colour.
+	 */
+	if (!ctx->stdout_tty || !markdown_color_enabled(ctx->cfg->color))
+		rc = fyai_sink_write(ctx->sink, FYAI_SINK_NOTICE, diff,
+				     strlen(diff));
+	else if (unified || !ctx->cfg->markdown)
+		rc = fyai_diff_present(ctx, diff);
+	else
+		rc = fyai_diff_view(ctx, diff);
+out:
+	free(diff);
+	free(b);
+	free(a);
 	return rc;
 }
 

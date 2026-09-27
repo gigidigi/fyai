@@ -70,6 +70,7 @@ void fyai_usage(FILE *fp, const char *progname, const char *color_mode)
 	ITEM("history [opts]", "Alias for transcript");
 	ITEM("display [opts]", "Alias for transcript");
 	ITEM("export [-o file] [ref]", "Export the conversation as Markdown (stdout by default)");
+	ITEM("diff [-u] [from [to]]", "Compare the exports of two ref-log entries");
 	ITEM("import [-i file]", "Import a conversation (stdin by default)");
 	ITEM("resume [branch]", "Resume a session (--last, --all; no argument picks)");
 	ITEM("replay [opts]", "Re-issue the branch's user turns against the current state");
@@ -363,6 +364,38 @@ static int configure_export(int argc, char **argv, struct fyai_cfg *cfg)
 		args->ref = argv[i];
 	}
 	return 0;
+}
+
+static int configure_diff(int argc, char **argv, struct fyai_cfg *cfg)
+{
+	struct fyai_diff_args *args = &cfg->cmd.args.diff;
+	int i, n;
+
+	args->from = "HEAD@{1}";
+	args->to = "HEAD";
+	args->unified = false;
+	for (i = 1, n = 0; i < argc; i++) {
+		if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--unified")) {
+			args->unified = true;
+			continue;
+		}
+		if (argv[i][0] == '-' || n == 2) {
+			fyai_cfg_error(cfg, "diff: use diff [-u] [<from> [<to>]]");
+			return -1;
+		}
+		if (n++ == 0)
+			args->from = argv[i];
+		else
+			args->to = argv[i];
+	}
+	return 0;
+}
+
+static int execute_diff(struct fyai_ctx *ctx)
+{
+	return fyai_export_diff(ctx, ctx->cfg->cmd.args.diff.from,
+				ctx->cfg->cmd.args.diff.to,
+				ctx->cfg->cmd.args.diff.unified);
 }
 
 static int execute_export(struct fyai_ctx *ctx)
@@ -2486,6 +2519,22 @@ static const struct fyai_verb fyai_verbs[FYAI_VERB_COUNT] = {
 			     "Use --branch/-b to export a branch other than the active one.\n"
 			     "A reference exports the branch as it was at that ref-log\n"
 			     "entry: main@{1} is main one entry ago.\n",
+		.flags	   = FYAIVF_BATCH | FYAIVF_NO_REQUESTS |
+			     FYAIVF_NEEDS_TRANSIENT_BUILDER,
+	},
+	[FYAIVID_DIFF] = {
+		.id	   = FYAIVID_DIFF,
+		.name	   = "diff",
+		.configure = configure_diff,
+		.execute   = execute_diff,
+		.synopsis  = "diff [-u] [<from> [<to>]]",
+		.help      = "Show the diff of the exports of two ref-log entries:\n"
+			     "<branch> or <branch>@{N}. <from> is HEAD@{1} and <to> is\n"
+			     "HEAD when omitted, so a bare diff shows the last change.\n"
+			     "A terminal shows the diff view, or with -u/--unified the\n"
+			     "unified diff in colour; a file or a pipe gets the plain\n"
+			     "unified diff. With --root, both\n"
+			     "references are read in that root.\n",
 		.flags	   = FYAIVF_BATCH | FYAIVF_NO_REQUESTS |
 			     FYAIVF_NEEDS_TRANSIENT_BUILDER,
 	},

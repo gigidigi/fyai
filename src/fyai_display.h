@@ -36,6 +36,13 @@ size_t fyai_display_source_rows(const struct fyai_cfg *cfg, const char *md,
 int fyai_display_repaint(struct fyai_ctx *ctx, int rows);
 int fyai_export_view(struct fyai_ctx *ctx, const char *path,
 		     const char *ref);
+/*
+ * Show the diff of the exports of two ref-log entries: the unified text on
+ * output that is not a terminal; on a terminal the diff view, or with
+ * @unified the unified rows in colour.
+ */
+int fyai_export_diff(struct fyai_ctx *ctx, const char *from, const char *to,
+		     bool unified);
 int fyai_import_view(struct fyai_ctx *ctx, const char *path);
 int fyai_replay_view(struct fyai_ctx *ctx, bool ignore_compact);
 int fyai_dump_view(struct fyai_ctx *ctx);

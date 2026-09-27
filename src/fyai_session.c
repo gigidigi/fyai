@@ -2645,6 +2645,39 @@ err:
 	return -1;
 }
 
+/* /diff [from [to]]: the exports of two ref-log entries, compared. */
+static int slash_diff(struct fyai_ctx *ctx, const char *arg)
+{
+	const char *refs[2] = { "HEAD@{1}", "HEAD" };
+	const char *word;
+	bool unified;
+	size_t len, n;
+
+	unified = false;
+	for (n = 0; arg && *arg; ) {
+		while (*arg == ' ' || *arg == '\t')
+			arg++;
+		if (!*arg)
+			break;
+		len = strcspn(arg, " \t");
+		word = fy_gb_intern_string(ctx->cfg->gb,
+				fy_sprintfa("%.*s", (int)len, arg));
+		fyai_error_check(ctx, word, err,
+				 "diff: could not store the reference");
+		arg += len;
+		if (!strcmp(word, "-u") || !strcmp(word, "--unified")) {
+			unified = true;
+			continue;
+		}
+		fyai_error_check(ctx, n < 2 && *word != '-', err,
+				 "usage: /diff [-u] [<from> [<to>]]");
+		refs[n++] = word;
+	}
+	return fyai_export_diff(ctx, refs[0], refs[1], unified);
+err:
+	return -1;
+}
+
 static int slash_reset(struct fyai_ctx *ctx, const char *arg)
 {
 	int rc;
@@ -2858,6 +2891,7 @@ static const struct fyai_slash_cmd fyai_slash_cmds[] = {
 	{ "checkout", "[-b name] <branch|ref>",
 	  "check out a branch or fork a reference", slash_checkout },
 	{ "reset", "<ref>", "move the current branch to a reference", slash_reset },
+	{ "diff", "[-u] [from [to]]", "compare two ref-log entries", slash_diff },
 	{ "rewind", "<ref>", "alias for /reset", slash_reset },
 	{ "resume", "[session|--all]", "resume another session", slash_resume },
 	{ "switch", "[session|--all]", "alias for /resume", slash_resume },

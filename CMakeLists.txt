@@ -472,6 +472,7 @@ set(FYAI_SOURCES
     src/fyai_agents.c
     src/fyai_branch.c
     src/fyai_merge.c
+    src/fyai_diff.c
     src/fyai_diag.c
     src/fyai_log.c
     src/fyai_markdown.c

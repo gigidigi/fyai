@@ -99,6 +99,13 @@ int markdown_fullscreen_ground_sgr(const struct fyai_cfg *cfg,
 /* Create a renderer for @rcfg that takes the palette of @fcfg, if any. */
 struct fymd_renderer *markdown_renderer_new(const struct fyai_cfg *fcfg,
 					    const struct fymd_renderer_cfg *rcfg);
+/*
+ * Render @diff, unified text, as the diff view of libfymd4c into *@outp
+ * (free with fymd_free()). The whole diff is rendered, with a palette whose
+ * ground is the background of the terminal. -1 with a diagnostic.
+ */
+int markdown_diff_render(struct fyai_cfg *cfg, const char *diff, size_t len,
+			 char **outp, size_t *out_lenp);
 /* Free every palette that the theme loads made. */
 void markdown_palettes_destroy(struct fyai_cfg *cfg);
 void markdown_renderer_cfg(struct fyai_cfg *cfg,

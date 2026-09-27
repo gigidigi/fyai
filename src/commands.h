@@ -53,6 +53,7 @@ enum fyai_verb_id {
 	FYAIVID_TOOL,
 	FYAIVID_AGENT,
 	FYAIVID_EXPORT,
+	FYAIVID_DIFF,
 	FYAIVID_IMPORT,
 	FYAIVID_REPLAY,
 	FYAIVID_RESUME,
@@ -283,6 +284,12 @@ struct fyai_checkout_args {
 	bool create;		/* -b: create the branch and switch to it */
 };
 
+struct fyai_diff_args {
+	const char *from;	/* ref-log entry; HEAD@{1} by default */
+	const char *to;		/* ref-log entry; HEAD by default */
+	bool unified;		/* unified rows, coloured on a terminal */
+};
+
 struct fyai_reset_args {
 	const char *ref;	/* symbolic start point, e.g. HEAD~2 */
 };
@@ -379,6 +386,7 @@ union fyai_cmd_args {
 	struct fyai_secret_args secret;
 	struct fyai_mcp_args mcp;
 	struct fyai_export_args export;
+	struct fyai_diff_args diff;
 	struct fyai_import_args import;
 	struct fyai_replay_args replay;
 	struct fyai_resume_args resume;

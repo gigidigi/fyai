@@ -510,15 +510,14 @@ const struct fypal_term *fyai_terminal_probe(struct fyai_cfg *cfg)
 	return &cfg->terminal;
 }
 
-static void markdown_palette_ground(struct fyai_cfg *cfg,
-				    struct fypal_ctx *palette)
+/* Give @palette the background of the terminal as its ground, if known. */
+static void markdown_palette_terminal_ground(struct fyai_cfg *cfg,
+					     struct fypal_ctx *palette)
 {
 	const struct fypal_term *term;
 	uint32_t rgb;
 	bool light;
 
-	if (!cfg->theme_ground || strcmp(cfg->theme_ground, "terminal"))
-		return;
 	term = fyai_terminal_probe(cfg);
 	if (!(term->flags & FYPAL_TERM_BACKGROUND))
 		return;
@@ -533,29 +532,24 @@ static void markdown_palette_ground(struct fyai_cfg *cfg,
 				 fypal_ctx_error(palette));
 }
 
-/* The palette of theme @name for @variant and the colour of the output. */
-static struct fypal_ctx *markdown_palette_create(struct fyai_cfg *cfg,
-						 const char *name,
-						 const char *variant)
+static void markdown_palette_ground(struct fyai_cfg *cfg,
+				    struct fypal_ctx *palette)
 {
-	const char *ground = cfg->theme_ground ? cfg->theme_ground : "theme";
-	struct fymd_renderer_cfg rcfg;
-	struct fymd_renderer *r;
-	struct fypal_ctx **palettes;
+	if (cfg->theme_ground && !strcmp(cfg->theme_ground, "terminal"))
+		markdown_palette_terminal_ground(cfg, palette);
+}
+
+/*
+ * A new palette of theme @name for @variant and the colour of the output,
+ * over the ground of the theme. NULL with a diagnostic.
+ */
+static struct fypal_ctx *markdown_palette_load(struct fyai_cfg *cfg,
+					       const char *name,
+					       const char *variant, bool color)
+{
 	struct fypal_ctx *palette;
 	struct fypal_caps caps;
-	bool color;
 	int rc;
-
-	/* A reload that changes neither the theme, the variant, the colour nor
-	 * the ground keeps the palette the renderers already hold. */
-	color = markdown_color_enabled(cfg->color);
-	if (cfg->npalettes && cfg->palette_theme && cfg->palette_variant &&
-	    cfg->palette_ground && !strcmp(cfg->palette_theme, name) &&
-	    !strcmp(cfg->palette_variant, variant) &&
-	    !strcmp(cfg->palette_ground, ground) &&
-	    cfg->palette_color == color)
-		return cfg->palettes[cfg->npalettes - 1];
 
 	fypal_caps_detect(STDOUT_FILENO, &caps);
 	if (!color) {
@@ -574,9 +568,43 @@ static struct fypal_ctx *markdown_palette_create(struct fyai_cfg *cfg,
 	rc = fypal_ctx_load_builtin(palette, name);
 	fyai_cfg_error_check(cfg, !rc, err_destroy, "theme '%s': %s", name,
 			     fypal_ctx_error(palette));
-	markdown_palette_ground(cfg, palette);
 	if (!strcmp(name, "ember"))
 		fypal_ctx_set_surface_contrast(palette, 1.5);
+	return palette;
+
+err_destroy:
+	fypal_ctx_destroy(palette);
+err_out:
+	return NULL;
+}
+
+/* The palette of theme @name for @variant and the colour of the output. */
+static struct fypal_ctx *markdown_palette_create(struct fyai_cfg *cfg,
+						 const char *name,
+						 const char *variant)
+{
+	const char *ground = cfg->theme_ground ? cfg->theme_ground : "theme";
+	struct fymd_renderer_cfg rcfg;
+	struct fymd_renderer *r;
+	struct fypal_ctx **palettes;
+	struct fypal_ctx *palette;
+	bool color;
+	int rc;
+
+	/* A reload that changes neither the theme, the variant, the colour nor
+	 * the ground keeps the palette the renderers already hold. */
+	color = markdown_color_enabled(cfg->color);
+	if (cfg->npalettes && cfg->palette_theme && cfg->palette_variant &&
+	    cfg->palette_ground && !strcmp(cfg->palette_theme, name) &&
+	    !strcmp(cfg->palette_variant, variant) &&
+	    !strcmp(cfg->palette_ground, ground) &&
+	    cfg->palette_color == color)
+		return cfg->palettes[cfg->npalettes - 1];
+
+	palette = markdown_palette_load(cfg, name, variant, color);
+	if (!palette)
+		goto err_out;
+	markdown_palette_ground(cfg, palette);
 
 	/* A libfymd4c built without libfypalette refuses the palette. */
 	markdown_renderer_cfg(cfg, &rcfg, true, variant, 0);
@@ -2201,4 +2229,64 @@ void fyai_fenced_stream_finish(struct fyai_fenced_stream *fs)
 	free(fs->shown.data);
 	free(fs->body.data);
 	memset(fs, 0, sizeof(*fs));
+}
+
+int markdown_diff_render(struct fyai_cfg *cfg, const char *diff, size_t len,
+			 char **outp, size_t *out_lenp)
+{
+	struct fymd_fenced_block_opts opts;
+	struct fymd_renderer_cfg rcfg;
+	struct fymd_renderer *r = NULL;
+	struct fypal_ctx *palette = NULL;
+	char name[128];
+	const char *variant;
+	bool color;
+	int rc;
+
+	*outp = NULL;
+	*out_lenp = 0;
+	rc = -1;
+	color = markdown_color_enabled(cfg->color);
+	/*
+	 * A renderer of its own: no row limit, and a palette whose ground is
+	 * the background of the terminal, so a wash mixes with what is under
+	 * it and not with the ground of the theme.
+	 */
+	markdown_renderer_cfg(cfg, &rcfg, color, cfg->theme_variant, 0);
+	r = fymd_renderer_create(&rcfg);
+	fyai_cfg_error_check(cfg, r, out, "cannot create the diff renderer");
+	if (color && cfg->palette &&
+	    markdown_theme_split(cfg->theme, name, sizeof(name), &variant) &&
+	    markdown_palette_theme(name)) {
+		palette = markdown_palette_load(cfg, name,
+				cfg->theme_variant ? cfg->theme_variant : variant,
+				color);
+		if (!palette)
+			goto out;
+		markdown_palette_terminal_ground(cfg, palette);
+		/*
+		 * The block stands on the terminal: a bubble paints the ground
+		 * of the theme under every row and over the washes of the
+		 * changed ones. A rule on top names the block instead.
+		 */
+		rc = fypal_ctx_set_param_string(palette, "md.code.rules",
+						FYPAL_SECTION_ALL, "top");
+		fyai_cfg_error_check(cfg, !rc, out, "diff view: %s",
+				     fypal_ctx_error(palette));
+		rc = fymd_renderer_set_palette(r, palette);
+		fyai_cfg_error_check(cfg, !rc, out, "cannot give the diff "
+				     "renderer its palette");
+		rc = -1;
+	}
+	memset(&opts, 0, sizeof(opts));
+	opts.language = "diff";
+	opts.flags = FYMD_FBF_DEFAULT;
+	opts.template_vars = fy_invalid;
+	rc = fymd_render_fenced_block(r, diff, len, &opts, outp, out_lenp);
+	fyai_cfg_error_check(cfg, !rc, out, "cannot render the diff");
+out:
+	/* The renderer borrows the palette: it goes first. */
+	fymd_renderer_destroy(r);
+	fypal_ctx_destroy(palette);
+	return rc;
 }
