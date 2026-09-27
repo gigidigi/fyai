@@ -6,8 +6,8 @@ planning document: it identifies user-visible capability gaps, separates them
 from intentional differences, and assigns an implementation order. It does
 not propose changing the stateless architecture or the security boundary.
 
-Updated 2026-09-20. The repository was inspected at the current working tree;
-no source, configuration, or test files were changed by the review.
+Updated 2026-09-26. The repository was inspected at the current working tree;
+this update changes only this review document.
 
 ## Executive conclusion
 
@@ -20,11 +20,12 @@ under-counted that surface, especially the shell-session and agent-input tools.
 The largest practical gaps are:
 
 1. A first-class plan and task-state tool.
-2. Native, policy-controlled web search and URL retrieval.
+2. URL retrieval and provider-independent web access. Hosted web search is
+   already supported on capable endpoints.
 3. Richer user questions: multiple questions, headers, descriptions,
    multi-select, and cancellation semantics.
-4. Agent lifecycle controls: resume/continue, background execution while the
-   invocation remains alive, output retrieval, and explicit cancellation.
+4. Model-facing agent lifecycle controls: status and output retrieval, and
+   explicit cancellation while the invocation remains alive.
 5. Workspace isolation through temporary worktrees.
 6. Tool discovery and resource access for MCP-compatible environments.
 7. Image inspection/generation and notebook or artifact-specific operations.
@@ -82,8 +83,10 @@ The external baseline is secondary to the vendored catalog. See the official
 
 The shell-session tools are important: the old analysis treated interactive shell
 input as absent, but the current native schema exposes it explicitly. Likewise,
-agent continuation input exists for live agents; what is missing is lifecycle
-control after a tool call or after the owning invocation ends.
+agent input exists for live agents, and calling `agent` again with a completed
+agent's name resumes its stored branch. The interactive `/sessions` and `/kill`
+commands inspect and stop active agents. Model-facing status, output retrieval,
+and cancellation tools are still absent.
 
 ## Detailed comparison
 
@@ -109,7 +112,7 @@ control after a tool call or after the owning invocation ends.
 | --- | --- | --- | --- |
 | P1 | update_plan | No first-class transient plan with status and progress. | Complex work is harder to steer and audit. |
 | P1 | request_user_input | No multi-question request, headers, option descriptions, multi-select, or structured answer. | Decisions become serial and harder to resume safely. |
-| P1 | web_search | No native web-search tool. | Current facts require MCP or provider-specific behavior. |
+| P1 | web_search | Provider-hosted search is supported on capable endpoints, but no provider-independent local search tool exists. | Search availability depends on the selected endpoint. |
 | P1 | tool_search | No runtime discovery/activation mechanism. | Optional integrations must be loaded up front. |
 | P2 | view_image | No native image inspection tool. | Visual debugging cannot be requested uniformly. |
 | P2 | image_generation | No native image generation tool. | The model cannot create bitmap assets through the fyai loop. |
@@ -139,11 +142,11 @@ contradict the repository rules, so this is an intentional difference.
 
 | Priority | Catalog tool or family | Gap | User impact |
 | --- | --- | --- | --- |
-| P1 | WebFetch, WebSearch | No native web retrieval/search pair. | Documentation and current information require MCP or shell workarounds. |
+| P1 | WebFetch, WebSearch | Hosted search is supported on capable endpoints; there is no native URL fetch tool. | Direct page retrieval requires MCP or a shell workaround. |
 | P1 | EnterPlanMode, ExitPlanMode | No native plan-mode state. | Model and UI cannot formally switch between planning and execution. |
 | P1 | TaskCreate, TaskGet, TaskList, TaskUpdate | No structured task list. | Multi-step work lacks shared progress and explicit completion. |
-| P2 | SendMessage | No durable resume-by-agent identity after a completed call. | Follow-up work must be restated or run as a new delegation. |
-| P2 | TaskOutput, TaskStop, Monitor | No background-agent output retrieval, stop, or condition monitoring. | Parallel work cannot be supervised with the same granularity. |
+| P2 | SendMessage | Completed agents can be resumed by name through `agent`; live agents accept `agent_input` when waiting. There is no general model-facing message operation for an active agent. | Follow-up work after completion is supported; live steering remains limited. |
+| P2 | TaskOutput, TaskStop, Monitor | `/sessions` lists and `/kill` stops active agents in the interactive UI, but equivalent model-facing status, output, and stop tools are absent. | The model cannot supervise parallel work with the same granularity. |
 | P2 | Agent background/remote execution | No background/remote agent mode and remote workspace. | Expensive or isolated jobs block the main loop or need an external system. |
 | P2 | EnterWorktree, ExitWorktree | No temporary filesystem worktree isolation. | Parallel agents share the workspace. |
 | P2 | NotebookEdit | No notebook-cell-aware edit primitive. | Notebooks are treated as ordinary files. |
@@ -170,7 +173,7 @@ tools instead of asking the shell to do all searching.
 | read, write, edit | read_file, write_file, apply_patch | Covered or partial by edit semantics. |
 | glob, grep | shell or MCP | Partial; no dedicated bounded search tools. |
 | task | agent | Partial; lifecycle and isolation differ. |
-| webfetch | none | Missing native web retrieval. |
+| webfetch | none | Missing native URL retrieval; hosted search is available on capable endpoints. |
 | todowrite | none | Missing structured task list. |
 | skill | none | Missing native dynamic skill loading. |
 
@@ -202,9 +205,15 @@ A durable cross-invocation goal object should be a separate design.
 
 ### Web retrieval
 
-Web search and URL fetch are common across the comparison set, but differ in
-trust and reproducibility from shell and file tools. Define network policy and
-allowed origins; timeout, response-size, MIME, redirect, and security behavior;
+Fyai already offers provider-hosted web search when `web_search` is enabled
+and the selected endpoint declares support. Responses, Messages, and Chat
+Completions request paths support the hosted capability, and stream results
+are presented as hosted calls. It is not a model-facing built-in in
+`data/tools.yaml`, and availability depends on the endpoint. Direct URL
+retrieval remains absent.
+
+For provider-independent search or URL fetch, define network policy and allowed
+origins; timeout, response-size, MIME, redirect, and security behavior;
 citation-bearing canonical results; provider-stream versus canonical-content
 boundaries; and transcript replay.
 
@@ -222,10 +231,12 @@ event-loop concept.
 ### Agent lifecycle
 
 Fyai already has personas, fork/fresh context, live input, branch provenance,
-concurrency limits, child routing, and cancellation paths. The remaining gap is
-a consistent lifecycle API: admit/start, inspect status, stream or retrieve
-bounded output, send follow-up input, cancel/stop, join/collect, and optionally
-resume from the durable agent branch.
+concurrency limits, child routing, and cancellation paths. A completed named
+agent resumes from its stored branch when `agent` is called again. Interactive
+users can inspect active agents with `/sessions` and stop them with `/kill`.
+The remaining gap is a model-facing lifecycle API to inspect status, retrieve
+bounded intermediate output, and steer or stop an active agent. The `agent`
+call already returns the final result.
 
 Background execution is safe only while the owning invocation lives. A job a
 later process must find requires a new durable-state decision and must not be
@@ -249,9 +260,9 @@ prerequisites.
 | 0 | Keep catalog and native schema mechanically comparable | P0 | The old analysis drifted because the two schemas evolve independently. Add a read-only comparison test/report; catalog data must not become runtime tool definitions. |
 | 1 | Structured plan and task tool | P0 | Shared by Codex, Claude Code, and OpenCode. Invocation-local first; render through sink; no daemon or hidden state. |
 | 2 | Rich ask_user protocol | P0 | Small implementation with immediate UX and correctness gains. One active question, bounded queue, stable IDs, cancellation. |
-| 3 | Native web search and web fetch | P1 | Broadest capability gap. Add explicit network policy, citations, size limits, and replay semantics. |
+| 3 | URL fetch and provider-independent web access | P1 | Hosted search already works on capable endpoints. Add direct retrieval with explicit network policy, citations, size limits, and replay semantics. |
 | 4 | MCP resource listing and reading | P1 | Completes the existing MCP surface and closes three Codex gaps. Keep resources distinct from tool results. |
-| 5 | Agent lifecycle controls | P1 | Turns existing machinery into continue/output/stop equivalents. Invocation-local background first; branch resume needs a state contract. |
+| 5 | Agent lifecycle controls | P1 | Expose status, bounded output, and stop controls to the model. Reuse existing named-branch resume and interactive session controls; keep background work invocation-local. |
 | 6 | Agent worktree isolation | P1 | Safer parallel edits and closer Claude parity. Define cleanup and Landlock behavior first. |
 | 7 | Goal objects and durable task continuation | P2 | Useful for longer work, but crosses from turn-local planning into persistent state. Extend canonical schema deliberately; no sidecars. |
 | 8 | Image inspection and generation | P2 | Valuable for UI/assets, not core text coding. Define binary artifact storage and rendering. |
@@ -305,4 +316,3 @@ Each priority item should ship with:
 
 Regenerate the comparison report from data/catalog.yaml and data/tools.yaml so a
 future catalog update cannot silently make this document stale again.
-
