@@ -78,7 +78,7 @@ jobs:
     - name: "Build & install static libfypalette"
       run: |
         git clone https://github.com/pantoniou/libfypalette /tmp/libfypalette
-        git -C /tmp/libfypalette checkout 2e697319cb8081769f3472c98a0f5371dc266135
+        git -C /tmp/libfypalette checkout 3cc484148aeb10d7c7f3a3772173c42c51dad567
         cmake -S /tmp/libfypalette -B /tmp/libfypalette/build \
           -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
