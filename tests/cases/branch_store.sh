@@ -50,6 +50,16 @@ assert_status 0
 
 run_fyai export -o saved.md
 assert_status 0
+
+# A ref-log entry exports the branch as it was there: before the description.
+run_fyai export -o before.md 'main@{1}'
+assert_status 0
+grep -q 'the store branch' saved.md || fail "the export lost the description"
+grep -q 'the store branch' before.md && \
+	fail "main@{1} exported the entry after it" || true
+run_fyai export 'main~1'
+assert_status 1
+assert_stderr_contains "does not name a ref-log entry"
 grep -qx 'kind: store' saved.md || fail "the store was not exported"
 grep -q 'catalog/models:' saved.md || fail "the catalogue was not exported"
 
