@@ -1721,6 +1721,13 @@ static enum fyai_event_action ui_service(struct fyai_ui *ui)
 		case FYTIM_EVENT_FOCUS_NEXT:
 			/* Ctrl-Tab or Ctrl-T cycles terminal keyboard focus. */
 			(void)fyai_tools_focus_next(ui->ctx);
+			/* What was typed after the key waits for the next
+			 * frame, which reads it for the new owner. */
+			fyai_ui_wake(ui->ctx);
+			break;
+		case FYTIM_EVENT_KEYS_LOST:
+			fyai_warning(ui->ctx, "keys typed after a focus key "
+				     "were lost: too many in one frame");
 			break;
 		case FYTIM_EVENT_ZOOM_ROWS_NEXT:
 			fyai_workpane_cycle_disposition(ui->ctx->workpane);
