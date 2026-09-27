@@ -17,9 +17,11 @@
  * When the arena carries none, a snapshot embedded at build time is used.
  */
 
-/* The effective catalogue: the arena document when valid, else the embedded
- * snapshot parsed into @gb (cached per process). fy_invalid only on parse
- * failure. */
+/*
+ * The effective catalogue: the arena document when valid, else the embedded
+ * snapshot, parsed one time into a builder that lives as long as the process;
+ * @gb is not used. fy_invalid only on parse failure.
+ */
 fy_generic fyai_catalog_effective(fy_generic arena_catalog,
 				  struct fy_generic_builder *gb);
 
@@ -75,7 +77,10 @@ fy_generic fyai_catalog_endpoint(fy_generic provider, enum fyai_api_mode api);
 bool fyai_catalog_endpoint_has_hosted_tool(fy_generic endpoint,
 						const char *tool);
 
-/* The embedded catalogue schema, parsed into @gb one time. */
+/*
+ * The embedded catalogue schema, parsed one time into a builder that lives
+ * as long as the process; @gb is not used.
+ */
 fy_generic fyai_catalog_schema(struct fy_generic_builder *gb);
 
 /*

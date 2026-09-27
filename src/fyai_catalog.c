@@ -39,12 +39,26 @@ static fy_generic embedded_catalog = fy_invalid;
 fy_generic fyai_catalog_effective(fy_generic arena_catalog,
 				  struct fy_generic_builder *gb)
 {
+	struct fy_generic_builder_cfg cfg = {
+		.flags = FYGBCF_SCOPE_LEADER | FYGBCF_DEDUP_ENABLED,
+	};
+	static struct fy_generic_builder *embedded_gb;
 	fy_generic_sized_string embedded;
 
 	if (fy_is_valid(arena_catalog))
 		return arena_catalog;
 	if (fy_is_valid(embedded_catalog))
 		return embedded_catalog;
+	/*
+	 * The parse is cached for the process, so it lives in a builder of its
+	 * own: the builder of the first caller can be released before the
+	 * next call.
+	 */
+	if (!embedded_gb)
+		embedded_gb = fy_generic_builder_create(&cfg);
+	if (!embedded_gb)
+		return fy_invalid;
+	gb = embedded_gb;
 	embedded.data = (const char *)FYAI_EMBEDDED_CATALOG;
 	embedded.size = FYAI_EMBEDDED_CATALOG_LEN;
 	embedded_catalog = fy_parse(gb, embedded,
@@ -209,11 +223,25 @@ static fy_generic embedded_catalog_schema = fy_invalid;
 
 fy_generic fyai_catalog_schema(struct fy_generic_builder *gb)
 {
+	struct fy_generic_builder_cfg cfg = {
+		.flags = FYGBCF_SCOPE_LEADER | FYGBCF_DEDUP_ENABLED,
+	};
+	static struct fy_generic_builder *schema_gb;
 	fy_generic_sized_string embedded;
 	fy_generic schema;
 
+	/*
+	 * The parse is cached for the process, so it lives in a builder of its
+	 * own: the builder of the first caller can be released before the
+	 * next call.
+	 */
 	if (fy_is_valid(embedded_catalog_schema))
 		return embedded_catalog_schema;
+	if (!schema_gb)
+		schema_gb = fy_generic_builder_create(&cfg);
+	if (!schema_gb)
+		return fy_invalid;
+	gb = schema_gb;
 	embedded.data = (const char *)FYAI_EMBEDDED_CATALOG_SCHEMA;
 	embedded.size = FYAI_EMBEDDED_CATALOG_SCHEMA_LEN;
 	schema = fy_parse(gb, embedded,
