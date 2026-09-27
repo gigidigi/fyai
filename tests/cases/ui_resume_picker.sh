@@ -69,7 +69,7 @@ import sys
 
 data = open(sys.argv[1], "rb").read()
 start = data.rfind(b"Hello from the mock provider.")
-help_text = data.find(b"Settings", start)
+help_text = data.find(b"Topics", start)
 if start < 0 or help_text < 0 or b"\x1b[" not in data[start:help_text]:
     raise SystemExit("no styling after branch configuration was adopted")
 EOF

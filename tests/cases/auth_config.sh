@@ -59,7 +59,7 @@ assert_stdout_contains 'chatgpt'
 assert_stdout_not_contains "secret-access"
 assert_stdout_not_contains "secret-refresh"
 
-run_fyai auth openai info --json
+run_fyai auth openai info --output json
 assert_status 0
 assert_stdout_contains '"provider": "openai"'
 assert_stdout_contains '"status": "signed_in"'

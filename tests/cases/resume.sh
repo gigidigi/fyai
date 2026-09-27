@@ -45,7 +45,7 @@ assert_stderr_contains "unexpected argument"
 
 run_fyai resume --last somebranch
 assert_status 1
-assert_stderr_contains "does not take a branch"
+assert_stderr_contains "does not take a session"
 
 run_fyai resume --bogus
 assert_status 1

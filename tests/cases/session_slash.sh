@@ -106,15 +106,15 @@ set -e
 assert_status 0
 
 assert_stdout_contains "start a fresh conversation"
-assert_stdout_contains "live subscription limits and credits"
-assert_stderr_contains "usage: /usage takes no arguments"
+assert_stdout_contains "show the live limits and credits"
+assert_stderr_contains "usage: unexpected argument"
 assert_stdout_contains "logging: wire off, stream on, conversation on"
 assert_stdout_contains "logging: wire on, stream on, conversation on"
 assert_stdout_contains "logging: cleared conversation"
 assert_stdout_contains "7"
 assert_stdout_contains "sandbox: on"
 assert_stdout_contains "Authentication"
-assert_stderr_contains "auth: use [status|login|logout]"
+assert_stderr_contains "auth: provider 'invalid' is not supported yet"
 # A named status is absent where the OS secret backend is available, and
 # unavailable on runners without a usable backend (for example a locked
 # keychain).  Either result is correct here: this command must not affect the
