@@ -303,6 +303,24 @@ if(FYAI_PMCCABE_EXECUTABLE)
         VERBATIM)
 endif()
 
+# Embed a source file as a byte array in a generated header:
+#   fyai_embed(SYMBOL header.inc path/relative/to/source)
+# The header defines SYMBOL[] and SYMBOL_LEN. A change of the file configures
+# again, which writes the header again.
+function(fyai_embed symbol header path)
+    set(_src "${CMAKE_CURRENT_SOURCE_DIR}/${path}")
+    file(READ "${_src}" _hex HEX)
+    string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1," _bytes "${_hex}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${header}"
+        "/* Generated from ${_src}. */\n"
+        "static const unsigned char ${symbol}[] = {\n"
+        "${_bytes}"
+        "\n};\n"
+        "static const size_t ${symbol}_LEN = sizeof(${symbol});\n"
+    )
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_src}")
+endfunction()
+
 # Markdown styling and theming are fully delegated to libfymd4c's embedded theme
 # catalogue (selected by the display/theme config key); fyai ships no
 # styling YAML of its own.
@@ -310,110 +328,30 @@ endif()
 # Embed the vendored provider/model catalogue snapshot (a scrape-providers
 # document) as the out-of-the-box fallback; `fyai catalog import` supersedes
 # it with an arena-resident catalogue.
-set(FYAI_CATALOG_YAML "${CMAKE_CURRENT_SOURCE_DIR}/data/catalog.yaml")
-file(READ "${FYAI_CATALOG_YAML}" _fyai_catalog_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1," _fyai_catalog_bytes
-    "${_fyai_catalog_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_catalog.inc"
-    "/* Generated from ${FYAI_CATALOG_YAML}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_CATALOG[] = {\n"
-    "${_fyai_catalog_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_CATALOG_LEN = sizeof(FYAI_EMBEDDED_CATALOG);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_CATALOG_YAML}")
+fyai_embed(FYAI_EMBEDDED_CATALOG embedded_catalog.inc data/catalog.yaml)
 
 # Embed the catalogue schema that a catalogue edit is checked against.
-set(FYAI_CATALOG_SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/data/catalog.schema.yaml")
-file(READ "${FYAI_CATALOG_SCHEMA}" _fyai_catalog_schema_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-    _fyai_catalog_schema_bytes "${_fyai_catalog_schema_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_catalog_schema.inc"
-    "/* Generated from ${FYAI_CATALOG_SCHEMA}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_CATALOG_SCHEMA[] = {\n"
-    "${_fyai_catalog_schema_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_CATALOG_SCHEMA_LEN = sizeof(FYAI_EMBEDDED_CATALOG_SCHEMA);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_CATALOG_SCHEMA}")
+fyai_embed(FYAI_EMBEDDED_CATALOG_SCHEMA embedded_catalog_schema.inc
+    data/catalog.schema.yaml)
 
 # Embed the sample configuration so `fyai init` with no config file has a
 # sensible starting document instead of committing an empty config.
-set(FYAI_CONFIG_SAMPLE "${CMAKE_CURRENT_SOURCE_DIR}/config.yaml.sample")
-file(READ "${FYAI_CONFIG_SAMPLE}" _fyai_config_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1," _fyai_config_bytes
-    "${_fyai_config_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_config.inc"
-    "/* Generated from ${FYAI_CONFIG_SAMPLE}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_CONFIG[] = {\n"
-    "${_fyai_config_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_CONFIG_LEN = sizeof(FYAI_EMBEDDED_CONFIG);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_CONFIG_SAMPLE}")
+fyai_embed(FYAI_EMBEDDED_CONFIG embedded_config.inc config.yaml.sample)
 
 # Embed the config document JSON Schema (`fyai config validate`).
-set(FYAI_CONFIG_SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/data/config.schema.yaml")
-file(READ "${FYAI_CONFIG_SCHEMA}" _fyai_config_schema_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-    _fyai_config_schema_bytes "${_fyai_config_schema_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_config_schema.inc"
-    "/* Generated from ${FYAI_CONFIG_SCHEMA}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_CONFIG_SCHEMA[] = {\n"
-    "${_fyai_config_schema_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_CONFIG_SCHEMA_LEN = sizeof(FYAI_EMBEDDED_CONFIG_SCHEMA);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_CONFIG_SCHEMA}")
+fyai_embed(FYAI_EMBEDDED_CONFIG_SCHEMA embedded_config_schema.inc
+    data/config.schema.yaml)
 
 # Embed the built-in tool specifications in wire shape.
-set(FYAI_TOOLS_YAML "${CMAKE_CURRENT_SOURCE_DIR}/data/tools.yaml")
-file(READ "${FYAI_TOOLS_YAML}" _fyai_tools_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-    _fyai_tools_bytes "${_fyai_tools_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_tools.inc"
-    "/* Generated from ${FYAI_TOOLS_YAML}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_TOOLS[] = {\n"
-    "${_fyai_tools_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_TOOLS_LEN = sizeof(FYAI_EMBEDDED_TOOLS);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_TOOLS_YAML}")
+fyai_embed(FYAI_EMBEDDED_TOOLS embedded_tools.inc data/tools.yaml)
 
 # Embed the page document that the page renderer transcribes.
-set(FYAI_PAGE_YAML "${CMAKE_CURRENT_SOURCE_DIR}/data/page.yaml")
-file(READ "${FYAI_PAGE_YAML}" _fyai_page_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-    _fyai_page_bytes "${_fyai_page_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_page.inc"
-    "/* Generated from ${FYAI_PAGE_YAML}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_PAGE[] = {\n"
-    "${_fyai_page_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_PAGE_LEN = sizeof(FYAI_EMBEDDED_PAGE);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_PAGE_YAML}")
+fyai_embed(FYAI_EMBEDDED_PAGE embedded_page.inc data/page.yaml)
 
 # Embed the schema that a page document is checked against when it loads.
-set(FYAI_PAGE_SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/data/page.schema.yaml")
-file(READ "${FYAI_PAGE_SCHEMA}" _fyai_page_schema_hex HEX)
-string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-    _fyai_page_schema_bytes "${_fyai_page_schema_hex}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_page_schema.inc"
-    "/* Generated from ${FYAI_PAGE_SCHEMA}. */\n"
-    "static const unsigned char FYAI_EMBEDDED_PAGE_SCHEMA[] = {\n"
-    "${_fyai_page_schema_bytes}"
-    "\n};\n"
-    "static const size_t FYAI_EMBEDDED_PAGE_SCHEMA_LEN = sizeof(FYAI_EMBEDDED_PAGE_SCHEMA);\n"
-)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${FYAI_PAGE_SCHEMA}")
+fyai_embed(FYAI_EMBEDDED_PAGE_SCHEMA embedded_page_schema.inc
+    data/page.schema.yaml)
+
 
 # Generate config.h
 configure_file(
@@ -572,34 +510,12 @@ if(BUILD_TESTING)
     #
     # CMake uses these entries to generate the registry and CTest tests.
     # Embed the recorded page sources that the page tests compare against.
-    set(FYAI_PAGE_GOLDEN "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/page-source-golden.txt")
-    file(READ "${FYAI_PAGE_GOLDEN}" _fyai_page_golden_hex HEX)
-    string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-        _fyai_page_golden_bytes "${_fyai_page_golden_hex}")
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_page_golden.inc"
-        "/* Generated from ${FYAI_PAGE_GOLDEN}. */\n"
-        "static const unsigned char FYAI_EMBEDDED_PAGE_GOLDEN[] = {\n"
-        "${_fyai_page_golden_bytes}"
-        "\n};\n"
-        "static const size_t FYAI_EMBEDDED_PAGE_GOLDEN_LEN = sizeof(FYAI_EMBEDDED_PAGE_GOLDEN);\n"
-    )
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${FYAI_PAGE_GOLDEN}")
+    fyai_embed(FYAI_EMBEDDED_PAGE_GOLDEN embedded_page_golden.inc
+        tests/data/page-source-golden.txt)
 
     # Embed the schema of the state of the page document for its test.
-    set(FYAI_PAGE_STATE_SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/data/page-state.schema.yaml")
-    file(READ "${FYAI_PAGE_STATE_SCHEMA}" _fyai_page_state_hex HEX)
-    string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
-        _fyai_page_state_bytes "${_fyai_page_state_hex}")
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_page_state_schema.inc"
-        "/* Generated from ${FYAI_PAGE_STATE_SCHEMA}. */\n"
-        "static const unsigned char FYAI_EMBEDDED_PAGE_STATE_SCHEMA[] = {\n"
-        "${_fyai_page_state_bytes}"
-        "\n};\n"
-        "static const size_t FYAI_EMBEDDED_PAGE_STATE_SCHEMA_LEN = sizeof(FYAI_EMBEDDED_PAGE_STATE_SCHEMA);\n"
-    )
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${FYAI_PAGE_STATE_SCHEMA}")
+    fyai_embed(FYAI_EMBEDDED_PAGE_STATE_SCHEMA embedded_page_state_schema.inc
+        data/page-state.schema.yaml)
 
     file(GLOB FYAI_TEST_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fyai_*_test.c")
