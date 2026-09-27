@@ -312,6 +312,18 @@ fyai reset main@{1}
 
 A reset does not immediately discard the displaced state. The old branch entry remains available through the reflog until garbage collection removes entries outside the retained window.
 
+Compare two reflog entries:
+
+```sh
+fyai diff
+fyai diff main@{3} main@{1}
+fyai diff before main
+```
+
+`diff` compares the exports of the two entries, so it shows the turns and the changes of the branch store between them. `<from>` is `HEAD@{1}` and `<to>` is `HEAD` when omitted: a bare `diff` shows the last change. A reference is `<branch>` or `<branch>@{N}`; `<branch>~N` names a turn and is refused. `/diff` does the same in a session.
+
+A terminal shows the diff view of the Markdown renderer, with line numbers and the file syntax highlighted. It stands on the background of the terminal: a palette theme washes a changed row with a colour mixed with the background that the terminal reports. With `display/markdown=false` a terminal gets the rows in the colours of the theme. `-u`/`--unified` shows the unified diff instead, in colour as `git diff` does. A file or a pipe always gets the plain unified diff. With `--root`, both references are read in that root, so the diff of a root does not change when the arena does.
+
 ```sh
 fyai branch rename old new
 fyai branch describe new "alternative provider and tool policy"
@@ -994,6 +1006,7 @@ A line beginning with `//` is sent to the model verbatim with one slash removed.
 | `/stats` | Show cumulative token usage for the selected conversation chain |
 | `/usage` | Show live subscription limits and credits |
 | `/catalog ...` | Inspect or edit the catalogue of the branch |
+| `/diff [-u] [from [to]]` | Compare two reflog entries |
 | `/tools [agent] [--brief\|--full]` | List catalogue agent tools |
 | `/help` | List commands and settings |
 | `/exit`, `/quit` | Leave the session |
@@ -1103,6 +1116,7 @@ Global parsing stops at the first non-option. A known token is dispatched as a v
 | `branch ...` | Manage branches; `--all` includes agent branches |
 | `checkout [-b] ...` | Move arena `HEAD` |
 | `reset REF` | Move the selected branch head |
+| `diff [-u] [FROM [TO]]` | Compare the exports of two reflog entries |
 | `root [print\|show]` | Print or explain an exact arena root |
 | `rebase BRANCH` | Reorder branch exchanges with current work last |
 | `merge BRANCH` | Interleave branch exchanges by time |
