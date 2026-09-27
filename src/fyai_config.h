@@ -146,7 +146,8 @@ void fyai_config_report_problems(struct fyai_cfg *cfg, fy_generic report);
 
 /*
  * The vendored config document JSON Schema (data/config.schema.yaml,
- * embedded at build time), parsed once into @gb. Structural/type/enum
+ * embedded at build time), parsed once into a builder that lives as long as
+ * the process; @gb is not used. Structural/type/enum
  * validation only, over and above fyai_config_validate_report's semantic
  * checks - see fyai_schema.h.
  */

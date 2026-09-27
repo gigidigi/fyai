@@ -1742,13 +1742,27 @@ static fy_generic embedded_config_schema = fy_invalid;
 
 fy_generic fyai_config_schema(struct fy_generic_builder *gb)
 {
+	struct fy_generic_builder_cfg cfg = {
+		.flags = FYGBCF_SCOPE_LEADER | FYGBCF_DEDUP_ENABLED,
+	};
+	static struct fy_generic_builder *schema_gb;
 	fy_generic_sized_string embedded;
 
+	/*
+	 * The parse is cached for the process, so it lives in a builder of its
+	 * own: the builder of the first caller can be released before the
+	 * next call.
+	 */
+	(void)gb;
 	if (fy_is_valid(embedded_config_schema))
 		return embedded_config_schema;
+	if (!schema_gb)
+		schema_gb = fy_generic_builder_create(&cfg);
+	if (!schema_gb)
+		return fy_invalid;
 	embedded.data = (const char *)FYAI_EMBEDDED_CONFIG_SCHEMA;
 	embedded.size = FYAI_EMBEDDED_CONFIG_SCHEMA_LEN;
-	embedded_config_schema = fy_parse(gb, embedded,
+	embedded_config_schema = fy_parse(schema_gb, embedded,
 					  FYAI_YAML_PARSE_FLAGS |
 					  FYOPPF_INPUT_TYPE_STRING, NULL);
 	return embedded_config_schema;
@@ -3080,7 +3094,6 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		 * those still run in fyai_run either way.
 		 */
 		cfg->cmd.id = FYAIVID_CONFIG;
-		cfg->cmd.args.config.type = FYAICT_NOOP;
 		ret = 0;
 	} else if (verb) {
 		cfg->cmd.id = fyai_get_verb_id(verb);
