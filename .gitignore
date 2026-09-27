@@ -22,3 +22,5 @@ client_secret_*.apps.googleusercontent.com.json
 
 # Static binary extracted by scripts/build-static-docker.sh
 /fyai
+.swp
+x/
