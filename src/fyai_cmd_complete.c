@@ -882,6 +882,20 @@ void fyai_cmd_session_complete(struct fyai_ctx *ctx, const char *buf,
 	fyai_cmd_split_free(words, n, offs);
 }
 
+size_t fyai_cmd_session_word(const char *buf)
+{
+	char **words;
+	size_t *offs, off;
+	int n;
+
+	if (!buf || buf[0] != '/')
+		return 0;
+	n = fyai_cmd_split(buf + 1, true, &words, &offs);
+	off = n > 0 ? 1 + offs[n - 1] : 0;
+	fyai_cmd_split_free(words, n, offs);
+	return off;
+}
+
 void fyai_cmd_complete_help_topics(const char *partial,
 				   fyai_cmd_candidate_fn add, void *arg)
 {

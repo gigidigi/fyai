@@ -2324,6 +2324,9 @@ int fyai_ui_update_prompt_style(struct fyai_ctx *ctx)
 		for (i = 0; i < sizeof(styles) / sizeof(styles[0]); i++)
 			(void)fytim_set_chrome_style(ui->ft, styles[i].slot, NULL);
 		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_CONTROL, NULL);
+		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP, NULL);
+		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_SELECTED,
+					     NULL);
 		(void)fytim_set_prompt_edge(ui->ft, NULL);
 		return 0;
 	}
@@ -2338,10 +2341,19 @@ int fyai_ui_update_prompt_style(struct fyai_ctx *ctx)
 	res = fytim_set_prompt_style(ui->ft, on);
 	if (res != FYTIM_OK)
 		goto out;
+	/* The selected row of a popup is the card of the theme. */
+	res = fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_SELECTED, on);
+	if (res != FYTIM_OK)
+		goto out;
 	ui_prompt_ground(ctx);
 	ground[0] = '\0';
 	if (ui->fullscreen)
 		markdown_fullscreen_ground_sgr(ctx->cfg, ground, sizeof(ground));
+	/* A popup stands on the ground of the page it covers. */
+	res = fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP,
+				     *ground ? ground : NULL);
+	if (res != FYTIM_OK)
+		goto out;
 	for (i = 0; i < sizeof(styles) / sizeof(styles[0]); i++) {
 		style_rc = fymd_renderer_get_style_pair(renderer, styles[i].element,
 						      &on, &off);

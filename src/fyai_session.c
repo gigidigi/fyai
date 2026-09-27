@@ -1753,17 +1753,35 @@ char *fyai_readline(struct fyai_ctx *ctx, const char *prompt)
 	return line;
 }
 
+struct session_complete {
+	struct fytim_completions *lc;
+	size_t word;
+};
+
+/* The popup shows the word a candidate puts in the line, and its title. */
 static void session_complete_add(void *arg, const char *value,
 				 const char *description)
 {
-	(void)description;
-	(void)fytim_completion_add(arg, value);
+	struct session_complete *sc = arg;
+	const char *word = value + sc->word;
+	size_t len = strlen(word);
+
+	while (len && word[len - 1] == ' ')
+		len--;
+	(void)fytim_completion_add_item(sc->lc, value,
+					fy_sprintfa("%.*s", (int)len, word),
+					description);
 }
 
 void fyai_session_completion(struct fyai_ctx *ctx, const char *buf,
 				     struct fytim_completions *lc)
 {
+	struct session_complete sc;
+
 	if (!ctx || buf[0] != '/')
 		return;
-	fyai_cmd_session_complete(ctx, buf, session_complete_add, lc);
+	sc.lc = lc;
+	sc.word = fyai_cmd_session_word(buf);
+	(void)fytim_completion_set_anchor(lc, sc.word);
+	fyai_cmd_session_complete(ctx, buf, session_complete_add, &sc);
 }

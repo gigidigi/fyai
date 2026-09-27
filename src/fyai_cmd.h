@@ -201,6 +201,12 @@ void fyai_cmd_session_complete(struct fyai_ctx *ctx, const char *buf,
 			       fyai_cmd_candidate_fn add, void *arg);
 
 /*
+ * The byte offset in the session line @buf of the word that
+ * fyai_cmd_session_complete() replaces, or 0 when it completes nothing.
+ */
+size_t fyai_cmd_session_word(const char *buf);
+
+/*
  * Split @line into words with the quoting rules of a shell: blanks separate,
  * single quotes are literal, double quotes and a backslash escape. *@wordsp
  * and *@offsp (the start of each word in @line) are allocated; free them with
