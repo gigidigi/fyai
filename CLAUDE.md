@@ -118,7 +118,13 @@ initialize each generic field explicitly.
 ## Source layout
 
 - `src/main.c`: global option parsing and command dispatch.
-- `src/commands.c`: verb definitions, usage output, and the main runner.
+- `src/commands.h`: what an invocation runs, and the argument structures
+  that backends read.
+- `data/commands.yaml`: the definition of every verb and slash command.
+- `src/fyai_cmd.c`: the command registry, parser, dispatch, and presentation.
+- `src/fyai_cmd_complete.c`, `src/fyai_cmd_help.c`: completion and help from
+  the definitions.
+- `src/fyai_cmd_*.c`: the handlers of the commands, one file for each group.
 - `src/fyai.c`: engine orchestration.
 - `src/fyai_sink.c`: the one rendering component and its backends.
 - `src/fyai_flow.c`: the output separation manager.
@@ -141,6 +147,86 @@ initialize each generic field explicitly.
 - `src/*.h`: shared structures and internal interfaces.
 - `data/`: embedded configuration schemas and catalogue data.
 - `tests/`: unit tests, functional cases, mock providers, and scenarios.
+
+## Commands
+
+A verb (`fyai branch new x`) and a slash command (`/branch new x`) are one
+command. `data/commands.yaml` defines each command one time;
+`doc/command-schema-plan.md` gives the design. Do not add a verb table entry,
+a slash table entry, or a hand-written parser.
+
+- A definition has `arguments`, a JSON Schema whose `x-fyai-*` keywords bind
+  each property to the command line: `x-fyai-positional`, `x-fyai-rest`,
+  `x-fyai-short`, `x-fyai-long`, `x-fyai-repeat`, `x-fyai-meta`,
+  `x-fyai-complete`, `x-fyai-surfaces`, and `x-fyai-hidden`.
+  `data/command.schema.yaml` checks the file when it loads.
+- `surfaces` says where a command exists: `cli`, `session`, or both. A small
+  difference of behavior tests `call->surface` in the handler; a large one is
+  two subcommands with their own surfaces.
+- A group has `commands`, and can have `default` (no word, or an option) and
+  `fallback` (a word that names no subcommand), each for one surface or both.
+  A group can have `arguments` of its own: a word that names no subcommand
+  fills the next positional argument of the group (`auth openai login`,
+  `log wire start`).
+- The session takes a unique prefix of a command or subcommand; the verb
+  takes none.
+- A handler, `int fyai_cmd_NAME(struct fyai_cmd_call *call, fy_generic
+  *result)`, gets validated arguments with the defaults applied: read them
+  with `fyai_cmd_arg_str()` and `fyai_cmd_arg_bool()`. Do not parse or check
+  types in a handler. Register it in `cmd_handlers[]` of `src/fyai_cmd.c`.
+- The caller presents the result. Build it in `call->gb`, and describe it in
+  `render`: `table` (renderopts), `message` (lines with `{key}`; a line that
+  names an unset key, or tests one with `{?key}`, is left out), or `document`
+  (`yaml` or `flow`). A verb takes `--output json|yaml` for every result;
+  `tests/cases/output_formats.sh` checks it. A backend reports failures and
+  returns data; it does not print its outcome. Only work that is itself
+  presentation writes through the sink: the transcript renderer (`history`),
+  the stats table with its own formats (for Markdown only), prose (`catalog
+  tools`, help), live UI (`page`, `btw`, `branches`, pickers, editors), and
+  progress (`compact`, `replay`, `import`, `diff`). A result string is
+  Markdown; with `display/markdown` off it is written as its source.
+- `mode: stream` emits items with `fyai_cmd_emit()`; `mode: async` returns
+  `FYAI_CMD_PENDING`, sets `call->cancel` and `call->cleanup`, and ends with
+  `fyai_cmd_done()`. The verb runs the loop until the call is done; the
+  session queues later input behind it and presents it between turns. ^C and
+  Escape cancel it.
+- A verb that must change the configuration before setup has a hook: `early`
+  runs before the configuration loads (resume selects its branch there),
+  and `prepare` runs after it (term turns the interactive display on).
+  Register hooks in `cmd_earlies[]` and `cmd_prepares[]`. The parsed command
+  is `cfg->cmd.reg`; ask it with `fyai_cmd_state_is()`, and do not copy its
+  properties into separate configuration fields.
+- `flags` replace the verb flags. `model` says that the verb talks to the
+  model: only such a verb sets up the request state and needs a provider
+  credential, so a verb that does not send a model request never asks for
+  a key. `no-storage` opens no arena, `storage-optional` opens the arena
+  only when it exists and never makes one (`__complete`), `transient` gives
+  the handler the transient builder, and `interactive` opens the terminal
+  UI. `while_busy` says whether a slash command runs beside a turn: `run`,
+  `wait` (the default), or `bare` (only with no arguments). `view: true`
+  keeps the result in the scrollback of a session.
+- A session setting is a command with `setting: {key: PATH}`: the
+  configuration schema gives its values and completion, and its
+  `x-fyai-scope` decides whether a change is stored or goes into the session
+  layer (`fyai_config_session_set()`). Mark a new key `x-fyai-scope:
+  session` when a session may change it for itself.
+- `x-fyai-complete` names a completion kind in `complete_kinds[]` of
+  `src/fyai_cmd_complete.c`. A unit test fails when a definition names a kind
+  or a handler that does not exist. `config-value` and `catalog-value`
+  complete from the schema of the item that the previous argument names; a
+  configuration key can name its own kind with `x-fyai-complete` in
+  `data/config.schema.yaml`.
+- Every command and every argument has a description: help, completion, the
+  manual page, and `doc/commands.md` come from them. After a change of the
+  definitions, run `ninja docs-commands`; the case `commands_reference` fails
+  when `doc/commands.md` is out of date.
+- `fyai completion bash|zsh|fish` writes a script that calls
+  `fyai __complete -- WORDS`. Test completion through `fyai_cmd_complete()`
+  in `tests/fyai_cmd_test.c` and through the script in
+  `tests/cases/completion_bash.sh`.
+- A value that the process caches, such as a parsed embedded schema, lives
+  in a builder of its own, never in the builder of the first caller: a handler
+  releases its builder when the call ends.
 
 ## Persistent state and branches
 
