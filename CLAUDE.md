@@ -643,8 +643,8 @@ draws its slots.
   to the stack chrome is a change to the page source too.
 - The chrome is the stack's: a blank row and the header row, the prompt on its
   card (`fytim_prompt_card()`, a slot two rows taller) or between two rules,
-  and two status rows - the focus hint or the completion ribbon, then the
-  status. The band stack reserves the blank row with `fytim_set_header_rows()`
+  and two status rows - the focus hint or the keys of the completion popup,
+  then the status. The band stack reserves the blank row with `fytim_set_header_rows()`
   and the page document states it, so both draw it. The header and the status
   carry the heading and blockquote SGR pairs of the theme, so the page
   renderer takes SGR input (`FYMD_SGR_SAFE`).
@@ -789,6 +789,12 @@ draws its slots.
   them as the library draws a surface: the last rows of a short region, the
   margin at each row, the cells washed by `fytim_cells_wash()`, and the cursor
   reversed. A tile shown as its head draws no screen and keeps its grant.
+- Tab completion opens a popup of libfytimui above the prompt. It is a layer:
+  it covers the rows above the prompt and moves nothing. Each row is the word
+  a candidate puts in the line and its title, from `fyai_session_completion()`,
+  which anchors the popup at the word with `fytim_completion_set_anchor()`.
+  The popup takes the page ground and the card of the theme
+  (`FYTIM_CHROME_POPUP` and `FYTIM_CHROME_POPUP_SELECTED`).
 - A tile of text - a tool exchange, a notice, the queued-input report - is
   drawn on the canvas too, in the slot `text:N`. The page reads the content,
   the top and the bottom chrome and the row cap back from the band with the
