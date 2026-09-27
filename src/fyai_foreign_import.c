@@ -1641,7 +1641,7 @@ int fyai_foreign_import_session(struct fyai_ctx *ctx,
 		return fyai_foreign_import_dry_run(ctx, fy_castp(&path, ""),
 						   source, json);
 	return fyai_foreign_import_view(ctx, fy_castp(&path, ""), source,
-		fy_get(row, "title", ""));
+		fy_get(selected, "title", ""));
 }
 
 int fyai_foreign_import_dry_run(struct fyai_ctx *ctx, const char *path,
