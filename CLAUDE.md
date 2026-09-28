@@ -761,8 +761,19 @@ draws its slots.
   what arrives, and a view scrolled back keeps its top row. A frame repaints
   only the cells that changed, so a PTY case waits on the screen
   (`wait-screen`), not on a line of bytes.
-- The results, notices and diagnostics of a fullscreen session are not
-  stored, so they are not the transcript. `fyai_ui_pane_end()` shows a
+- With `display/command_output: transcript`, a slash command is a part of
+  the transcript: its card is drawn, its output is drawn under the card, and
+  after it runs `fyai_interactive_record_command()` appends a turn with no
+  messages and one `command` display record: the line, which replays as its
+  card, and the rows its output drew. The card names the command, so no
+  heading stands over them. The model never sees the turn. A command that
+  moved the head or changed the branch is recorded by that operation, and a
+  command beside a turn, or in a session that holds no exchange yet, is not
+  stored. A command turn goes with the exchange before it in a merge or a
+  rebase, and `~N` counts it.
+- With `pane`, the default, the transcript keeps nothing of a slash command:
+  no card is drawn and nothing is stored. Its output, and every notice and
+  diagnostic, goes to the pane. `fyai_ui_pane_end()` shows a
   result of two rows or less above the status, until the input changes or
   Escape clears it. A longer one opens a popup that covers the page - the
   transcript, the tiles and the chrome - under a heading that names it. The
