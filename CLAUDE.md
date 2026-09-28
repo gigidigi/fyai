@@ -793,8 +793,14 @@ draws its slots.
   it covers the rows above the prompt and moves nothing. Each row is the word
   a candidate puts in the line and its title, from `fyai_session_completion()`,
   which anchors the popup at the word with `fytim_completion_set_anchor()`.
-  The popup takes the page ground and the card of the theme
-  (`FYTIM_CHROME_POPUP` and `FYTIM_CHROME_POPUP_SELECTED`).
+  The popup takes the page ground (`FYTIM_CHROME_POPUP`). Its other styles
+  come from roles of the theme through `ui_popup_style()`: the frame from
+  `popup.border`, else `chrome.rule`; the selected row from `popup.selected`,
+  else `pane.focus`, else the card; the typed part of a label from
+  `popup.match`, else `prompt`; and the `pane.edge` mark before the selected
+  label. Do not put a colour for them in C. Up and Down select, and Tab and
+  Enter take the selection. `display/completion: auto` opens the popup as
+  the line is typed, with no Tab (`fytim_set_completion_auto()`).
 - A tile of text - a tool exchange, a notice, the queued-input report - is
   drawn on the canvas too, in the slot `text:N`. The page reads the content,
   the top and the bottom chrome and the row cap back from the band with the
