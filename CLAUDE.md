@@ -480,6 +480,10 @@ replay, and the measuring pass that sizes the recap window thus agree.
   card, and `display/section_separator` where reasoning ends.
 - Fence a live band when it opens, not when it commits. A band fenced at
   commit has no blank row above it while it runs.
+- A medium that replaces its rows sets the tail of the flow again. The
+  transcript view does this when the stored exchange replaces the live rows.
+  A separation that goes on another path than its unit lands after it: the
+  live card takes its separation through `fyai_ui_unit()`.
 - Spooled bytes continue the unit being presented. They are not a unit and take
   no separation. A fence there draws blank rows into a live band.
 - Blank lines in an assistant document are Markdown syntax, not presentation.
