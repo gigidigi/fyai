@@ -10,14 +10,15 @@ set -eu
 fyai_test_setup
 mock_start agent_call_timeout.json
 
-# agent/timeout_ms disables the default limit. The turn ends only if the
-# requested limit of 1500 ms is active.
+# agent/timeout_ms disables the default limit. The call supplies the advisory
+# limit, and the hang limit ends this job.
 run_fyai --set display/stream=false --set agent/timeout_ms=0 \
+	 --set agent/hang_timeout_ms=1500 \
 	 --set api=responses --set api_url="$MOCK_URL/v1/responses" \
 	 -m mock-model "delegate a task that does not end"
 assert_status 0
 assert_stdout_contains "The sub-agent was stopped."
-assert_any_request "'timed out after 1500 ms' in json.dumps(r)"
+assert_any_request "'agent hang timeout after 3000 ms' in json.dumps(r)"
 
 mock_stop 3
 pass

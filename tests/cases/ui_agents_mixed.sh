@@ -19,7 +19,7 @@ FYAI_PTY_NEEDLE="Mixed agents done." \
     --set display/markdown=true --set display/stream=false \
     --set tools=true --set api=chat-completions \
     --set retry/max_attempts=1 --set agent/spawn=fork \
-    --set agent/timeout_ms=1500 \
+    --set agent/timeout_ms=1500 --set agent/hang_timeout_ms=1500 \
     --set "api_url=$MOCK_URL/v1/chat/completions" -m mock-model -i
 
 # The stored turn is the record: replay it and read the mark of each agent. The
