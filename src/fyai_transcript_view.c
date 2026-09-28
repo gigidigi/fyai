@@ -22,6 +22,7 @@
 #include "fyai_flow.h"
 #include "fyai_markdown.h"
 #include "fyai_sink.h"
+#include "fyai_terminal.h"
 #include "fyai_transcript_view.h"
 #include "fyai_turn.h"
 
@@ -784,11 +785,33 @@ out:
 	return rc;
 }
 
+/* The blank rows that end the stored rows. A row not rendered ends the count. */
+static unsigned view_tail_blank_rows(const struct fyai_transcript_view *v)
+{
+	const struct view_exchange *x;
+	unsigned rows = 0;
+	size_t i, k;
+
+	for (i = v->nexchanges; i > 0; i--) {
+		x = &v->exchange[i - 1];
+		if (!x->rendered)
+			return rows;
+		for (k = x->rows.count; k > 0; k--) {
+			if (terminal_trim_blank_rows(x->rows.row[k - 1],
+						     strlen(x->rows.row[k - 1])))
+				return rows;
+			rows++;
+		}
+	}
+	return rows;
+}
+
 int fyai_transcript_view_refresh(struct fyai_ctx *ctx,
 				 struct fyai_transcript_view *v, int width,
 				 int height)
 {
 	struct fyai_turn_stack stack;
+	struct fyai_flow *flow;
 	struct view_render r;
 	size_t *starts = NULL;
 	uintptr_t *keys = NULL;
@@ -834,8 +857,19 @@ int fyai_transcript_view_refresh(struct fyai_ctx *ctx,
 	fymd_renderer_destroy(r.measurer);
 	fyai_error_check(ctx, !rc, out,
 			 "cannot keep the rows of the transcript view");
-	if (head_changed)
+	/*
+	 * The stored exchanges replace the live rows. The medium now ends as
+	 * they do, and the separation before the next unit is counted from
+	 * there.
+	 */
+	if (head_changed) {
 		fyai_transcript_view_clear_live(v);
+		flow = fyai_sink_flow(ctx->sink);
+		if (flow) {
+			flow->at_line_start = true;
+			fyai_flow_blank_rows(flow, view_tail_blank_rows(v));
+		}
+	}
 	v->rendered = true;
 	v->head = ctx->last_message;
 out:

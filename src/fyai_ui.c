@@ -2616,6 +2616,14 @@ err_out:
 	return -1;
 }
 
+int fyai_ui_unit(struct fyai_ctx *ctx, enum fyai_flow_unit unit)
+{
+	if (!fyai_ui_active(ctx))
+		return -1;
+	fyai_ui_drain_output(ctx);
+	return ui_flow_fence(ctx, unit);
+}
+
 /* Keep frozen renderer rows in the fullscreen viewport. */
 static int ui_stream_apply(struct fyai_ui *ui,
 			   const struct markdown_update *u)
