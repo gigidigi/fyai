@@ -4,7 +4,8 @@
 # the work pane in a column beside the transcript: under /page review the
 # transcript and the head of a bang tile share the first row, the tile at the
 # right. display/work_panels=on takes the column at a smaller size, with the
-# width of display/work_panel_cols; off keeps the pane in its band.
+# width of display/work_panel_cols; off keeps the pane in its band, as
+# display/page_layout=band does. {layout} of the header names the layout.
 set -eu
 . "$(dirname "$0")/../harness.sh"
 
@@ -26,7 +27,8 @@ side()
     "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/pty.out" \
         "$FYAI_BIN" -k test-key --theme dark \
         --set display/markdown=true --set display/renderer=page \
-        --set display/screen=fullscreen "$@" -m mock-model -i ||
+        --set display/screen=fullscreen \
+        --set "display/prompt_bottom= L={layout}" "$@" -m mock-model -i ||
         driver=$?
     if grep -a -q "needs a libfytimui" "$TEST_DIR/pty.out" \
             "$TEST_DIR/trace.log" 2>/dev/null; then
@@ -62,6 +64,9 @@ while True:
 if rows is None:
     raise SystemExit("no frame named the areas of the page")
 top = rows[0]
+name = "band" if want == "band" else "side"
+if not any(("L=" + name) in r for r in rows):
+    raise SystemExit("the header does not name the %s layout" % name)
 if want == "band":
     # The band: the head of the tile stands under the transcript.
     if any(" head:1" in r for r in rows[:1]):
@@ -82,4 +87,5 @@ PY
 side 180 98
 side 120 60 --set display/work_panels=on --set display/work_panel_cols=60
 side 180 band --set display/work_panels=off
+side 180 band --set display/page_layout=band
 pass

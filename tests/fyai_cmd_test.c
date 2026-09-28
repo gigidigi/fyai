@@ -405,6 +405,9 @@ int cmd_complete_words(void)
 	FYAI_TCHECK(!strcmp(c.buf, "markdown\njson\nyaml\n"));
 	complete(FYAI_CMD_CLI, "completion z", &c);
 	FYAI_TCHECK(!strcmp(c.buf, "zsh\n"));
+	/* A layout is auto or a layout of the page document. */
+	complete(FYAI_CMD_SESSION, "layout ", &c);
+	FYAI_TCHECK(!strcmp(c.buf, "auto\nside\nband\n"));
 	/* Global options come before the verb. */
 	complete(FYAI_CMD_CLI, "--color o", &c);
 	FYAI_TCHECK(!strcmp(c.buf, "off\non\n"));
