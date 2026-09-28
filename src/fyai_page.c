@@ -120,6 +120,27 @@ static int page_append_text(struct response_buffer *out, const char *text,
 	return rc;
 }
 
+/* Whether page_append_text() writes anything of @text: a byte that is not a
+ * blank, outside an SGR sequence. */
+static bool page_text_visible(const char *text)
+{
+	const char *p;
+
+	for (p = text ? text : ""; *p; p++) {
+		if (*p == '\x1b' && p[1] == '[') {
+			p += 2;
+			while (*p && !(*p >= '@' && *p <= '~'))
+				p++;
+			if (!*p)
+				break;
+			continue;
+		}
+		if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+			return true;
+	}
+	return false;
+}
+
 static int page_slot(struct response_buffer *out, const char *id, int rows)
 {
 	char buf[96];
@@ -130,9 +151,6 @@ static int page_slot(struct response_buffer *out, const char *id, int rows)
 		 id, rows);
 	return response_buffer_append(out, buf);
 }
-
-/* A space that Markdown does not remove at the start of a row: a margin. */
-#define PAGE_SPACE "&#32;"
 
 /* The header row and the blank row above it, as the band stack draws them. */
 #define FYAI_PAGE_HEADER_ROWS 2
@@ -219,12 +237,17 @@ void fyai_page_fit(struct fyai_page_state *st, int height)
 		st->transcript_rows = left;
 }
 
-static int page_repeat(struct response_buffer *out, const char *s, int n)
+/* @n blanks that Markdown keeps at the start of a row: a margin. */
+static int page_space(struct response_buffer *out, int n)
 {
-	while (n-- > 0)
-		if (response_buffer_append(out, s))
-			return -1;
-	return 0;
+	char tag[32];
+
+	if (n < 1)
+		return 0;
+	if (n == 1)
+		return response_buffer_append(out, "<fy-space/>");
+	snprintf(tag, sizeof(tag), "<fy-space n=\"%d\"/>", n);
+	return response_buffer_append(out, tag);
 }
 
 static int page_style(struct response_buffer *out, const char *sgr)
@@ -250,9 +273,9 @@ static int page_gutter(struct response_buffer *out, const char *activity,
 		width = (int)fymd_str_width(mark.data, mark.len);
 	if (!rc && width > 0 && width <= cols)
 		rc = response_buffer_append(out, mark.data) ||
-		     page_repeat(out, PAGE_SPACE, cols - width);
+		     page_space(out, cols - width);
 	else if (!rc)
-		rc = page_repeat(out, PAGE_SPACE, cols);
+		rc = page_space(out, cols);
 	free(mark.data);
 	return rc;
 }
@@ -528,6 +551,7 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 {
 	bool prompt = st->prompt_rows > 0, pane = st->pane_rows > 0;
 	bool grid = !fy_str_empty(st->pane_source);
+	bool hint = page_text_visible(st->hint);
 	fy_generic options = fy_seq_empty;
 	size_t i;
 
@@ -580,12 +604,11 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 			"rows", st->prompt_rows,
 			"card_rows", st->prompt_rows + 2),
 		"status", fy_mapping(gb,
-			"shown", (bool)(prompt || st->completion ||
-					!fy_str_empty(st->hint) ||
+			"shown", (bool)(prompt || st->completion || hint ||
 					!fy_str_empty(st->status)),
 			"completion", (bool)st->completion,
-			"hint", (bool)(!st->completion &&
-				       (!fy_str_empty(st->hint) || prompt)),
+			"hint", (bool)(!st->completion && hint),
+			"hint_blank", (bool)(!st->completion && !hint && prompt),
 			"hint_text", page_str(st->hint),
 			"row", (bool)(!fy_str_empty(st->status) || prompt),
 			"text", page_escaped(gb, st->status),
@@ -802,8 +825,8 @@ static int page_doc_kind(fy_generic node, const char *const *kinds, int n)
 	return -1;
 }
 
-enum page_doc_item { PDI_TEXT, PDI_SPACE, PDI_SGR, PDI_GUTTER, PDI_HOLD,
-		     PDI_ROLE, PDI_FILL, PDI_MARKUP, PDI_ACT };
+enum page_doc_item { PDI_TEXT, PDI_SPACE, PDI_SGR, PDI_GUTTER, PDI_ROLE,
+		     PDI_FILL, PDI_MARKUP, PDI_ACT };
 
 /* Whether @s holds only the bytes of an act id. */
 static bool page_id_chars(const char *s)
@@ -874,7 +897,7 @@ static int page_doc_items(struct page_doc_ctx *c, fy_generic items,
 			  bool *row_start)
 {
 	static const char *const kinds[] = {
-		"text", "space", "sgr", "gutter", "hold", "role", "fill",
+		"text", "space", "sgr", "gutter", "role", "fill",
 		"markup", "act",
 	};
 	struct response_buffer text = {0};
@@ -890,7 +913,7 @@ static int page_doc_items(struct page_doc_ctx *c, fy_generic items,
 			break;
 		if (!page_doc_shown(c, item))
 			continue;
-		switch (page_doc_kind(item, kinds, 9)) {
+		switch (page_doc_kind(item, kinds, 8)) {
 		case PDI_TEXT:
 			v = fy_get(item, "text", fy_invalid);
 			text.len = 0;
@@ -900,9 +923,9 @@ static int page_doc_items(struct page_doc_ctx *c, fy_generic items,
 						      row_start);
 			break;
 		case PDI_SPACE:
-			rc = page_repeat(c->out, PAGE_SPACE,
-					 (int)page_doc_int(c, fy_get(item, "space",
-								fy_invalid)));
+			rc = page_space(c->out,
+					(int)page_doc_int(c, fy_get(item, "space",
+							       fy_invalid)));
 			break;
 		case PDI_SGR:
 			v = fy_get(item, "sgr", fy_invalid);
@@ -916,10 +939,6 @@ static int page_doc_items(struct page_doc_ctx *c, fy_generic items,
 			rc = page_gutter(c->out, fy_castp(&bound, ""),
 					 (int)page_doc_int(c, fy_get(sub, "cols",
 								fy_invalid)));
-			break;
-		case PDI_HOLD:
-			if (*row_start)
-				rc = response_buffer_append(c->out, PAGE_SPACE);
 			break;
 		case PDI_ROLE:
 			sub = fy_get(item, "role", fy_invalid);
@@ -955,7 +974,7 @@ static int page_doc_items(struct page_doc_ctx *c, fy_generic items,
 			break;
 		default:
 			rc = page_doc_fail(c, "an item of a row is none of text, "
-					   "space, sgr, gutter, hold, role, fill, "
+					   "space, sgr, gutter, role, fill, "
 					   "markup or act");
 			break;
 		}
@@ -965,7 +984,7 @@ static int page_doc_items(struct page_doc_ctx *c, fy_generic items,
 }
 
 enum page_doc_node { PDN_TIGHT, PDN_SLOT, PDN_SWITCH, PDN_EACH, PDN_DROP,
-		     PDN_PAGE, PDN_MARKUP, PDN_ROW };
+		     PDN_PAGE, PDN_MARKUP, PDN_ROW, PDN_BLANK };
 
 static int page_doc_nodes(struct page_doc_ctx *c, fy_generic nodes);
 
@@ -1036,6 +1055,7 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 {
 	static const char *const kinds[] = {
 		"tight", "slot", "switch", "each", "drop", "page", "markup", "row",
+		"blank",
 	};
 	fy_generic v, sub, bound, item, saved_item, cases, key;
 	bool row_start, saved_in_each;
@@ -1046,7 +1066,7 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 
 	if (!page_doc_shown(c, node))
 		return 0;
-	switch (page_doc_kind(node, kinds, 8)) {
+	switch (page_doc_kind(node, kinds, 9)) {
 	case PDN_TIGHT:
 		return response_buffer_append(c->out, "<fy-tight>\n\n");
 	case PDN_SLOT:
@@ -1137,9 +1157,11 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 		return page_doc_items(c, fy_get(node, "row", fy_invalid),
 				      &row_start) ||
 		       response_buffer_append(c->out, "\n\n");
+	case PDN_BLANK:
+		return response_buffer_append(c->out, "<fy-space/>\n\n");
 	default:
 		return page_doc_fail(c, "a node is none of tight, slot, switch, "
-				     "each, drop, page, markup or row");
+				     "each, drop, page, markup, row or blank");
 	}
 }
 

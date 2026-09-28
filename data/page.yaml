@@ -9,6 +9,7 @@
 #   tight: true        blocks on adjacent rows from here on
 #   slot: {id, rows}   rows that a component draws; no rows, no slot
 #   row: [items]       one row of inline items
+#   blank: true        one blank row
 #   drop: N, body      blocks that go, in order, when the page is too tall
 #   page: NAME         the nodes of a page of `pages`
 #   markup: NAME       UI Markdown that fyai wrote, from the state
@@ -22,7 +23,6 @@
 #   space: N           N blanks that the start of a row keeps
 #   sgr: NAME          an SGR sequence of the theme, from the state
 #   gutter: {mark, cols}  the mark of the state padded to the columns
-#   hold: true         one blank when the row holds no text yet
 #   role: {name, items}   items in a role of the palette
 #   fill: {char}       the columns the row leaves, drawn with the glyph
 #   markup: NAME       UI Markdown that fyai wrote, from the state
@@ -76,8 +76,7 @@ pages:
     - if: header.shown
       drop: 2
       body:
-        - row:
-            - space: 1
+        - blank: true
         # The canvas draws the header row, cut at the edge as the band stack
         # cuts it. A row of Markdown wraps a long header onto a second row.
         - slot: { id: header, rows: 1 }
@@ -98,8 +97,10 @@ pages:
           row:
             - sgr: status.on
             - text: "{status.hint_text}"
-            - hold: true
             - sgr: status.off
+        # The row of the hint stands when it says nothing.
+        - if: status.hint_blank
+          blank: true
         - if: status.row
           row:
             - gutter: { mark: status.activity, cols: "{status.gutter}" }
@@ -193,8 +194,7 @@ pages:
 
   # The work pane: its cap row goes first when the page is too tall.
   pane:
-    - row:
-        - space: 1
+    - blank: true
     - if: pane.cap
       drop: 0
       body:

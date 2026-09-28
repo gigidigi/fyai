@@ -112,11 +112,12 @@ properties:
   status:
     type: object
     additionalProperties: false
-    required: [shown, completion, hint, hint_text, row, text, activity, gutter, "on", "off"]
+    required: [shown, completion, hint, hint_blank, hint_text, row, text, activity, gutter, "on", "off"]
     properties:
       shown: { description: The status rows are shown., type: boolean }
       completion: { description: The completion ribbon is shown., type: boolean }
-      hint: { description: The hint row is shown., type: boolean }
+      hint: { description: The hint row is shown with its text., type: boolean }
+      hint_blank: { description: The hint row is shown with no text., type: boolean }
       hint_text: { description: Text of the hint., type: string }
       row: { description: The status row is shown., type: boolean }
       text: { description: UI Markdown of the status that fyai wrote, with its values escaped and coloured., type: string }
