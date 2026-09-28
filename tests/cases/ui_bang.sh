@@ -1,13 +1,14 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# Verify that a completed bang shell retires after committing its output.
+# A completed bang shell keeps its tile in the work pane and commits nothing:
+# its output never reaches the scrollback.
 set -eu
 . "$(dirname "$0")/../harness.sh"
 
 fyai_test_setup
 
-# The shell exits at once, and the keys are the prompt's again when the tile
-# it opened has retired. The tile can take and give back the keys between two
+# The shell exits at once, and the keys are the prompt's again when its
+# program has ended. The tile can take and give back the keys between two
 # reads of the screen, so no wait says where they are: Ctrl-] gives them to the
 # prompt if the tile still holds them, and the command follows it. The shell
 # writes BANG-OUTPUT in two parts, so only its output holds the word and not the
@@ -21,7 +22,7 @@ FYAI_PTY_SNAPSHOT="$TEST_DIR/snapshot.out" \
     --set display/markdown=true -m mock-model -i
 
 "$PYTHON" - "$TEST_DIR/snapshot.out" "$TESTS_DIR" <<'PYEOF' || \
-    fail "completed bang shell remained in the work pane"
+    fail "a completed bang shell committed its output"
 import sys
 
 sys.path.insert(0, sys.argv[2])
@@ -31,19 +32,17 @@ s = Screen(30, 100)
 s.feed(open(sys.argv[1], "rb").read())
 seen = s.lines()
 
-# Require one committed shell block; exclude the separate input card.
+# The tile stays, once, with the title row of the call; no card of the line.
 heads = [line for line in seen if line.strip().startswith("● shell [bang-")]
 if len(heads) != 1:
     raise SystemExit("bang shell drew %d headings: %r" % (len(heads), heads))
-commands = [line for line in seen if "⎿  sh -c" in line]
-if len(commands) != 1:
-    raise SystemExit("bang shell drew %d command rows: %r" %
-                     (len(commands), commands))
-outputs = [line for line in seen if "BANG-OUTPUT" in line and
-           "sh -c" not in line and "!sh -c" not in line]
-if len(outputs) != 1:
-    raise SystemExit("bang shell drew %d output rows: %r" %
-                     (len(outputs), outputs))
+cards = [line for line in seen if "!sh -c" in line]
+if cards:
+    raise SystemExit("the bang line was drawn as a card: %r" % cards)
+# What scrolled into the scrollback is committed: no output row is.
+committed = [line for line in s.scrollback if "BANG-OUTPUT" in line]
+if committed:
+    raise SystemExit("bang shell committed its output: %r" % committed)
 PYEOF
 
 pass
