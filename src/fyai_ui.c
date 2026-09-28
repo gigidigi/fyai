@@ -1519,15 +1519,20 @@ static void ui_page_update(struct fyai_ui *ui)
 		snprintf(ui->layout, sizeof(ui->layout), "%s", layout.name);
 		fyai_session_banner_update(ctx);
 	}
-	st.header = ui->status_top_source;
-	st.header_row = ui->status_top;
+	/* A delegated sub-agent draws no header: the head of its tile in the
+	 * parent names it already. */
+	if (!fyai_agent_delegated(ctx)) {
+		st.header = ui->status_top_source;
+		st.header_row = ui->status_top;
+	}
 	st.header_right = ui->panel;
 	st.header_right_cols = ui->panel_cols;
 	st.header_act = ui->panel ? &ui->panel_act : NULL;
 	if (ui->busy) {
 		fyai_event_elapsed_format(elapsed, sizeof(elapsed),
 					  ui->busy_since_ms);
-		st.elapsed = elapsed;
+		if (!fyai_agent_delegated(ctx))
+			st.elapsed = elapsed;
 		activity = ui_indicator(ui, FYMD_INDICATOR_PENDING,
 					(size_t)ui->activity_phase, NULL);
 		st.activity = activity;

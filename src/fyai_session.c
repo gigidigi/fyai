@@ -54,6 +54,7 @@
 #include "fyai_provider.h"
 #include "fyai_branch.h"
 #include "fyai_browser.h"
+#include "fyai_agent.h"
 #include "fyai_agents.h"
 #include "fyai_session.h"
 #include "fyai_cmd.h"
@@ -1236,6 +1237,10 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	long long window;
 
 	if (!cfg->interactive || !cfg->markdown || !ctx->stdout_tty)
+		return;
+	/* A delegated sub-agent has no header: the head of its tile in the
+	 * parent names it. */
+	if (fyai_agent_delegated(ctx))
 		return;
 	cwd = getcwd(NULL, 0);
 	/*
