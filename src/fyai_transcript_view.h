@@ -74,6 +74,20 @@ int fyai_transcript_view_append_live(struct fyai_transcript_view *v,
 /* Drop the live rows, as when the turn they belong to is stored. */
 void fyai_transcript_view_clear_live(struct fyai_transcript_view *v);
 
+/*
+ * Drop the live rows after an update that stored their turn, and render what
+ * a region of @height rows then shows. The update chose what to render with
+ * the live rows at the end of the view; without them the view shows the new
+ * exchange, which was only measured. The arguments are those of
+ * fyai_transcript_view_update(). Returns 0, or -1 as it does.
+ */
+int fyai_transcript_view_replace_live(struct fyai_transcript_view *v,
+				      int width, int height,
+				      const uintptr_t *keys, size_t count,
+				      fyai_transcript_view_render_fn render,
+				      fyai_transcript_view_measure_fn measure,
+				      void *user);
+
 /* Replace the rendered rows of the in-flight tail. The view owns a copy. */
 int fyai_transcript_view_set_tail(struct fyai_transcript_view *v,
 				  const char *text, size_t len);

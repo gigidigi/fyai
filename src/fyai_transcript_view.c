@@ -577,6 +577,22 @@ fail:
 	return -1;
 }
 
+int fyai_transcript_view_replace_live(struct fyai_transcript_view *v,
+				      int width, int height,
+				      const uintptr_t *keys, size_t count,
+				      fyai_transcript_view_render_fn render,
+				      fyai_transcript_view_measure_fn measure,
+				      void *user)
+{
+	if (!v)
+		return -1;
+	fyai_transcript_view_clear_live(v);
+	if (!fyai_transcript_view_needs_render(v, height))
+		return 0;
+	return fyai_transcript_view_update(v, width, height, keys, count,
+					   render, measure, user);
+}
+
 int fyai_transcript_view_append_live(struct fyai_transcript_view *v,
 				     const char *text, size_t len)
 {
@@ -863,7 +879,16 @@ int fyai_transcript_view_refresh(struct fyai_ctx *ctx,
 	 * there.
 	 */
 	if (head_changed) {
-		fyai_transcript_view_clear_live(v);
+		r.measurer = NULL;
+		r.measurer_width = 0;
+		rc = fyai_transcript_view_replace_live(v, width, height, keys,
+						       exchanges,
+						       view_render_exchange,
+						       view_measure_exchange,
+						       &r);
+		fymd_renderer_destroy(r.measurer);
+		fyai_error_check(ctx, !rc, out,
+				 "cannot keep the rows of the transcript view");
 		flow = fyai_sink_flow(ctx->sink);
 		if (flow) {
 			flow->at_line_start = true;
