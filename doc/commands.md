@@ -1891,6 +1891,48 @@ offered; `--all` offers every one.
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
+## fyai page
+
+show and review the page of the screen
+
+**Usage:** `fyai page {review} ...`
+
+Show the page that draws the screen, or paint and name its areas to
+see which part of the page document draws which rows.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `review` | draw a sample page with its areas painted and named |
+
+## fyai page review
+
+draw a sample page with its areas painted and named
+
+**Usage:** `fyai page review [--width N] [--height N] [SAMPLE]`
+
+Render the page document with the state SAMPLE, give each area a
+colour and its name, and list the areas. The slots are empty: a
+sample has no transcript, tiles, or prompt to draw in them.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `SAMPLE` | the state of the page (prompt, inline, question, popup); default prompt |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--width N` | the columns of the page; default 80 |
+| `--height N` | the rows of the page; default 24 |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
 ## fyai agent
 
 run one sub-agent on a task
@@ -3507,11 +3549,53 @@ shows every tile again.
 
 ## /page
 
+show and review the page of the screen
+
+**Usage:** `/page {show|review} ...`
+
+Show the page that draws the screen, or paint and name its areas to
+see which part of the page document draws which rows.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `show` | show the page of the screen and its state |
+| `review` | paint and name the areas of the screen |
+
+With no command, `show` runs.
+
+## /page show
+
 show the page of the screen and its state
 
-**Usage:** `/page`
+**Usage:** `/page show`
 
 Show the page document in use, and the state, source, and regions of the last frame.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /page review
+
+paint and name the areas of the screen
+
+**Usage:** `/page review [ON|OFF]`
+
+Give each area of the live page a colour and write its name at its
+top left: each slot, and each row by the flag that shows it or the
+page it comes from. Without ON or OFF the review is turned over.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `ON|OFF` | turn the review on or off (on, off) |
 
 ### Options
 

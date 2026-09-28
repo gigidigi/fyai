@@ -742,6 +742,14 @@ draws its slots.
 - `/page` is a view: it commits the document in use, why a file is not used,
   and the state, source and regions of the last frame to the scrollback. The
   state of a frame lives in the builder of that frame until the next one.
+- A review names the areas of the page. The transcriber starts each row with
+  `<fy-mark id="review:AREA"/>`, which takes no column: AREA is the flag
+  that shows the row, else its page, with the list of an `each` before it
+  and `/blank` after a blank row. `fyai_page_review_paint()` gives each
+  mark and each slot the next colour of the palette series and its name,
+  at the right edge of a row and the top left of a slot. `/page review`
+  paints the live page; `fyai page review SAMPLE` draws a sample state
+  and lists the areas. A mark is not a region of the terminal library.
 - `display/screen: fullscreen`, the default, puts the page on the alternate
   screen when the session starts (`FYTIM_SCREEN_ALT`). There is no scrollback
   there, so the transcript is a view of the page, `src/fyai_transcript_view.c`, drawn into
