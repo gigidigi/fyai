@@ -116,9 +116,9 @@ this directory, so a setting changed in one session applies to the next. With
 no such branch, it takes the configuration of the branch `HEAD` names.
 
 The name is invocation state until the first exchange, so a session that asks
-nothing stores nothing. A slash setting or `/clear` alone is not an exchange:
-the session applies it, and stores it only with an exchange. Starting a session
-does not move arena `HEAD`.
+nothing stores nothing unless `/reload` publishes it. A slash setting or
+`/clear` alone is not an exchange: the session applies it, and stores it only
+with an exchange or `/reload`. Starting a session does not move arena `HEAD`.
 
 > **This changed.** Earlier releases continued the conversation on stored
 > `HEAD`. A script that invokes `fyai -i` and expects the previous
@@ -1009,7 +1009,14 @@ A line beginning with `//` is sent to the model verbatim with one slash removed.
 | `/diff [-u] [from [to]]` | Compare two reflog entries |
 | `/tools [agent] [--brief\|--full]` | List catalogue agent tools |
 | `/help` | List commands and settings |
+| `/reload` | Commit the active branch and restart this binary on that branch |
 | `/exit`, `/quit` | Leave the session |
+
+`/reload` waits for the current turn to finish. It preserves the branch,
+configuration, session display settings, and explicit API key across the
+restart. Close live shells and sub-agents first. It is unavailable for a
+transient session or a pinned root. A fresh session with no exchange is
+published before restart.
 
 History selectors include:
 

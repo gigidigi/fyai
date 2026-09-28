@@ -3618,6 +3618,20 @@ Leave the session.
 | --- | --- |
 | `-h`, `--help` | show this help |
 
+## /reload
+
+restart the current session
+
+**Usage:** `/reload`
+
+Commit the current branch and restart fyai on it. Live shells and sub-agents must finish or close first. A transient session and a pinned root cannot be reloaded.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
 ## /reasoning-effort
 
 the reasoning effort of the model
