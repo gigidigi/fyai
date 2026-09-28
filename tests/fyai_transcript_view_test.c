@@ -23,6 +23,7 @@ FYAI_TEST_ENTRY(transcript_view, copy_reads_the_selected_cells, transcript_view_
 FYAI_TEST_ENTRY(transcript_view, update_renders_what_changed, transcript_view_update_renders_what_changed)
 FYAI_TEST_ENTRY(transcript_view, update_keeps_the_row_at_the_top, transcript_view_update_keeps_the_row_at_the_top)
 FYAI_TEST_ENTRY(transcript_view, update_renders_what_shows, transcript_view_update_renders_what_shows)
+FYAI_TEST_ENTRY(transcript_view, stored_turn_replaces_live_rows, transcript_view_stored_turn_replaces_live_rows)
 
 /* Whether the @count rows of @w are @want, one row for each string. */
 static bool rows_are(const char *const *w, int count, const char *const *want,
@@ -373,6 +374,36 @@ int transcript_view_update_renders_what_shows(void)
 	FYAI_TCHECK(f.calls <= 3 + 3);
 	w = fyai_transcript_view_window(v, 4, &n);
 	FYAI_TCHECK(n == 4 && !strcmp(w[0], "x7.4@30"));
+	fyai_transcript_view_destroy(v);
+	return 0;
+}
+
+/* A stored turn replaces its live rows: the update that stores it still has
+ * them at the end of the view, and only measures the new exchange, which is
+ * what the view shows once they are gone. It is rendered, not blank. */
+int transcript_view_stored_turn_replaces_live_rows(void)
+{
+	static const uintptr_t keys[] = { 1, 2 };
+	struct fyai_transcript_view *v = fyai_transcript_view_create();
+	struct fake_render f = { .keys = keys, .rows = 5, .fail_at = -1 };
+	const char *const *w;
+	int n;
+
+	FYAI_TCHECK(v != NULL);
+	FYAI_TCHECK(!fyai_transcript_view_update(v, 40, 4, keys, 1,
+						 fake_render, fake_measure, &f));
+	FYAI_TCHECK(!fyai_transcript_view_append_live(v, "a\nb\nc\nd\n", 8));
+	FYAI_TCHECK(!fyai_transcript_view_update(v, 40, 4, keys, 2,
+						 fake_render, fake_measure, &f));
+	/* The live rows fill the region: the second exchange is measured. */
+	FYAI_TCHECK(f.calls == 1);
+	FYAI_TCHECK(!fyai_transcript_view_replace_live(v, 40, 4, keys, 2,
+						       fake_render, fake_measure,
+						       &f));
+	FYAI_TCHECK(f.calls == 2);
+	FYAI_TCHECK(!fyai_transcript_view_needs_render(v, 4));
+	w = fyai_transcript_view_window(v, 4, &n);
+	FYAI_TCHECK(n == 4 && !strcmp(w[0], "x2.1@40") && !strcmp(w[3], "x2.4@40"));
 	fyai_transcript_view_destroy(v);
 	return 0;
 }
