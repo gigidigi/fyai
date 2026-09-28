@@ -225,7 +225,7 @@ endif()
 # libfymermaid consume it.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FyDeps.cmake)
 fyai_fy_dep(libfypalette 3cc484148aeb10d7c7f3a3772173c42c51dad567)
-fyai_fy_dep(libfymd4c fdcf6458d590c6fb6fed1d245f6fdb2923be4f9d)
+fyai_fy_dep(libfymd4c f373ff2d049a3b6c096ae4ec6f4d10f794dbf2dd)
 
 if(FYAI_STATIC_DEPS AND TARGET libfyaml::fyaml_static)
     set_target_properties(libfyaml::fyaml_static PROPERTIES
@@ -233,7 +233,7 @@ if(FYAI_STATIC_DEPS AND TARGET libfyaml::fyaml_static)
 endif()
 
 fyai_fy_dep(libfymermaid b3b72b5ee5caceea5ff890fa57e1689537b2f5c0)
-fyai_fy_dep(libfytimui c9f64e0ab090c4d673308c209c618199eec33035)
+fyai_fy_dep(libfytimui 67b5f3d8f268cb26ccb67077941818cf18834f1c)
 # libfyvterm: the terminal emulator behind the terminal view and the terminal
 # rendering tests.
 fyai_fy_dep(libfyvterm 9d1b261e82c67af71bbb8dbf52011a25a58eabf8)
