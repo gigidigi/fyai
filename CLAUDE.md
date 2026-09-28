@@ -1202,9 +1202,11 @@ command.
 - A bang command is not a part of the conversation. Its line is not drawn as
   a card, and its session records nothing and commits nothing: not
   its screen, not its output, whether or not a turn runs beside it. When the
-  program ends, its tile stays with the outcome and gives the keys to the
-  prompt, until the user dismisses it with Escape or `q` in the tile, its
-  close button, or `/kill`. A full-screen program - one that entered the
+  program ends, its tile stays with the outcome, its buttons and the keys it
+  held, and the status row says that Escape closes it, until the user
+  dismisses it with Escape or `q` in the tile, its close button, or `/kill`.
+  The close button of a running bang tile ends its program and the tile with
+  it; `/kill` ends the program and leaves the tile to read. A full-screen program - one that entered the
   alternate screen - leaves nothing to read, and its tile goes at once.
 - A program that prints once and ends, such as `ls`, reads the size of its
   terminal when it starts; `ls` takes the terminal size over `COLUMNS`. The
