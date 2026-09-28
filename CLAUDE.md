@@ -759,7 +759,12 @@ draws its slots.
   each tile a panel of `tile_rows`: the pane takes no rows of the page, and
   `fyai_page_side_place()` and `fyai_page_grid_lead()` write one fy-grid of
   the transcript and the tiles, because grids do not nest. A side column
-  needs the fullscreen page. While it stands, the UI sets
+  needs the fullscreen page. `display/work_panels` says when a side
+  layout is taken: `auto` at the size of the document, `on` at any size
+  where its column leaves the transcript room, `off` never.
+  `display/work_panel_cols` and `display/work_panel_rows` replace the
+  `cols` and `tile_rows` of the document when they are not 0. While it
+  stands, the UI sets
   `cfg->render_width` to the column the transcript has, and only it puts it
   back.
 - `display/screen: fullscreen`, the default, puts the page on the alternate
