@@ -1099,10 +1099,11 @@ register, focus, zoom, resize - and sizes nothing itself.
   while the program writes, and what the user types shows the live screen
   again. A program on the alternate screen has no history.
 - What the user acts on in the chrome of a tile - the arrows and the thumb of
-  the bar - is not dim. It takes the
-  `tile.sigil.work` role of a palette theme, else the strong style of the
-  theme, through `FYTIM_CHROME_CONTROL` under the band stack and
-  `control_chrome` on the page. The track stays dim chrome.
+  the bar, and the panel button of the header - has the colour of the
+  buttons of the head, the text colour. It takes the `text` role of a
+  palette theme, else the strong style of the theme, through
+  `FYTIM_CHROME_CONTROL` under the band stack and `control_chrome` on the
+  page. The track stays dim chrome.
 - The head of a tile ends in three buttons when the mouse is grabbed:
   `tile:minimize`, `tile:maximize` and `tile:close`. They are acts of the
   head source that `ui_tile_buttons()` writes, so both renderers draw and
