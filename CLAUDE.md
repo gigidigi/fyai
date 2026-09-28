@@ -870,6 +870,9 @@ draws its slots.
   page is one component: `ui_act()` finds the tile by its slot.
 - A head the page draws is rendered at the granted columns of the tile, as
   the band stack renders it, so a long row is cut in the same place.
+- The title row of a tile is one row: a title that does not fit beside the
+  buttons and the right-hand text loses its end to an ellipsis, or it would
+  wrap and take the buttons to a row of their own.
 - `tests/cases/ui_page_tiles.sh` compares two tiles side by side under both
   renderers.
 - Under the page renderer the head of a shell or agent tile is a tile page
