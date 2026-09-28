@@ -1911,11 +1911,13 @@ see which part of the page document draws which rows.
 
 draw a sample page with its areas painted and named
 
-**Usage:** `fyai page review [--width N] [--height N] [SAMPLE]`
+**Usage:** `fyai page review [--width N] [--height N] [--page FILE] [SAMPLE]`
 
 Render the page document with the state SAMPLE, give each area a
 colour and its name, and list the areas. The slots are empty: a
-sample has no transcript, tiles, or prompt to draw in them.
+sample has no transcript, tiles, or prompt to draw in them. The
+document is the embedded one, or the file of --page, which must
+load as display/page does.
 
 
 ### Arguments
@@ -1930,6 +1932,7 @@ sample has no transcript, tiles, or prompt to draw in them.
 | --- | --- |
 | `--width N` | the columns of the page; default 80 |
 | `--height N` | the rows of the page; default 24 |
+| `--page FILE` | the page document to review, in place of the embedded one |
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
