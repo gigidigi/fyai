@@ -646,6 +646,14 @@ properties:
           the prompt, next to the transcript the work came from. below-prompt
           takes the rows under the prompt instead, so the user types over the
           work and a pane that grows moves nothing that is being read.
+      completion:
+        type: string
+        enum: [tab, auto]
+        default: tab
+        description: >-
+          When the completion popup opens. tab opens it on Tab. auto opens it
+          as the line is typed, when the line has candidates, such as after
+          a slash; a candidate is then never taken without a key.
       editor:
         type: string
         enum: [pane, terminal]

@@ -136,6 +136,8 @@ static void ui_tile_act(struct fyai_ui *ui, struct fytim_surface *sf,
 			const char *id);
 static const char *ui_control_sgr(struct fyai_ui *ui);
 static const char *ui_edge(struct fyai_ui *ui, char *buf, size_t size);
+static void ui_popup_style(struct fyai_ui *ui);
+static void ui_completion_configure(struct fyai_ctx *ctx);
 
 /* Bands are tiles in the shared work pane. */
 static struct fytim_workband *ui_band_open(struct fyai_ui *ui,
@@ -1985,6 +1987,7 @@ int fyai_ui_open(struct fyai_ctx *ctx)
 			       *ctx->cfg->prompt_marker ? ctx->cfg->prompt_marker : "❯ ");
 	(void)fytim_history_set_max_len(ui->ft, 1000);
 	(void)fytim_set_complete_fn(ui->ft, ui_complete_cb, ctx);
+	ui_completion_configure(ctx);
 	ui_rearm(ui);
 	return 0;
 fail:
@@ -2020,6 +2023,7 @@ void fyai_ui_config_changed(struct fyai_ctx *ctx)
 			       *ctx->cfg->prompt_marker ?
 			       ctx->cfg->prompt_marker : "❯ ");
 	(void)fyai_ui_update_prompt_style(ctx);
+	ui_completion_configure(ctx);
 	ui_page_configure(ui);
 	/* The manager owns pane geometry and configuration adoption. */
 	fyai_browser_config_changed(ctx);
@@ -2327,6 +2331,11 @@ int fyai_ui_update_prompt_style(struct fyai_ctx *ctx)
 		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP, NULL);
 		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_SELECTED,
 					     NULL);
+		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_BORDER,
+					     NULL);
+		(void)fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_MATCH,
+					     NULL);
+		(void)fytim_set_completion_mark(ui->ft, NULL);
 		(void)fytim_set_prompt_edge(ui->ft, NULL);
 		return 0;
 	}
@@ -2339,10 +2348,6 @@ int fyai_ui_update_prompt_style(struct fyai_ctx *ctx)
 	if (style_rc)
 		goto out;
 	res = fytim_set_prompt_style(ui->ft, on);
-	if (res != FYTIM_OK)
-		goto out;
-	/* The selected row of a popup is the card of the theme. */
-	res = fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_SELECTED, on);
 	if (res != FYTIM_OK)
 		goto out;
 	ui_prompt_ground(ctx);
@@ -2378,6 +2383,7 @@ int fyai_ui_update_prompt_style(struct fyai_ctx *ctx)
 	if (res != FYTIM_OK)
 		fyai_warning(ctx, "cannot draw the edge of the prompt: %s",
 			     fytim_result_string(res));
+	ui_popup_style(ui);
 out:
 	fymd_renderer_destroy(renderer);
 	(void)off;
@@ -2415,6 +2421,55 @@ static const char *ui_control_sgr(struct fyai_ui *ui)
 
 	ui_theme_pair(ui, "tile.sigil.work", FYMD_STYLE_STRONG, &on, &off);
 	return on;
+}
+
+/*
+ * Style the completion popup from the theme. Each element takes its popup
+ * role, else the role or style of the chrome that says the same thing: the
+ * frame is a rule, the selection stands on the ground of focus with the edge
+ * mark, and the typed part of a label is the colour of the prompt. A popup
+ * that cannot be styled is still drawn, so a failure is a warning.
+ */
+static void ui_popup_style(struct fyai_ui *ui)
+{
+	struct fyai_ctx *ctx = ui->ctx;
+	const char *on, *off, *card = NULL;
+	char edge[128];
+	enum fytim_result res;
+
+	ui_theme_pair(ui, "chrome.rule", FYMD_STYLE_RULE, &on, &off);
+	on = markdown_role_on(ctx->cfg, "popup.border", on);
+	res = fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_BORDER, on);
+	if (res == FYTIM_OK) {
+		ui_theme_pair(ui, "prompt", FYMD_STYLE_STRONG, &on, &off);
+		on = markdown_role_on(ctx->cfg, "popup.match", on);
+		res = fytim_set_chrome_style(ui->ft, FYTIM_CHROME_POPUP_MATCH,
+					     on);
+	}
+	if (res == FYTIM_OK) {
+		if (fymd_renderer_get_reverse_pair(ui->chrome_renderer, &card,
+						   &off))
+			card = NULL;
+		on = markdown_role_on(ctx->cfg, "pane.focus", card);
+		on = markdown_role_on(ctx->cfg, "popup.selected", on);
+		res = fytim_set_chrome_style(ui->ft,
+					     FYTIM_CHROME_POPUP_SELECTED, on);
+	}
+	if (res == FYTIM_OK)
+		res = fytim_set_completion_mark(ui->ft,
+						ui_edge(ui, edge, sizeof(edge)));
+	if (res != FYTIM_OK)
+		fyai_warning(ctx, "cannot style the completion popup: %s",
+			     fytim_result_string(res));
+}
+
+/* display/completion: auto opens the popup as the line is typed. */
+static void ui_completion_configure(struct fyai_ctx *ctx)
+{
+	const char *mode = ctx->cfg->completion_mode;
+
+	(void)fytim_set_completion_auto(ctx->ui->ft,
+					mode && !strcmp(mode, "auto"));
 }
 
 void fyai_ui_history_load(struct fyai_ctx *ctx, const char *path)

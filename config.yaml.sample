@@ -355,6 +355,9 @@ display:
   # Where the pane stands: above-prompt, or below-prompt for the rows under
   # the input.
   work_position: above-prompt
+  # When the completion popup opens: tab on Tab; auto as the line is typed,
+  # when the line has candidates, such as after a slash.
+  completion: tab
   # Where an editor runs for /edit, config edit and a log view: pane runs it
   # in a tile of the work pane that takes the pane and the keys; terminal
   # gives it the whole terminal. Without an interactive UI it is the terminal.

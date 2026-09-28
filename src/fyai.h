@@ -96,6 +96,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define DEFAULT_WORK_POSITION "above-prompt"
 /* Where an editor runs: a tile of the work pane, or the whole terminal. */
 #define DEFAULT_EDITOR_MODE "pane"
+#define DEFAULT_COMPLETION_MODE "tab"
 #define DEFAULT_FOCUS_BG "theme"
 #define DEFAULT_FOCUS_BG_MIX 35
 #define DEFAULT_WORK_ZOOM_ROWS "half"
@@ -284,6 +285,7 @@ struct fyai_cfg {
 	const char *work_layout;	/* auto | columns | stack */
 	const char *work_position;	/* above-prompt | below-prompt */
 	const char *editor_mode;	/* pane | terminal */
+	const char *completion_mode;	/* tab | auto */
 	int work_columns;		/* columns when work_layout is columns */
 	int work_min_tile_cols;		/* narrowest tile the auto grid makes */
 	int work_history_rows;		/* rows a tile keeps to scroll back to */
