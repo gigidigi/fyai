@@ -1243,10 +1243,24 @@ do not put a colour for a role in C.
   configuration keeps the result and does not probe. The probe sends all its
   queries in one write, with DA1 last, and waits for the DA1 reply. Every
   terminal answers DA1, and answers in order, so a query with no reply before
-  it is not supported. Do not query the terminal anywhere else, and do not
-  decide anything from how long a reply takes. The time limit is 1000 ms;
+  it is not supported. Do not query the terminal anywhere else - libfytimui
+  measures a glyph, below, and is the one exception - and do not decide
+  anything from how long a reply takes. The time limit is 1000 ms;
   `$FYPAL_PROBE_TIMEOUT_MS` changes it. The test harness sets 30000, which a
   driver that answers never reaches.
+- Terminals draw some glyphs at different widths: VTE draws an emoji base
+  with U+FE0F in one column, most terminals in two. libfytimui measures such
+  a glyph while the program runs, not in the probe: the first time it writes
+  one, it asks for the cursor after it, places the next cell absolutely, and
+  records the advance the reply gives. A session that never shows one never
+  asks. A narrower measure repaints the cells of the library and raises
+  `FYTIM_EVENT_GLYPH_WIDTH`. The UI gives libfymd4c the same measures with
+  `fymd_set_glyph_width()`, so Markdown lays out a table as the cells draw
+  it, and on the event it makes its rows again as a width change does,
+  forgetting the rows of the fullscreen view
+  (`fyai_transcript_view_invalidate()`). A PTY case plays VTE with
+  `$FYAI_PTY_EMOJI_VS=narrow`; the driver answers the cursor query from its
+  screen model.
 - `fyai_ui_open()` gives the result to the UI. The capabilities that the
   terminal reported replace the guess from the environment
   (`fytim_set_caps()`), and the keys typed during the probe go to
