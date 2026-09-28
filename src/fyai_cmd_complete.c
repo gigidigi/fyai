@@ -41,6 +41,9 @@ struct complete_req {
 	fyai_cmd_candidate_fn add;
 	void *arg;
 	unsigned int directives;
+	/* The words that an array argument took before the partial one. */
+	const char *const *given;
+	size_t ngiven;
 };
 
 static void cand(struct complete_req *r, const char *value, const char *desc)
@@ -521,7 +524,8 @@ static void help_topic_cand(void *arg, const char *value, const char *desc)
 
 static void kind_help_topic(struct complete_req *r)
 {
-	fyai_cmd_complete_help_topics(r->partial, help_topic_cand, r);
+	fyai_cmd_complete_help_topics(r->given, r->ngiven, r->partial,
+				      help_topic_cand, r);
 }
 
 static const struct {
@@ -657,6 +661,7 @@ static void complete_args(struct complete_req *r, fy_generic def,
 	const char *w, *last_value;
 	bool opts_done, neg;
 	long long npos;
+	size_t array_start;
 	int n, k;
 
 	n = fyai_cmd_props(def, r->surface, props, ARRAY_SIZE(props));
@@ -668,6 +673,7 @@ static void complete_args(struct complete_req *r, fy_generic def,
 	opts_done = false;
 	npos = 0;
 	last_value = NULL;
+	array_start = SIZE_MAX;
 	for (; i + 1 < nwords; i++) {
 		w = words[i];
 		if (pending) {
@@ -717,6 +723,8 @@ static void complete_args(struct complete_req *r, fy_generic def,
 		last_value = w;
 		if (cp && !cp->array)
 			npos++;
+		else if (cp && array_start == SIZE_MAX)
+			array_start = i;
 	}
 	if (pending) {
 		complete_value(r, pending, last_value);
@@ -730,6 +738,10 @@ static void complete_args(struct complete_req *r, fy_generic def,
 		return;
 	}
 	cp = fyai_cmd_prop_positional(props, n, npos);
+	if (cp && cp->array && array_start != SIZE_MAX) {
+		r->given = words + array_start;
+		r->ngiven = nwords - 1 - array_start;
+	}
 	if (cp)
 		complete_value(r, cp, last_value);
 }
@@ -896,14 +908,32 @@ size_t fyai_cmd_session_word(const char *buf)
 	return off;
 }
 
-void fyai_cmd_complete_help_topics(const char *partial,
+void fyai_cmd_complete_help_topics(const char *const *path, size_t npath,
+				   const char *partial,
 				   fyai_cmd_candidate_fn add, void *arg)
 {
-	fy_generic reg, def, topic, name, title;
+	fy_generic reg, level, def, found, topic, name, title;
 	size_t len = strlen(partial);
+	size_t i;
 
 	reg = fyai_cmd_registry();
-	fy_foreach(def, fy_get(reg, "commands", fy_invalid)) {
+	/* A command path descends into the commands of each group it names. */
+	level = reg;
+	for (i = 0; i < npath; i++) {
+		found = fy_invalid;
+		fy_foreach(def, fy_get(level, "commands", fy_invalid)) {
+			name = fy_get(def, "command", fy_invalid);
+			if (!strcmp(gstr(&name), path[i])) {
+				found = def;
+				break;
+			}
+		}
+		/* A topic, or a command without subcommands, ends the path. */
+		if (!fy_is_valid(found))
+			return;
+		level = found;
+	}
+	fy_foreach(def, fy_get(level, "commands", fy_invalid)) {
 		if (fy_get(def, "hidden", false))
 			continue;
 		name = fy_get(def, "command", fy_invalid);
@@ -911,6 +941,9 @@ void fyai_cmd_complete_help_topics(const char *partial,
 		if (!strncmp(gstr(&name), partial, len))
 			add(arg, gstr(&name), gstr(&title));
 	}
+	/* A topic stands alone: it is not a step of a command path. */
+	if (npath)
+		return;
 	fy_foreach(topic, fy_get(reg, "topics", fy_invalid)) {
 		name = fy_get(topic, "topic", fy_invalid);
 		title = fy_get(topic, "title", fy_invalid);

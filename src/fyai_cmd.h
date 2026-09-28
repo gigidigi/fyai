@@ -244,8 +244,12 @@ fyai_cmd_fn fyai_cmd_handler(const char *name);
 /* True if the completion kind @name has a provider. */
 bool fyai_cmd_kind_known(const char *name);
 
-/* The words that name the commands and topics, for the help-topic kind. */
-void fyai_cmd_complete_help_topics(const char *partial,
+/*
+ * The words that name the commands and topics, for the help-topic kind. After
+ * the @npath words of @path, the subcommands of the group that they name.
+ */
+void fyai_cmd_complete_help_topics(const char *const *path, size_t npath,
+				   const char *partial,
 				   fyai_cmd_candidate_fn add, void *arg);
 
 /* Handlers. */
