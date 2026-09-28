@@ -94,8 +94,29 @@ static unsigned page_golden_pick(unsigned i, unsigned k, unsigned n)
 
 /* The state of golden case @i. Each field takes its own value, so every
  * value meets many others over the cases. */
+static void page_golden_noop(struct fyai_ctx *ctx, const char *arg)
+{
+	(void)ctx;
+	(void)arg;
+}
+
+/* The actions that the embedded document names. */
+static const struct fyai_page_action page_golden_actions[] = {
+	{ "ask.prev", page_golden_noop },
+	{ "ask.next", page_golden_noop },
+	{ "ask.accept", page_golden_noop },
+	{ "ask.dismiss", page_golden_noop },
+	{ "ask.choose", page_golden_noop },
+	{ "popup.close", page_golden_noop },
+	{ "popup.scroll", page_golden_noop },
+};
+
 static void page_golden_state(unsigned i, struct fyai_page_state *st)
 {
+	static const char *const modes[] = { NULL, "ask", "ask_text" };
+	static const char *const froms[] = { NULL, "main/agent:x" };
+	static const char *const options[] = { "Yes <b>", "No", "Other" };
+	static const char *const lines[] = { "row one", "row two" };
 	static const char *const hints[] = { NULL, "HINT <b>x</b>", "  " };
 	static const char *const statuses[] = { NULL, "  STATUS\nline" };
 	static const char *const headers[] = { NULL, "HEAD <fy-act id=\"x\">y</fy-act>" };
@@ -128,6 +149,29 @@ static void page_golden_state(unsigned i, struct fyai_page_state *st)
 	st->pane_below = page_golden_pick(i, 12, 2);
 	st->cap = caps[page_golden_pick(i, 13, 2)];
 	st->pane_source = sources[page_golden_pick(i, 14, 2)];
+	st->fullscreen = page_golden_pick(i, 15, 2);
+	st->transcript_rows = st->fullscreen ? 20 : 0;
+	st->note_lines = lines;
+	st->note_nlines = (int)page_golden_pick(i, 16, 3);
+	st->input_mode = modes[page_golden_pick(i, 17, 3)];
+	if (st->input_mode) {
+		st->ask_question = "Proceed <now>?";
+		st->ask_from = froms[page_golden_pick(i, 18, 2)];
+		st->ask_options = options;
+		st->ask_noptions = page_golden_pick(i, 19, 4);
+		st->ask_selected = page_golden_pick(i, 20, 3);
+		st->ask_waiting = (int)page_golden_pick(i, 21, 3);
+	}
+	/* The popup covers the whole page: one case in four. */
+	if (st->fullscreen && !page_golden_pick(i, 22, 4)) {
+		st->popup_title = "/stats <x>";
+		st->popup_rows = 10;
+		st->popup_lines = lines;
+		st->popup_nlines = 2;
+	}
+	st->actions = page_golden_actions;
+	st->nactions = sizeof(page_golden_actions) /
+		       sizeof(page_golden_actions[0]);
 }
 
 #define PAGE_GOLDEN_CASES 600
