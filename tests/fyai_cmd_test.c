@@ -418,6 +418,17 @@ int cmd_complete_words(void)
 	FYAI_TCHECK(d & FYAI_CMD_COMPLETE_FILES);
 	complete(FYAI_CMD_CLI, "help re", &c);
 	FYAI_TCHECK(strstr(c.buf, "refs\n") && strstr(c.buf, "reset\n"));
+	/* A help path goes on with the subcommands of the group it names. */
+	complete(FYAI_CMD_CLI, "help config ", &c);
+	FYAI_TCHECK(strstr(c.buf, "set\n") && strstr(c.buf, "show\n"));
+	FYAI_TCHECK(!strstr(c.buf, "branch\n") && !strstr(c.buf, "refs\n"));
+	complete(FYAI_CMD_CLI, "help config s", &c);
+	FYAI_TCHECK(strstr(c.buf, "set\n") && !strstr(c.buf, "get\n"));
+	/* A command without subcommands, or a topic, ends the path. */
+	complete(FYAI_CMD_CLI, "help branch new ", &c);
+	FYAI_TCHECK(!c.len);
+	complete(FYAI_CMD_CLI, "help refs ", &c);
+	FYAI_TCHECK(!c.len);
 	return 0;
 }
 
@@ -437,6 +448,10 @@ int cmd_complete_session(void)
 				  &c);
 	FYAI_TCHECK(!strcmp(c.buf, "/config set mcp/enabled true\n"
 			    "/config set mcp/enabled false\n"));
+	/* The popup of the session completes a help path the same way. */
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_session_complete(NULL, "/help config se", cands_add, &c);
+	FYAI_TCHECK(!strcmp(c.buf, "/help config set\n"));
 	/* --output is not a session option. */
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/branch delete --o", cands_add, &c);
