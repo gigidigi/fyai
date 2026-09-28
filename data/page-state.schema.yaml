@@ -3,8 +3,14 @@
 # binding names any value. fyai decides every flag.
 type: object
 additionalProperties: false
-required: [input, ask, screen, tail, transcript, popup, note, pane, header, prompt, status]
+required: [input, ask, screen, tail, transcript, popup, note, layout, pane, header, prompt, status]
 properties:
+  layout:
+    type: object
+    additionalProperties: false
+    required: [name]
+    properties:
+      name: { description: The layout of the document that the terminal took., type: string }
   input:
     type: object
     additionalProperties: false
@@ -49,8 +55,9 @@ properties:
   transcript:
     type: object
     additionalProperties: false
-    required: [rows]
+    required: [shown, rows]
     properties:
+      shown: { description: The transcript is a slot of its own, not a cell of the side column., type: boolean }
       rows: { description: Rows of the transcript view of a fullscreen page., type: integer }
   popup:
     type: object
@@ -74,16 +81,18 @@ properties:
   tail:
     type: object
     additionalProperties: false
-    required: [rows]
+    required: [shown, rows]
     properties:
+      shown: { description: The tail is a slot of its own, not a cell of the side column., type: boolean }
       rows: { description: Rows of the transcript tail., type: integer }
   pane:
     type: object
     additionalProperties: false
-    required: [above, below, cap, cap_source, grid, grid_source, slot, rows]
+    required: [above, below, side, cap, cap_source, grid, grid_source, slot, rows]
     properties:
       above: { description: The pane stands above the prompt., type: boolean }
       below: { description: The pane stands below the prompt., type: boolean }
+      side: { description: The pane is a column beside the transcript, in the grid source., type: boolean }
       cap: { description: The pane has a cap row., type: boolean }
       cap_source: { description: UI Markdown of the cap row that fyai wrote., type: string }
       grid: { description: The pane is a grid that fyai wrote., type: boolean }

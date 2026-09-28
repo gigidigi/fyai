@@ -161,14 +161,19 @@ void fyai_workpane_destroy(struct fyai_workpane_manager *wm);
  */
 struct fytim_workpane *fyai_workpane_acquire(struct fyai_workpane_manager *wm);
 struct response_buffer;
+struct fyai_page_layout;
 /*
  * Append the pane as an fy-grid of tile slots to @out (NULL to size it only):
  * the tiles in the cells the layout gives them, the zoomed tile alone, at
  * @height rows or, for zero, the rows the tiles ask for within the pane
- * ceiling. *@rowsp receives the rows. Returns 0, or non-zero with no tile.
+ * ceiling. With a side @lay the tiles stand in a column of its pane columns,
+ * each a panel of its tile rows, beside a cell that holds the slot @lead.
+ * *@rowsp receives the rows. Returns 0, or non-zero with no tile.
  */
 int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 			    const char *sep, int sep_cols,
+			    const struct fyai_page_layout *lay,
+			    const char *lead,
 			    struct response_buffer *out, int *rowsp);
 /* The pane while a tile holds it, or NULL. Borrowed. */
 struct fytim_workpane *fyai_workpane_pane(const struct fyai_workpane_manager *wm);

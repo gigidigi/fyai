@@ -75,6 +75,11 @@ struct fyai_page_state {
 	bool prompt_card;	/* the prompt stands on a card: two rows more */
 	/* Paint and name the areas of the page, for a review. */
 	bool review;
+	/* The layout of the page document in use, or NULL for "band". In a
+	 * side layout @pane_source is one fy-grid of the transcript or the
+	 * tail beside the tiles, and the pane takes no rows of its own. */
+	const char *layout;
+	bool pane_side;
 	bool completion;
 	int gutter_cols;	/* columns of the status gutter */
 	/* SGR pairs of the theme for the header and the status, or NULL. */
@@ -241,6 +246,46 @@ int fyai_page_grid(struct fyai_ctx *ctx, const struct fyai_workpane_grid *g,
 		   const struct fyai_page_cell *cells, int n, int height,
 		   const char *sep, int sep_cols, struct response_buffer *out,
 		   int *rowsp);
+/*
+ * As fyai_page_grid(), and when @lead is not NULL, column 0 of @g is one cell
+ * over every row that holds the slot @lead, as tall as the grid. No tile of
+ * @cells stands in column 0 then.
+ */
+int fyai_page_grid_lead(struct fyai_ctx *ctx,
+			const struct fyai_workpane_grid *g,
+			const struct fyai_page_cell *cells, int n, int height,
+			const char *sep, int sep_cols, const char *lead,
+			struct response_buffer *out, int *rowsp);
+
+struct fyai_page_layout;
+/*
+ * The side column of @lay in @g: the lead in column 0, then each of the @n
+ * tiles in a panel of the tile rows of @lay in column 1, and a row that takes
+ * what the panels leave. A zoomed tile takes the whole column.
+ */
+void fyai_page_side_place(const struct fyai_page_layout *lay, int n,
+			  bool zoomed, struct fyai_workpane_grid *g);
+
+/*
+ * A layout of a page document: the first entry of its `layouts` that the
+ * terminal is large enough for. A band layout keeps the pane in its band; a
+ * side layout stands the pane in a column of @pane_cols beside the transcript,
+ * each tile a panel of @tile_rows.
+ */
+struct fyai_page_layout {
+	char name[32];
+	bool side;
+	int pane_cols;
+	int tile_rows;
+};
+
+/*
+ * The layout of the document of @pg for a terminal of @cols by @rows. A side
+ * layout needs the fullscreen page, and a document without layouts has one,
+ * "band". Returns 0, or -1 for a layout entry that is not valid.
+ */
+int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
+		     bool fullscreen, struct fyai_page_layout *lay);
 
 /*
  * Make the page. Its document is the file of display/page when that file
@@ -283,7 +328,7 @@ int fyai_page_publish(struct fyai_page *pg, struct fytim *ft,
 /*
  * Paint the areas of a review onto the @nrows by @cols @cells of a rendered
  * page: each slot and each marked row of @fr takes the next colour of the
- * palette series as its ground, and its name at its top left. Returns 0, or
+ * palette series as its ground, and its name at its top right. Returns 0, or
  * -1.
  */
 int fyai_page_review_paint(const struct fyai_cfg *cfg,

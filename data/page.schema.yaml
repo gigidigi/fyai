@@ -14,6 +14,23 @@ properties:
     type: object
     additionalProperties:
       $ref: "#/$defs/nodes"
+  layouts:
+    type: array
+    items:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 31 }
+        min_cols: { type: integer, minimum: 0 }
+        min_rows: { type: integer, minimum: 0 }
+        pane:
+          type: object
+          additionalProperties: false
+          properties:
+            place: { enum: [band, side] }
+            cols: { type: integer, minimum: 20 }
+            tile_rows: { type: integer, minimum: 0 }
 
 $defs:
   flag:

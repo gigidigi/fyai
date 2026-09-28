@@ -393,10 +393,47 @@ static int page_row_head(const struct fyai_workpane_grid *g,
 	return head;
 }
 
+/*
+ * The side column of @lay in @g: the lead in column 0, then each of the @n
+ * tiles in a panel of the tile rows of @lay in column 1, and a row that
+ * takes what the panels leave. A zoomed tile takes the whole column.
+ */
+void fyai_page_side_place(const struct fyai_page_layout *lay, int n,
+			  bool zoomed, struct fyai_workpane_grid *g)
+{
+	int i;
+
+	memset(g, 0, sizeof(*g));
+	if (n > FYAI_WORKPANE_GRID_MAX - 1)
+		n = FYAI_WORKPANE_GRID_MAX - 1;
+	g->cols = 2;
+	g->col_size[1] = lay->pane_cols;
+	for (i = 0; i < n; i++) {
+		g->row_size[i] = zoomed || lay->tile_rows < 1 ? 0 :
+				 lay->tile_rows;
+		g->place[i].row = i;
+		g->place[i].col = 1;
+		g->place[i].row_span = g->place[i].col_span = 1;
+	}
+	g->rows = n;
+	if (!zoomed && lay->tile_rows > 0)
+		g->row_size[g->rows++] = 0;
+}
+
 int fyai_page_grid(struct fyai_ctx *ctx, const struct fyai_workpane_grid *g,
 		   const struct fyai_page_cell *cells, int n, int height,
 		   const char *sep, int sep_cols, struct response_buffer *out,
 		   int *rowsp)
+{
+	return fyai_page_grid_lead(ctx, g, cells, n, height, sep, sep_cols,
+				   NULL, out, rowsp);
+}
+
+int fyai_page_grid_lead(struct fyai_ctx *ctx,
+			const struct fyai_workpane_grid *g,
+			const struct fyai_page_cell *cells, int n, int height,
+			const char *sep, int sep_cols, const char *lead,
+			struct response_buffer *out, int *rowsp)
 {
 	int h[FYAI_WORKPANE_GRID_MAX];
 	char buf[256];
@@ -459,6 +496,17 @@ int fyai_page_grid(struct fyai_ctx *ctx, const struct fyai_workpane_grid *g,
 	}
 	rc = response_buffer_append(out, ">\n");
 	fyai_error_check(ctx, !rc, err_out, "cannot open the page grid");
+	if (lead) {
+		rc = snprintf(buf, sizeof(buf),
+			 "<fy-cell row=\"0\" col=\"0\" rowspan=\"%d\" "
+			 "colspan=\"1\">\n\n<fy-slot id=\"%s\" height=\"%d\"/>"
+			 "\n\n</fy-cell>\n", g->rows, lead, rows);
+		fyai_error_check(ctx, rc >= 0 && (size_t)rc < sizeof(buf), err_out,
+				 "cannot format the lead cell of the page grid");
+		rc = response_buffer_append(out, buf);
+		fyai_error_check(ctx, !rc, err_out,
+				 "cannot write the lead cell of the page grid");
+	}
 
 	for (i = 0; i < n; i++) {
 		if (!page_cell_placed(g, &cells[i]))
@@ -556,6 +604,7 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 	bool prompt = st->prompt_rows > 0, pane = st->pane_rows > 0;
 	bool grid = !fy_str_empty(st->pane_source);
 	bool hint = page_text_visible(st->hint);
+	bool side = st->pane_side && grid;
 	fy_generic options = fy_seq_empty;
 	size_t i;
 
@@ -577,8 +626,12 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 			"waiting_shown", (bool)(st->ask_waiting > 0)),
 		"screen", fy_mapping(gb, "mode",
 				     st->fullscreen ? "fullscreen" : "inline"),
-		"tail", fy_mapping(gb, "rows", st->tail_rows),
-		"transcript", fy_mapping(gb, "rows", st->transcript_rows),
+		"tail", fy_mapping(gb,
+			"shown", (bool)!side,
+			"rows", st->tail_rows),
+		"transcript", fy_mapping(gb,
+			"shown", (bool)!side,
+			"rows", st->transcript_rows),
 		"popup", fy_mapping(gb,
 			"mode", st->popup_title ? "open" : "closed",
 			"title", page_str(st->popup_title),
@@ -586,9 +639,12 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 		"note", fy_mapping(gb,
 			"shown", (bool)(st->note_nlines > 0),
 			"rows", st->note_nlines),
+		"layout", fy_mapping(gb,
+			"name", st->layout ? st->layout : "band"),
 		"pane", fy_mapping(gb,
 			"above", (bool)(pane && !st->pane_below),
 			"below", (bool)(pane && st->pane_below),
+			"side", side,
 			"cap", (bool)!fy_str_empty(st->cap),
 			"cap_source", page_str(st->cap),
 			"grid", grid,
@@ -1458,6 +1514,40 @@ err_free:
 	fyai_page_destroy(pg);
 err_out:
 	return NULL;
+}
+
+int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
+		     bool fullscreen, struct fyai_page_layout *lay)
+{
+	fy_generic layouts, l, pane, name;
+	const char *place;
+
+	memset(lay, 0, sizeof(*lay));
+	snprintf(lay->name, sizeof(lay->name), "band");
+	layouts = pg ? fy_get(pg->doc, "layouts", fy_invalid) : fy_invalid;
+	if (!fy_is_sequence(layouts))
+		return 0;
+	fy_foreach(l, layouts) {
+		if (cols < fy_get(l, "min_cols", 0LL) ||
+		    rows < fy_get(l, "min_rows", 0LL))
+			continue;
+		pane = fy_get(l, "pane", fy_invalid);
+		place = fy_get(pane, "place", "band");
+		/* A column beside the transcript needs the transcript view. */
+		if (!strcmp(place, "side") && !fullscreen)
+			continue;
+		name = fy_get(l, "name", fy_invalid);
+		if (!fy_is_string(name))
+			return -1;
+		snprintf(lay->name, sizeof(lay->name), "%s", fy_castp(&name, ""));
+		lay->side = !strcmp(place, "side");
+		lay->pane_cols = (int)fy_get(pane, "cols", 0LL);
+		lay->tile_rows = (int)fy_get(pane, "tile_rows", 0LL);
+		if (lay->side && (lay->pane_cols < 1 || lay->pane_cols >= cols))
+			return -1;
+		return 0;
+	}
+	return 0;
 }
 
 const char *fyai_page_document_path(const struct fyai_page *pg)
@@ -2510,14 +2600,12 @@ int fyai_page_review_paint(const struct fyai_cfg *cfg,
 		for (r = row; r < row + h && r < nrows; r++)
 			for (c = col; c < col + w && c < cols; c++)
 				cells[(size_t)r * cols + c].bg = colour;
-		/* The name stands reversed on the colour: at the right edge of
-		 * a row, which holds its text at the left, and at the top left
-		 * of a slot. */
+		/* The name stands reversed on the colour at the top right of
+		 * the area: text and a program start at the left. */
 		n = snprintf(label, sizeof(label), " %s ", name);
 		if (n > w)
 			n = w;
-		if (fr[i].kind == FYMD_REGION_MARK)
-			col = col + w - n;
+		col = col + w - n;
 		for (c = 0; c < n && col + c < cols; c++) {
 			cell = &cells[(size_t)row * cols + col + c];
 			memset(cell->chars, 0, sizeof(cell->chars));

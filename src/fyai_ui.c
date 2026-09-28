@@ -94,6 +94,9 @@ struct fyai_ui {
 	const char *status_hint;	/* the focus hint row, or NULL */
 	struct fyai_page *page;		/* the page renderer, or NULL */
 	bool page_review;		/* paint and name the areas of the page */
+	/* The render width a side layout set, or 0. Only a side layout owns
+	 * cfg->render_width, and only it puts it back. */
+	int side_width;
 	struct response_buffer pane_grid;	/* the pane source of the page */
 	struct fyai_page_keys page_keys;	/* the keys the page has bound */
 	struct ui_question *questions;	/* first the one the input area shows */
@@ -1067,6 +1070,19 @@ static bool ui_tile_ground(const struct fyai_ctx *ctx, bool focused,
 }
 
 /*
+ * Set the render width of a side layout to @width, or give it back with 0.
+ * The width is written only when a side layout starts, changes or ends, so
+ * a width that another component holds for a moment stays its own.
+ */
+static void ui_side_width(struct fyai_ui *ui, int width)
+{
+	if (width == ui->side_width)
+		return;
+	ui->ctx->cfg->render_width = width;
+	ui->side_width = width;
+}
+
+/*
  * Follow display/renderer: make the page when it is asked for and this build
  * can compose one, and give the screen back to the band stack otherwise.
  */
@@ -1101,6 +1117,7 @@ static void ui_page_configure(struct fyai_ui *ui)
 	} else if (!want && ui->page) {
 		fyai_page_destroy(ui->page);
 		ui->page = NULL;
+		ui_side_width(ui, 0);
 		fytim_page_clear(ui->ft);
 		/* The keys of its modes go back to the prompt. */
 		(void)fytim_set_key_bindings(ui->ft, NULL, 0);
@@ -1430,6 +1447,7 @@ static void ui_page_update(struct fyai_ui *ui)
 {
 	struct fyai_ctx *ctx = ui->ctx;
 	struct fyai_page_tile tiles[FYAI_WORKPANE_TILES_MAX];
+	struct fyai_page_layout layout;
 	struct fyai_page_state st;
 	struct fytim_workpane *pane;
 	char elapsed[24], cap[512];
@@ -1438,6 +1456,7 @@ static void ui_page_update(struct fyai_ui *ui)
 	const char *rule_off, *typed, *tail;
 	char *activity = NULL;
 	int cols = 0, rows = 0, n, i, sep_cols, rc;
+	bool side;
 
 	if (!ui->page)
 		return;
@@ -1492,12 +1511,22 @@ static void ui_page_update(struct fyai_ui *ui)
 	fyai_error_check(ctx, n >= 0, err_page,
 			 "cannot measure the work pane separator");
 	sep_cols = n;
-	if (!pane || fyai_workpane_hidden(ctx->workpane)) {
+	/* The layout of the document is chosen before the fit: it says
+	 * whether the pane takes rows of the page or a column beside it. */
+	rc = fyai_page_layout(ui->page, cols, rows, ui->fullscreen, &layout);
+	fyai_error_check(ctx, !rc, err_page,
+			 "the page document has a layout that is not valid");
+	st.layout = layout.name;
+	side = layout.side && pane && !fyai_workpane_hidden(ctx->workpane);
+	st.pane_side = side;
+	/* Conversation content is made for the column it stands in. */
+	ui_side_width(ui, layout.side ? cols - layout.pane_cols - sep_cols : 0);
+	if (!pane || fyai_workpane_hidden(ctx->workpane) || side) {
 		st.pane_rows = 0;
 	} else {
 		rc = fyai_workpane_page_grid(ctx->workpane, 0,
 					     ctx->cfg->tile_sep, sep_cols,
-					     NULL, &st.pane_rows);
+					     NULL, NULL, NULL, &st.pane_rows);
 		fyai_error_check(ctx, !rc, err_page,
 				 "cannot size the work pane for the page");
 	}
@@ -1573,10 +1602,21 @@ static void ui_page_update(struct fyai_ui *ui)
 	}
 	/* Then written at the rows the chrome leaves it. */
 	ui->pane_grid.len = 0;
-	if (st.pane_rows > 0) {
+	if (side && (ui->fullscreen ? st.transcript_rows : st.tail_rows) > 0) {
+		/* One grid: the transcript beside the column of tiles. */
+		rc = fyai_workpane_page_grid(ctx->workpane,
+					     ui->fullscreen ? st.transcript_rows :
+					     st.tail_rows, ctx->cfg->tile_sep,
+					     sep_cols, &layout,
+					     ui->fullscreen ? "transcript" : "tail",
+					     &ui->pane_grid, NULL);
+		fyai_error_check(ctx, !rc, err_page,
+				 "cannot build the side column of the page");
+		st.pane_source = ui->pane_grid.data;
+	} else if (st.pane_rows > 0) {
 		rc = fyai_workpane_page_grid(ctx->workpane, st.pane_rows,
 					     ctx->cfg->tile_sep, sep_cols,
-					     &ui->pane_grid, NULL);
+					     NULL, NULL, &ui->pane_grid, NULL);
 		fyai_error_check(ctx, !rc, err_page,
 				 "cannot build the work pane page source");
 		st.pane_source = ui->pane_grid.data;
@@ -1586,6 +1626,7 @@ static void ui_page_update(struct fyai_ui *ui)
 err_page:
 		fyai_page_destroy(ui->page);
 		ui->page = NULL;
+		ui_side_width(ui, 0);
 		fytim_page_clear(ui->ft);
 		ui_page_keys_clear(ui);
 		fyai_warning(ctx, "the page renderer stopped; "

@@ -28,6 +28,19 @@
 #   markup: NAME       UI Markdown that fyai wrote, from the state
 #   act: {action, arg, text}   a label that the user clicks for an action
 
+# The layouts of the page, the first that the terminal is large enough for.
+# A layout names its conditions (min_cols, min_rows) and where the pane
+# stands: in a band of the page, or in a column of `cols` beside the
+# transcript, each tile a panel of `tile_rows`. A side column needs the
+# fullscreen page. A node can switch on layout.name.
+layouts:
+  - name: side
+    min_cols: 170
+    min_rows: 30
+    pane: { place: side, cols: 82, tile_rows: 25 }
+  - name: band
+    pane: { place: band }
+
 page:
   # The page stands inline under the scrollback, or takes the whole screen.
   - switch: screen.mode
@@ -57,13 +70,20 @@ pages:
   # Inline: the tail of the transcript, then the chrome.
   inline:
     - tight: true
-    - slot: { id: tail, rows: "{tail.rows}" }
+    - if: tail.shown
+      slot: { id: tail, rows: "{tail.rows}" }
+    - if: pane.side
+      markup: pane.grid_source
     - page: chrome
 
   # Fullscreen: committed rows and the live tail share one viewport.
   fullscreen:
     - tight: true
-    - slot: { id: transcript, rows: "{transcript.rows}" }
+    # In a side layout the transcript stands in a grid beside the tiles.
+    - if: transcript.shown
+      slot: { id: transcript, rows: "{transcript.rows}" }
+    - if: pane.side
+      markup: pane.grid_source
     - page: chrome
 
   # The pane, the header, the input area and the status, in either screen.

@@ -597,6 +597,8 @@ fyai_workpane_slot_surface(const struct fyai_workpane_manager *wm,
 
 int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 			    const char *sep, int sep_cols,
+			    const struct fyai_page_layout *lay,
+			    const char *lead,
 			    struct response_buffer *out, int *rowsp)
 {
 	struct fyai_workpane_tile_info info[FYAI_WORKPANE_TILES_MAX];
@@ -604,6 +606,7 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 	struct fyai_page_cell cells[FYAI_WORKPANE_TILES_MAX];
 	struct fyai_workpane_grid g;
 	int n, i, rows = 0, rc;
+	bool side;
 
 	if (!wm)
 		return -1;
@@ -614,7 +617,20 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 	if (n < 1)
 		return 1;
 	memset(&g, 0, sizeof(g));
-	if (wm->zoomed) {
+	if (lay && lay->side) {
+		if (wm->zoomed) {
+			for (i = 0; i < n && order[i]->surface != wm->zoomed;
+			     i++)
+				;
+			if (i < n)
+				order[0] = order[i];
+			if (i < n)
+				n = 1;
+		}
+		fyai_page_side_place(lay, n, wm->zoomed && n == 1, &g);
+		if (n > g.rows)
+			n = g.rows;
+	} else if (wm->zoomed) {
 		/* A zoomed tile is the pane. */
 		for (i = 0; i < n && order[i]->surface != wm->zoomed; i++)
 			;
@@ -634,12 +650,15 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 			g.place[i].row_span = g.place[i].col_span = 1;
 		}
 	}
+	side = lay && lay->side;
 	for (i = 0; i < n; i++) {
 		cells[i].slot = order[i]->slot;
-		cells[i].row = wm->zoomed ? 0 : g.place[i].row;
-		cells[i].col = wm->zoomed ? 0 : g.place[i].col;
-		cells[i].row_span = wm->zoomed ? 1 : g.place[i].row_span;
-		cells[i].col_span = wm->zoomed ? 1 : g.place[i].col_span;
+		cells[i].row = wm->zoomed && !side ? 0 : g.place[i].row;
+		cells[i].col = wm->zoomed && !side ? 0 : g.place[i].col;
+		cells[i].row_span = wm->zoomed && !side ? 1 :
+				    g.place[i].row_span;
+		cells[i].col_span = wm->zoomed && !side ? 1 :
+				    g.place[i].col_span;
 		cells[i].rows = fyai_ui_tile_rows(order[i]->surface,
 						  order[i]->band);
 		cells[i].head_rows = order[i]->head ? order[i]->head_rows : 0;
@@ -657,8 +676,8 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 		if (wm->resolved_max_rows > 0 && rows > wm->resolved_max_rows)
 			height = wm->resolved_max_rows;
 	}
-	rc = fyai_page_grid(wm->ctx, &g, cells, n, height, sep, sep_cols, out,
-			    rowsp);
+	rc = fyai_page_grid_lead(wm->ctx, &g, cells, n, height, sep, sep_cols,
+				 side ? lead : NULL, out, rowsp);
 	fyai_error_check(wm->ctx, !rc, err_out,
 			 "cannot build the work pane page grid");
 	return 0;
