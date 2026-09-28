@@ -250,6 +250,15 @@ int fyai_page_grid(struct fyai_ctx *ctx, const struct fyai_workpane_grid *g,
 struct fyai_page *fyai_page_create(struct fyai_ctx *ctx,
 				   const struct fyai_page_action *actions,
 				   size_t n);
+/*
+ * As fyai_page_create(), with the document of the file @path, or the embedded
+ * one when @path is NULL or empty. With @strict a file that does not load is
+ * an error that says why, and no page is made.
+ */
+struct fyai_page *fyai_page_create_from(struct fyai_ctx *ctx,
+					const char *path, bool strict,
+					const struct fyai_page_action *actions,
+					size_t n);
 
 /* The display/page setting @pg was made for, or NULL for none. */
 const char *fyai_page_document_path(const struct fyai_page *pg);

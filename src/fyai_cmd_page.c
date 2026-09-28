@@ -93,7 +93,8 @@ int fyai_cmd_page_review_sample(struct fyai_cmd_call *call,
 	fyai_ui_page_actions(&actions, &nactions);
 	st.actions = actions;
 	st.nactions = nactions;
-	pg = fyai_page_create(ctx, actions, nactions);
+	pg = fyai_page_create_from(ctx, fyai_cmd_arg_str(call, "page"), true,
+				   actions, nactions);
 	fyai_error_check(ctx, pg, err_out, "cannot make the page");
 	rc = fyai_page_review(pg, fyai_page_state_generic(call->gb, &st), cols,
 			      rows, call->gb, &picture, result);

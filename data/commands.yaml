@@ -2035,7 +2035,9 @@ commands:
         description: |
           Render the page document with the state SAMPLE, give each area a
           colour and its name, and list the areas. The slots are empty: a
-          sample has no transcript, tiles, or prompt to draw in them.
+          sample has no transcript, tiles, or prompt to draw in them. The
+          document is the embedded one, or the file of --page, which must
+          load as display/page does.
         surfaces: [cli]
         handler: page_review_sample
         flags: [no-storage]
@@ -2066,6 +2068,11 @@ commands:
               default: 24
               description: the rows of the page
               x-fyai-meta: N
+            page:
+              type: string
+              description: the page document to review, in place of the embedded one
+              x-fyai-meta: FILE
+              x-fyai-complete: file
 
   - command: sessions
     title: list the live shell sessions and sub-agents

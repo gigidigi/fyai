@@ -1407,10 +1407,18 @@ struct fyai_page *fyai_page_create(struct fyai_ctx *ctx,
 				   const struct fyai_page_action *actions,
 				   size_t n)
 {
+	return fyai_page_create_from(ctx, ctx->cfg->page_path, false, actions,
+				     n);
+}
+
+struct fyai_page *fyai_page_create_from(struct fyai_ctx *ctx,
+					const char *path, bool strict,
+					const struct fyai_page_action *actions,
+					size_t n)
+{
 	struct fy_generic_builder_cfg cfg = {
 		.flags = FYGBCF_SCOPE_LEADER | FYGBCF_DEDUP_ENABLED,
 	};
-	const char *path = ctx->cfg->page_path;
 	struct fyai_page *pg;
 	fy_generic doc;
 	char why[1024];
@@ -1428,7 +1436,7 @@ struct fyai_page *fyai_page_create(struct fyai_ctx *ctx,
 		return pg;
 	pg->doc_path = strdup(path);
 	fyai_error_check(ctx, pg->doc_path, err_free,
-			 "cannot keep the path of display/page");
+			 "cannot keep the path of the page document");
 	pg->doc_gb = fy_generic_builder_create(&cfg);
 	fyai_error_check(ctx, pg->doc_gb, err_free,
 			 "cannot make a builder for the page document");
@@ -1437,6 +1445,8 @@ struct fyai_page *fyai_page_create(struct fyai_ctx *ctx,
 		pg->doc = doc;
 		return pg;
 	}
+	fyai_error_check(ctx, !strict, err_free,
+			 "the page document %s is not used: %s", path, why);
 	pg->rejected = strdup(why);
 	fyai_error_check(ctx, pg->rejected, err_free,
 			 "cannot keep why display/page is not used");
