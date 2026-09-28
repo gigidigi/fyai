@@ -1,0 +1,42 @@
+{
+ "steps": [
+  {
+   "response": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": null,
+       "tool_calls": [
+        {
+         "id": "t1",
+         "type": "function",
+         "function": {
+          "name": "exec_command",
+          "arguments": "{\"command\": \"sh -c 'printf %s%s CUT OUT; sleep 30'\", \"name\": \"cut\", \"tty\": true, \"description\": \"a terminal session whose description is much longer than the tile it stands in\"}"
+         }
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ]
+   }
+  },
+  {
+   "response": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "The session runs."
+      },
+      "finish_reason": "stop"
+     }
+    ]
+   }
+  }
+ ]
+}
