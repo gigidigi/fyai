@@ -2799,7 +2799,8 @@ static void fyai_scratch_leave(struct fyai_ctx *ctx,
 	ctx->transient_autorelease = st->autorelease;
 }
 
-/* Run a bang command without creating a model turn. */
+/* Run a bang command without creating a model turn. It is not a part of the
+ * conversation: nothing of it goes into the transcript. */
 static int fyai_interactive_handle_bang(struct fyai_ctx *ctx,
 					const char *histfile, char *line)
 {
@@ -2809,7 +2810,6 @@ static int fyai_interactive_handle_bang(struct fyai_ctx *ctx,
 	if (line[0] != '!')
 		return -1;
 	fyai_ui_history_save(ctx, histfile, line);
-	fyai_echo_user_turn(ctx, line);
 	rc = fyai_scratch_enter(ctx, &st);
 	fyai_error_check(ctx, !rc, out,
 			 "could not create transient shell storage");

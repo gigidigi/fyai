@@ -2270,6 +2270,9 @@ struct fyai_shell_session {
 	char *title;
 	char *description;		/* model-provided call description */
 	bool recorded;			/* exchange stored in the document */
+	/* A bang shell: its tile stays after the program until the user
+	 * dismisses it. */
+	bool keep_tile;
 	pid_t pid;			/* the program, watched for a read */
 	bool pipes;			/* it was given no terminal */
 	struct fyai_event_source *waiter;
@@ -2889,7 +2892,12 @@ static void fyai_surface_retire_zoom(struct fyai_ctx *ctx,
 		fyai_workpane_clear_zoom(ctx->workpane);
 }
 
-/* Commit the completed session to the transcript and terminal scrollback. */
+/*
+ * Commit the completed session to the transcript and terminal scrollback. A
+ * bang command is not a part of the conversation: it records nothing and
+ * commits nothing, and its tile stays with the outcome until the user
+ * dismisses it, with the keys at the prompt.
+ */
 static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
 {
 	char *cause;
@@ -2900,15 +2908,18 @@ static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
 	if (!sess || sess->recorded)
 		return;
 	sess->recorded = true;
-	cause = fyai_shell_session_cause(sess, &ok);
-	text = fyai_terminal_view_read(sess->view, FYAITR_ALL, NULL, &len);
-	if (fyai_record_shell_screen(sess->ctx, sess->description,
-				     sess->command, text, ok, cause))
-		fyai_warning(sess->ctx,
-			     "shell: could not record the session '%s'",
-			     sess->name ? sess->name : "");
-	free(text);
-	free(cause);
+	if (!sess->keep_tile) {
+		cause = fyai_shell_session_cause(sess, &ok);
+		text = fyai_terminal_view_read(sess->view, FYAITR_ALL, NULL,
+					       &len);
+		if (fyai_record_shell_screen(sess->ctx, sess->description,
+					     sess->command, text, ok, cause))
+			fyai_warning(sess->ctx,
+				     "shell: could not record the session '%s'",
+				     sess->name ? sess->name : "");
+		free(text);
+		free(cause);
+	}
 
 	if (!sess->surface)
 		return;
@@ -2925,6 +2936,14 @@ static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
 				       ok ? FYAI_UI_MARK_OK :
 					    FYAI_UI_MARK_FAILED);
 	free(cause);
+	if (sess->keep_tile) {
+		if (fyai_workpane_focused(sess->ctx->workpane) == sess->surface)
+			fyai_workpane_clear_focus(sess->ctx->workpane);
+		if (fyai_workpane_zoomed(sess->ctx->workpane) == sess->surface)
+			fyai_workpane_clear_zoom(sess->ctx->workpane);
+		fyai_ui_wake(sess->ctx);
+		return;
+	}
 	fyai_surface_retire_zoom(sess->ctx, sess->surface);
 	fyai_ui_surface_commit(sess->ctx, sess->surface);
 	sess->surface = NULL;
@@ -2999,6 +3018,12 @@ static void fyai_shell_session_destroy(struct fyai_shell_session *sess)
 		fyai_shell_session_notify_exit(sess, -1, SIGKILL);
 	/* Commit output displayed before teardown. */
 	fyai_shell_session_display_finish(sess);
+	/* A finished bang session keeps its tile until now. */
+	if (sess->surface) {
+		fyai_surface_retire_zoom(sess->ctx, sess->surface);
+		fyai_ui_surface_close(sess->ctx, sess->surface);
+		sess->surface = NULL;
+	}
 	if (sess->animation)
 		fyai_event_source_remove(sess->animation);
 	if (sess->idle)
@@ -3055,6 +3080,22 @@ static void fyai_shell_session_release_one(struct fyai_shell_session *sess,
 		fyai_tool_job_discard(job);
 	}
 	fyai_shell_session_destroy(sess);
+}
+
+/* A finished bang session leaves the pane: its tile goes, and the session
+ * with it. */
+static void fyai_shell_session_dismiss(struct fyai_shell_session *sess)
+{
+	struct fyai_ctx *ctx = sess->ctx;
+	struct fyai_shell_session **link;
+
+	for (link = &ctx->shell_sessions; *link && *link != sess;
+	     link = &(*link)->next)
+		;
+	if (*link)
+		*link = sess->next;
+	fyai_shell_session_release_one(sess, false);
+	fyai_ui_wake(ctx);
 }
 
 void fyai_tools_display_closed(struct fyai_ctx *ctx)
@@ -5171,6 +5212,14 @@ static void fyai_tools_zoom_keys(void *user, const char *data, size_t len)
 		fyai_tool_job_discard(job);
 		return;
 	}
+	/* A finished bang tile takes Escape or q to leave; its program reads
+	 * nothing more. */
+	if (sess && sess->exited && sess->keep_tile && len == 1 &&
+	    (data[0] == FYAI_KEY_ESC || data[0] == 'q')) {
+		fyai_shell_session_dismiss(sess);
+		fyai_tools_unzoom(ctx);
+		return;
+	}
 	if (job && job->btw_panel && job->view) {
 		delta = fyai_btw_scroll_delta(job, data, len);
 		if (delta) {
@@ -5231,7 +5280,9 @@ void fyai_tools_surface_request(struct fyai_ctx *ctx, struct fytim_surface *sf,
 
 	fyai_tile_owner(ctx, sf, &sess, &job);
 	/* Request graceful termination so the result remains available. */
-	if (sess)
+	if (sess && sess->exited && sess->keep_tile)
+		fyai_shell_session_dismiss(sess);
+	else if (sess)
 		fyai_shell_session_close(sess, false);
 	else if (job) {
 		if (job->btw_panel)
@@ -5474,7 +5525,9 @@ int fyai_tools_kill(struct fyai_ctx *ctx, const char *name,
 	}
 	for (candidate = ctx->shell_sessions; candidate;
 	     candidate = candidate->next)
-		if (!candidate->exited && !strcmp(candidate->name, name)) {
+		if ((!candidate->exited ||
+		     (candidate->keep_tile && candidate->surface)) &&
+		    !strcmp(candidate->name, name)) {
 			sess = candidate;
 			break;
 		}
@@ -5499,7 +5552,10 @@ int fyai_tools_kill(struct fyai_ctx *ctx, const char *name,
 			   "called '%s'", name);
 		return -1;
 	}
-	if (sess) {
+	if (sess && sess->exited) {
+		fyai_shell_session_dismiss(sess);
+		*actionp = "closed shell";
+	} else if (sess) {
 		fyai_shell_session_close(sess, false);
 		*actionp = "stopping shell";
 	} else {
@@ -5592,6 +5648,8 @@ int fyai_tools_bang(struct fyai_ctx *ctx, const char *command)
 	if (fyai_tools_user_start(ctx, command, "bang", "bang shell",
 				  fy_invalid, &sess))
 		return -1;
+	if (sess)
+		sess->keep_tile = true;
 	if (sess && sess->surface)
 		(void)fyai_tools_focus(ctx, sess->surface);
 	return 0;
