@@ -534,14 +534,21 @@ err:
 /* The value that the session uses now, as the setting shows it. */
 static const char *setting_show(struct fyai_cmd_call *call, const char *key)
 {
-	fy_generic v;
+	fy_generic v, parent;
 
 	v = fy_get_at_pathstr(call->gb, call->ctx->cfg->config_doc, key);
-	/* `sandbox: false` has no enabled member. */
-	if (!fy_is_valid(v) && strrchr(key, '/'))
-		v = fy_get_at_pathstr(call->gb, call->ctx->cfg->config_doc,
-				      fy_sprintfa("%.*s",
-					(int)(strrchr(key, '/') - key), key));
+	/* `sandbox: false` has no enabled member. Any other parent is a
+	 * mapping that does not hold the key. */
+	if (!fy_is_valid(v) && strrchr(key, '/')) {
+		parent = fy_get_at_pathstr(call->gb, call->ctx->cfg->config_doc,
+				fy_sprintfa("%.*s",
+					    (int)(strrchr(key, '/') - key), key));
+		if (fy_is_bool(parent))
+			v = parent;
+	}
+	/* A key that is not set has the default of the schema. */
+	if (!fy_is_valid(v))
+		v = fy_get(fyai_config_schema_node(key), "default", fy_invalid);
 	if (fy_is_bool(v))
 		return fy_equal(v, true) ? "on" : "off";
 	if (!fy_is_valid(v) || fy_is_null(v) ||
