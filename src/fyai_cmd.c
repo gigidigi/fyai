@@ -98,6 +98,8 @@ static const struct {
 	{ "resume",		fyai_cmd_resume },
 	{ "zoom",		fyai_cmd_zoom },
 	{ "page",		fyai_cmd_page },
+	{ "page_review",	fyai_cmd_page_review },
+	{ "page_review_sample",	fyai_cmd_page_review_sample },
 	{ "sessions",		fyai_cmd_sessions },
 	{ "kill",		fyai_cmd_kill },
 	{ "status",		fyai_cmd_status },

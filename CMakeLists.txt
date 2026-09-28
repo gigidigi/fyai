@@ -461,6 +461,7 @@ set(FYAI_SOURCES
     src/fyai_cmd_help.c
     src/fyai_cmd_mcp.c
     src/fyai_cmd_session.c
+    src/fyai_cmd_page.c
     src/fyai_cmd_misc.c
     src/fyai_cmd_store.c
     src/fyai_cmd_view.c

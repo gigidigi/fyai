@@ -130,12 +130,6 @@ int fyai_cmd_zoom(struct fyai_cmd_call *call, fy_generic *result)
 	return 0;
 }
 
-int fyai_cmd_page(struct fyai_cmd_call *call, fy_generic *result)
-{
-	(void)result;
-	return fyai_ui_page_report(call->ctx);
-}
-
 int fyai_cmd_sessions(struct fyai_cmd_call *call, fy_generic *result)
 {
 	*result = fyai_tools_sessions_data(call->ctx, call->gb);

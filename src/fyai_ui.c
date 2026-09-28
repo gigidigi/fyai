@@ -93,6 +93,7 @@ struct fyai_ui {
 	char *status_top_source;	/* Markdown of the header, for the page */
 	const char *status_hint;	/* the focus hint row, or NULL */
 	struct fyai_page *page;		/* the page renderer, or NULL */
+	bool page_review;		/* paint and name the areas of the page */
 	struct response_buffer pane_grid;	/* the pane source of the page */
 	struct fyai_page_keys page_keys;	/* the keys the page has bound */
 	struct ui_question *questions;	/* first the one the input area shows */
@@ -1146,6 +1147,26 @@ int fyai_ui_page_report(struct fyai_ctx *ctx)
 	return rc;
 }
 
+int fyai_ui_page_review(struct fyai_ctx *ctx, const char *how, bool *on)
+{
+	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+
+	if (!ui || !ui->page) {
+		fyai_error(ctx, "the page renderer does not draw the screen; "
+			   "display/renderer is %s",
+			   ctx && ctx->cfg->renderer ? ctx->cfg->renderer :
+			   "not set");
+		return -1;
+	}
+	if (fy_str_empty(how))
+		ui->page_review = !ui->page_review;
+	else
+		ui->page_review = !strcmp(how, "on");
+	ui->frame_pending = true;
+	*on = ui->page_review;
+	return 0;
+}
+
 bool fyai_ui_ask_available(struct fyai_ctx *ctx)
 {
 	return fyai_ui_active(ctx) && ctx->ui->page != NULL;
@@ -1335,6 +1356,11 @@ static void ui_page_actions_get(const struct fyai_page_action **actions,
 	*n = ui_page_nactions;
 }
 
+void fyai_ui_page_actions(const struct fyai_page_action **actions, size_t *n)
+{
+	ui_page_actions_get(actions, n);
+}
+
 /* Call the action that @id names: "action" or "action:arg". An id that names
  * no action is reported: it was a click or a key of the user. */
 static void ui_page_action(struct fyai_ui *ui, const char *id)
@@ -1479,6 +1505,7 @@ static void ui_page_update(struct fyai_ui *ui)
 			FYAI_WORKPANE_POS_BELOW;
 	st.prompt_rows = fytim_prompt_rows(ui->ft);
 	st.prompt_card = fytim_prompt_card(ui->ft);
+	st.review = ui->page_review;
 	st.completion = fytim_completion_active(ui->ft);
 	st.gutter_cols = markdown_gutter_cols(ctx->cfg);
 	/* The header and status styles of the band stack come from the theme. */

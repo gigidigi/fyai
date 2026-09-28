@@ -915,7 +915,7 @@ static char *page_test_transcribe(struct fy_generic_builder *gb,
 
 	if (fyai_page_transcribe(NULL, page_yaml(gb, doc), page_yaml(gb, state),
 				 page_test_actions, PAGE_TEST_NACTIONS, &out,
-				 keys)) {
+				 keys, false)) {
 		free(out.data);
 		return NULL;
 	}

@@ -12,6 +12,8 @@ struct fyai_cfg;
 struct fyai_ctx;
 struct fytim;
 struct fytim_page_region;
+struct fytim_cell;
+struct fymd_region;
 struct fytim_surface;
 struct fytim_workband;
 struct markdown_region;
@@ -71,6 +73,8 @@ struct fyai_page_state {
 	bool pane_below;
 	int prompt_rows;
 	bool prompt_card;	/* the prompt stands on a card: two rows more */
+	/* Paint and name the areas of the page, for a review. */
+	bool review;
 	bool completion;
 	int gutter_cols;	/* columns of the status gutter */
 	/* SGR pairs of the theme for the header and the status, or NULL. */
@@ -162,14 +166,15 @@ int fyai_page_source(const struct fyai_page_state *st,
  * Transcribe @doc, a page document with `page` and `pages`, with @state into
  * @out. Every act and every key must name one of the @n @actions, and a key
  * cannot be Ctrl-], Ctrl-T or Ctrl-Tab. The keys of the switch cases that are
- * transcribed go to @keys when it is not NULL. Returns 0, or -1 for a document
- * that does not transcribe.
+ * transcribed go to @keys when it is not NULL. With @review, each row starts
+ * with an fy-mark "review:AREA": the flag that shows it, else its page.
+ * Returns 0, or -1 for a document that does not transcribe.
  */
 int fyai_page_transcribe(struct fyai_ctx *ctx, fy_generic doc,
 			 fy_generic state,
 			 const struct fyai_page_action *actions, size_t n,
 			 struct response_buffer *out,
-			 struct fyai_page_keys *keys);
+			 struct fyai_page_keys *keys, bool review);
 
 /*
  * Check @doc as a page document: walk every case of every switch, every node
@@ -265,5 +270,25 @@ void fyai_page_destroy(struct fyai_page *pg);
  */
 int fyai_page_publish(struct fyai_page *pg, struct fytim *ft,
 		      struct fyai_page_state *st, int cols, int rows);
+
+/*
+ * Paint the areas of a review onto the @nrows by @cols @cells of a rendered
+ * page: each slot and each marked row of @fr takes the next colour of the
+ * palette series as its ground, and its name at its top left. Returns 0, or
+ * -1.
+ */
+int fyai_page_review_paint(const struct fyai_cfg *cfg,
+			   struct fytim_cell *cells, int nrows, int cols,
+			   const struct fymd_region *fr, size_t count);
+
+/*
+ * Render the page of @state at @cols by @rows with its areas painted and
+ * named, as SGR text in @picture, and list the areas in @areas, built in @gb:
+ * {area, kind, row, col, width, height}. Returns 0, or -1 after it reported
+ * the cause.
+ */
+int fyai_page_review(struct fyai_page *pg, fy_generic state, int cols,
+		     int rows, struct fy_generic_builder *gb,
+		     struct response_buffer *picture, fy_generic *areas);
 
 #endif

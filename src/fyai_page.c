@@ -48,6 +48,10 @@ fyai_page_action_find(const struct fyai_page_action *actions, size_t n,
 }
 struct fyai_page {
 	struct fyai_ctx *ctx;
+	/* The actions the document may name, for a review, which has no
+	 * state of a frame to take them from. */
+	const struct fyai_page_action *actions;
+	size_t nactions;
 	struct fymd_renderer *renderer;	/* UI renderer at @cols */
 	int cols;
 	int margin_cols;
@@ -661,6 +665,11 @@ struct page_doc_ctx {
 	char *why;
 	size_t why_size;
 	bool check;
+	/* A review marks each row with the area that holds it: the flag that
+	 * shows the node, else the page it comes from. */
+	bool review;
+	const char *area;
+	const char *each;	/* the list of the each the node is in, or NULL */
 };
 
 /* Pages of pages deeper than this do not transcribe. */
@@ -1051,7 +1060,26 @@ static int page_doc_case(struct page_doc_ctx *c, fy_generic kase,
 	return fy_is_valid(body) ? page_doc_nodes(c, body) : 0;
 }
 
-static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
+/* The prefix of the id of a mark that names an area in a review. */
+#define PAGE_REVIEW_MARK "review:"
+
+/* In a review, the mark of the area at the start of a row: it takes no
+ * column, so the row stands where it stands without it. */
+static int page_review_mark(struct page_doc_ctx *c, bool blank)
+{
+	char tag[FYTIM_PAGE_ID_MAX + 32];
+
+	if (!c->review || fy_str_empty(c->area))
+		return 0;
+	/* An item of an each is named in its list, and a blank row as one. */
+	snprintf(tag, sizeof(tag),
+		 "<fy-mark id=\"" PAGE_REVIEW_MARK "%s%s%s%s\"/>",
+		 c->each ? c->each : "", c->each ? "/" : "", c->area,
+		 blank ? "/blank" : "");
+	return response_buffer_append(c->out, tag);
+}
+
+static int page_doc_node_body(struct page_doc_ctx *c, fy_generic node)
 {
 	static const char *const kinds[] = {
 		"tight", "slot", "switch", "each", "drop", "page", "markup", "row",
@@ -1059,6 +1087,7 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 	};
 	fy_generic v, sub, bound, item, saved_item, cases, key;
 	bool row_start, saved_in_each;
+	const char *saved_each;
 	long long saved_index, index;
 	const char *s;
 	char tag[96];
@@ -1103,6 +1132,8 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 		saved_item = c->item;
 		saved_in_each = c->in_each;
 		saved_index = c->index;
+		saved_each = c->each;
+		c->each = fy_castp(&v, "");
 		rc = 0;
 		index = 0;
 		if (c->check) {
@@ -1126,6 +1157,7 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 		c->item = saved_item;
 		c->in_each = saved_in_each;
 		c->index = saved_index;
+		c->each = saved_each;
 		return rc;
 	case PDN_DROP:
 		snprintf(tag, sizeof(tag), "<fy-drop order=\"%lld\">\n\n",
@@ -1144,6 +1176,7 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 			return page_doc_fail(c, "the page '%s' is not in pages",
 					     fy_castp(&v, ""));
 		c->depth++;
+		c->area = fy_castp(&v, "");
 		rc = page_doc_nodes(c, sub);
 		c->depth--;
 		return rc;
@@ -1154,15 +1187,31 @@ static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
 		return *s ? response_buffer_append(c->out, s) : 0;
 	case PDN_ROW:
 		row_start = true;
-		return page_doc_items(c, fy_get(node, "row", fy_invalid),
+		return page_review_mark(c, false) ||
+		       page_doc_items(c, fy_get(node, "row", fy_invalid),
 				      &row_start) ||
 		       response_buffer_append(c->out, "\n\n");
 	case PDN_BLANK:
-		return response_buffer_append(c->out, "<fy-space/>\n\n");
+		return page_review_mark(c, true) ||
+		       response_buffer_append(c->out, "<fy-space/>\n\n");
 	default:
 		return page_doc_fail(c, "a node is none of tight, slot, switch, "
 				     "each, drop, page, markup, row or blank");
 	}
+}
+
+/* A node names the area of what it holds with its flag. */
+static int page_doc_node(struct page_doc_ctx *c, fy_generic node)
+{
+	const char *saved = c->area;
+	fy_generic flag = fy_get(node, "if", fy_invalid);
+	int rc;
+
+	if (fy_is_string(flag))
+		c->area = fy_castp(&flag, "");
+	rc = page_doc_node_body(c, node);
+	c->area = saved;
+	return rc;
 }
 
 static int page_doc_nodes(struct page_doc_ctx *c, fy_generic nodes)
@@ -1185,8 +1234,8 @@ static int page_doc_walk(struct fyai_ctx *ctx, fy_generic doc,
 			 fy_generic state,
 			 const struct fyai_page_action *actions, size_t n,
 			 struct response_buffer *out,
-			 struct fyai_page_keys *keys, bool check, char *why,
-			 size_t why_size)
+			 struct fyai_page_keys *keys, bool check, bool review,
+			 char *why, size_t why_size)
 {
 	struct page_doc_ctx c;
 
@@ -1197,6 +1246,8 @@ static int page_doc_walk(struct fyai_ctx *ctx, fy_generic doc,
 	c.why = why;
 	c.why_size = why_size;
 	c.check = check;
+	c.review = review;
+	c.area = "page";
 	if (!out || !fy_is_mapping(doc) || !fy_is_mapping(state))
 		return page_doc_fail(&c, "the document is not a mapping");
 	c.pages = fy_get(doc, "pages", fy_invalid);
@@ -1219,10 +1270,10 @@ int fyai_page_transcribe(struct fyai_ctx *ctx, fy_generic doc,
 			 fy_generic state,
 			 const struct fyai_page_action *actions, size_t n,
 			 struct response_buffer *out,
-			 struct fyai_page_keys *keys)
+			 struct fyai_page_keys *keys, bool review)
 {
 	return page_doc_walk(ctx, doc, state, actions, n, out, keys, false,
-			     NULL, 0);
+			     review, NULL, 0);
 }
 
 int fyai_page_check(fy_generic doc, const struct fyai_page_action *actions,
@@ -1232,7 +1283,7 @@ int fyai_page_check(fy_generic doc, const struct fyai_page_action *actions,
 	int rc;
 
 	rc = page_doc_walk(NULL, doc, fy_map_empty, actions, n, &scratch, NULL,
-			   true, why, why_size);
+			   true, false, why, why_size);
 	free(scratch.data);
 	return rc;
 }
@@ -1325,7 +1376,8 @@ int fyai_page_source(const struct fyai_page_state *st,
 			 "cannot allocate the page source builder");
 	rc = fyai_page_transcribe(st->ctx, doc,
 				  fyai_page_state_generic(gb, st),
-				  st->actions, st->nactions, out, st->keys);
+				  st->actions, st->nactions, out, st->keys,
+				  st->review);
 	fyai_error_check(st->ctx, !rc, err_free,
 			 "cannot transcribe the embedded page document");
 	fy_generic_builder_destroy(gb);
@@ -1366,6 +1418,8 @@ struct fyai_page *fyai_page_create(struct fyai_ctx *ctx,
 	pg = calloc(1, sizeof(*pg));
 	fyai_error_check(ctx, pg, err_out, "cannot allocate the page");
 	pg->ctx = ctx;
+	pg->actions = actions;
+	pg->nactions = n;
 	pg->last_state = fy_invalid;
 	pg->doc = page_doc();
 	fyai_error_check(ctx, fy_is_mapping(pg->doc), err_free,
@@ -2042,7 +2096,7 @@ static int page_canvas(struct fyai_page *pg, struct fytim *ft,
 			 "cannot draw the page rows into cells");
 	truecolor = fytim_truecolor(ft);
 	for (i = 0; i < count; i++) {
-		if (fr[i].kind == FYMD_REGION_ACT)
+		if (fr[i].kind != FYMD_REGION_SLOT)
 			continue;
 		if (!strcmp(fr[i].id, "tail")) {
 			rc = page_tail_draw(pg, ft, &fr[i]);
@@ -2115,6 +2169,12 @@ static int page_canvas(struct fyai_page *pg, struct fytim *ft,
 		for (i = 0; i < need; i++)
 			if (pg->cells[i].bg == FYTIM_COLOR_DEFAULT)
 				pg->cells[i].bg = ground.bg;
+	}
+	if (st->review) {
+		rc = fyai_page_review_paint(ctx->cfg, pg->cells, nrows, cols,
+					    fr, count);
+		fyai_error_check(ctx, !rc, err_out,
+				 "cannot paint the areas of the page review");
 	}
 	for (r = 0; r < nrows; r++) {
 		n = fytim_surface_put_row(pg->canvas, r,
@@ -2196,7 +2256,8 @@ int fyai_page_publish(struct fyai_page *pg, struct fytim *ft,
 			 "cannot make a builder for the page state");
 	pg->last_state = fyai_page_state_generic(pg->frame_gb, st);
 	rc = fyai_page_transcribe(ctx, pg->doc, pg->last_state, st->actions,
-				  st->nactions, &pg->source, st->keys);
+				  st->nactions, &pg->source, st->keys,
+				  st->review);
 	fyai_error_check(ctx, !rc, err_out, "cannot build the page source");
 	rc = page_renderer(pg, cols > 0 ? cols : 80);
 	fyai_error_check(ctx, !rc, err_out, "cannot prepare the page renderer");
@@ -2231,6 +2292,9 @@ int fyai_page_publish(struct fyai_page *pg, struct fytim *ft,
 				 "cannot build the rows of the page");
 	}
 	for (i = 0; i < count && n < FYTIM_PAGE_REGIONS_MAX; i++) {
+		/* A mark names an area of a review; it has no cells. */
+		if (fr[i].kind == FYMD_REGION_MARK)
+			continue;
 		/* The tail is drawn on the canvas, on its ground. */
 		if (fr[i].kind != FYMD_REGION_ACT && !strcmp(fr[i].id, "tail"))
 			continue;
@@ -2380,4 +2444,258 @@ int fyai_page_report(const struct fyai_page *pg, struct response_buffer *md)
 			return -1;
 	}
 	return response_buffer_append(md, "```\n");
+}
+
+/* The name of the area that @r shows in a review, or NULL. */
+static const char *page_review_area(const struct fymd_region *r)
+{
+	size_t plen = strlen(PAGE_REVIEW_MARK);
+
+	if (r->kind == FYMD_REGION_MARK)
+		return !strncmp(r->id, PAGE_REVIEW_MARK, plen) ?
+		       r->id + plen : NULL;
+	return r->kind == FYMD_REGION_SLOT ? r->id : NULL;
+}
+
+int fyai_page_review_paint(const struct fyai_cfg *cfg,
+			   struct fytim_cell *cells, int nrows, int cols,
+			   const struct fymd_region *fr, size_t count)
+{
+	struct fytim_cell sample, *cell;
+	char role[32], fallback[16], sgr[96], label[FYTIM_PAGE_ID_MAX + 3];
+	const char *name, *on;
+	int k = 0, r, c, row, col, w, h, n;
+	uint32_t colour;
+	size_t i;
+
+	if (!cells || nrows < 1 || cols < 1)
+		return 0;
+	for (i = 0; i < count; i++) {
+		name = page_review_area(&fr[i]);
+		if (!name)
+			continue;
+		row = (int)fr[i].row;
+		/* A row is named from its first column to the edge. */
+		col = fr[i].kind == FYMD_REGION_MARK ? 0 : fr[i].col;
+		w = fr[i].kind == FYMD_REGION_MARK ? cols : fr[i].width;
+		h = fr[i].height;
+		if (row >= nrows || col >= cols || w < 1 || h < 1)
+			continue;
+		/* The colour of the area is the next of the palette series,
+		 * else of the ANSI colours. */
+		snprintf(role, sizeof(role), "mermaid.series.%d", k % 8);
+		snprintf(fallback, sizeof(fallback), "\x1b[3%dm", 1 + k % 6);
+		on = markdown_role_on(cfg, role, fallback);
+		n = snprintf(sgr, sizeof(sgr), "%s ", on);
+		memset(&sample, 0, sizeof(sample));
+		sample.fg = sample.bg = FYTIM_COLOR_DEFAULT;
+		sample.width = 1;
+		if (n <= 0 || (size_t)n >= sizeof(sgr) ||
+		    fytim_cells_draw_text(&sample, 1, 1, 0, 0, 1, 1, sgr,
+					  (size_t)n) < 0)
+			return -1;
+		colour = sample.fg != FYTIM_COLOR_DEFAULT ? sample.fg :
+			 FYTIM_COLOR_INDEXED | (uint32_t)(1 + k % 6);
+		k++;
+		for (r = row; r < row + h && r < nrows; r++)
+			for (c = col; c < col + w && c < cols; c++)
+				cells[(size_t)r * cols + c].bg = colour;
+		/* The name stands reversed on the colour: at the right edge of
+		 * a row, which holds its text at the left, and at the top left
+		 * of a slot. */
+		n = snprintf(label, sizeof(label), " %s ", name);
+		if (n > w)
+			n = w;
+		if (fr[i].kind == FYMD_REGION_MARK)
+			col = col + w - n;
+		for (c = 0; c < n && col + c < cols; c++) {
+			cell = &cells[(size_t)row * cols + col + c];
+			memset(cell->chars, 0, sizeof(cell->chars));
+			cell->chars[0] = (unsigned char)label[c];
+			cell->width = 1;
+			cell->fg = colour;
+			cell->bg = FYTIM_COLOR_DEFAULT;
+			cell->attrs = FYTIM_ATTR_BOLD | FYTIM_ATTR_REVERSE;
+			cell->link = 0;
+		}
+	}
+	return 0;
+}
+
+/* The SGR parameters of @colour as a foreground (@base 30) or a background
+ * (@base 40). */
+static int page_colour_sgr(struct response_buffer *out, uint32_t colour,
+			   int base)
+{
+	char buf[32];
+	uint32_t n;
+
+	if (colour == FYTIM_COLOR_DEFAULT || colour == FYTIM_COLOR_REVERSED)
+		return 0;
+	if (colour & FYTIM_COLOR_INDEXED) {
+		n = colour & 0xff;
+		if (n < 8)
+			snprintf(buf, sizeof(buf), ";%u", base + n);
+		else if (n < 16)
+			snprintf(buf, sizeof(buf), ";%u", base + 60 + n - 8);
+		else
+			snprintf(buf, sizeof(buf), ";%d;5;%u", base + 8, n);
+	} else {
+		snprintf(buf, sizeof(buf), ";%d;2;%u;%u;%u", base + 8,
+			 (colour >> 16) & 0xff, (colour >> 8) & 0xff,
+			 colour & 0xff);
+	}
+	return response_buffer_append(out, buf);
+}
+
+/* @cells as rows of text, with SGR when @colour is set. */
+static int page_cells_sgr(const struct fytim_cell *cells, int nrows,
+			  int cols, bool colour, struct response_buffer *out)
+{
+	static const struct {
+		uint32_t attr;
+		const char *sgr;
+	} attrs[] = {
+		{ FYTIM_ATTR_BOLD, ";1" }, { FYTIM_ATTR_DIM, ";2" },
+		{ FYTIM_ATTR_ITALIC, ";3" }, { FYTIM_ATTR_UNDERLINE, ";4" },
+		{ FYTIM_ATTR_REVERSE, ";7" }, { FYTIM_ATTR_STRIKE, ";9" },
+	};
+	const struct fytim_cell *cell, *prev;
+	char utf8[8];
+	uint32_t cp;
+	size_t a, j;
+	int r, c, rc;
+
+	for (r = 0; r < nrows; r++) {
+		prev = NULL;
+		for (c = 0; c < cols; c++) {
+			cell = &cells[(size_t)r * cols + c];
+			/* The cell after a wide glyph is its right half. */
+			if (c > 0 && cell[-1].width == 2 && !cell->chars[0])
+				continue;
+			if (colour && (!prev || prev->fg != cell->fg ||
+				       prev->bg != cell->bg ||
+				       prev->attrs != cell->attrs)) {
+				rc = response_buffer_append(out, "\x1b[0");
+				for (a = 0; !rc && a < sizeof(attrs) /
+					    sizeof(attrs[0]); a++)
+					if (cell->attrs & attrs[a].attr)
+						rc = response_buffer_append(
+							out, attrs[a].sgr);
+				rc = rc || page_colour_sgr(out, cell->fg, 30) ||
+				     page_colour_sgr(out, cell->bg, 40) ||
+				     response_buffer_append(out, "m");
+				if (rc)
+					return -1;
+			}
+			prev = cell;
+			if (!cell->chars[0] &&
+			    response_buffer_append(out, " "))
+				return -1;
+			for (j = 0; j < FYTIM_CELL_CHARS && cell->chars[j];
+			     j++) {
+				cp = cell->chars[j];
+				if (cp < 0x80) {
+					utf8[0] = (char)cp;
+					utf8[1] = '\0';
+				} else if (cp < 0x800) {
+					utf8[0] = (char)(0xc0 | (cp >> 6));
+					utf8[1] = (char)(0x80 | (cp & 0x3f));
+					utf8[2] = '\0';
+				} else if (cp < 0x10000) {
+					utf8[0] = (char)(0xe0 | (cp >> 12));
+					utf8[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+					utf8[2] = (char)(0x80 | (cp & 0x3f));
+					utf8[3] = '\0';
+				} else {
+					utf8[0] = (char)(0xf0 | (cp >> 18));
+					utf8[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+					utf8[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
+					utf8[3] = (char)(0x80 | (cp & 0x3f));
+					utf8[4] = '\0';
+				}
+				if (response_buffer_append(out, utf8))
+					return -1;
+			}
+		}
+		if (response_buffer_append(out, colour ? "\x1b[0m\n" : "\n"))
+			return -1;
+	}
+	return 0;
+}
+
+int fyai_page_review(struct fyai_page *pg, fy_generic state, int cols,
+		     int rows, struct fy_generic_builder *gb,
+		     struct response_buffer *picture, fy_generic *areas)
+{
+	struct fyai_ctx *ctx;
+	struct response_buffer source = {0};
+	struct fytim_cell *cells = NULL;
+	const struct fymd_region *fr;
+	const char *name;
+	size_t len = 0, count = 0, i, need;
+	char *out = NULL;
+	int rc, nrows;
+
+	if (!pg || !gb || !picture || !areas || cols < 1 || rows < 1)
+		return -1;
+	ctx = pg->ctx;
+	*areas = fy_seq_empty;
+	rc = fyai_page_transcribe(ctx, pg->doc, state, pg->actions,
+				  pg->nactions, &source, NULL, true);
+	fyai_error_check(ctx, !rc, err_out,
+			 "cannot build the page source for the review");
+	rc = page_renderer(pg, cols);
+	fyai_error_check(ctx, !rc, err_out, "cannot prepare the page renderer");
+	rc = fymd_renderer_set_height(pg->renderer, rows);
+	fyai_error_check(ctx, !rc, err_out,
+			 "cannot give the page a height of %d rows", rows);
+	rc = fymd_render_with_margins(pg->renderer, source.data, source.len,
+				      page_no_margin, NULL, &out, &len);
+	fyai_error_check(ctx, !rc, err_out, "cannot render the page");
+	rc = fymd_renderer_get_regions(pg->renderer, &fr, &count);
+	fyai_error_check(ctx, !rc, err_out, "cannot read the page regions");
+	nrows = page_count_rows(out, len);
+	need = (size_t)(nrows > 0 ? nrows : 1) * (size_t)cols;
+	cells = calloc(need, sizeof(*cells));
+	fyai_error_check(ctx, cells, err_out,
+			 "cannot allocate the cells of the page review");
+	for (i = 0; i < need; i++) {
+		cells[i].fg = cells[i].bg = FYTIM_COLOR_DEFAULT;
+		cells[i].width = 1;
+	}
+	rc = nrows > 0 ? fytim_cells_draw_text(cells, nrows, cols, 0, 0, cols,
+					       nrows, out, len) : 0;
+	fyai_error_check(ctx, rc >= 0, err_out,
+			 "cannot draw the page rows into cells");
+	rc = fyai_page_review_paint(ctx->cfg, cells, nrows, cols, fr, count);
+	fyai_error_check(ctx, !rc, err_out,
+			 "cannot paint the areas of the page review");
+	rc = page_cells_sgr(cells, nrows, cols,
+			    markdown_color_enabled(ctx->cfg->color), picture);
+	fyai_error_check(ctx, !rc, err_out,
+			 "cannot write the picture of the page review");
+	for (i = 0; i < count; i++) {
+		name = page_review_area(&fr[i]);
+		if (!name)
+			continue;
+		*areas = fy_append(gb, *areas, fy_mapping(gb,
+			"area", fy_value(gb, name),
+			"kind", fr[i].kind == FYMD_REGION_MARK ? "row" : "slot",
+			"row", (long long)fr[i].row,
+			"col", fr[i].kind == FYMD_REGION_MARK ? 0 : fr[i].col,
+			"width", fr[i].kind == FYMD_REGION_MARK ? cols :
+				 fr[i].width,
+			"height", fr[i].height));
+	}
+	free(cells);
+	fymd_free(out);
+	free(source.data);
+	return 0;
+
+err_out:
+	free(cells);
+	fymd_free(out);
+	free(source.data);
+	return -1;
 }

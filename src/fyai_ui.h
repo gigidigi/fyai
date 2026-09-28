@@ -83,6 +83,15 @@ bool fyai_ui_ask_available(struct fyai_ctx *ctx);
  */
 int fyai_ui_page_report(struct fyai_ctx *ctx);
 /*
+ * Turn the review of the live page "on" or "off", or over when @how is NULL:
+ * each area of the screen takes a colour and its name. *@on says the result.
+ * Returns 0, or -1 when the page renderer does not draw the screen.
+ */
+int fyai_ui_page_review(struct fyai_ctx *ctx, const char *how, bool *on);
+/* The actions of the page of the session, which a page document may name. */
+struct fyai_page_action;
+void fyai_ui_page_actions(const struct fyai_page_action **actions, size_t *n);
+/*
  * Put @question to the user in the input area, after the questions before it.
  * @from names the sub-agent that asks, or is NULL, and the @n @options are
  * offered. @done is called once, from the event loop, with @user. Returns 0,

@@ -1995,12 +1995,77 @@ commands:
           x-fyai-meta: NAME
 
   - command: page
-    title: show the page of the screen and its state
-    description: Show the page document in use, and the state, source, and regions of the last frame.
-    surfaces: [session]
-    handler: page
-    view: true
-    while_busy: run
+    title: show and review the page of the screen
+    description: |
+      Show the page that draws the screen, or paint and name its areas to
+      see which part of the page document draws which rows.
+    surfaces: [cli, session]
+    default: {session: show}
+    commands:
+      - command: show
+        title: show the page of the screen and its state
+        description: Show the page document in use, and the state, source, and regions of the last frame.
+        surfaces: [session]
+        handler: page
+        view: true
+        while_busy: run
+      - command: review
+        title: paint and name the areas of the screen
+        description: |
+          Give each area of the live page a colour and write its name at its
+          top left: each slot, and each row by the flag that shows it or the
+          page it comes from. Without ON or OFF the review is turned over.
+        surfaces: [session]
+        handler: page_review
+        while_busy: run
+        render:
+          message: "page review: {review}"
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            how:
+              type: string
+              enum: ["on", "off"]
+              description: turn the review on or off
+              x-fyai-positional: 0
+              x-fyai-meta: ON|OFF
+      - command: review
+        title: draw a sample page with its areas painted and named
+        description: |
+          Render the page document with the state SAMPLE, give each area a
+          colour and its name, and list the areas. The slots are empty: a
+          sample has no transcript, tiles, or prompt to draw in them.
+        surfaces: [cli]
+        handler: page_review_sample
+        flags: [no-storage]
+        render:
+          table:
+            title: Areas of the page
+            keys: [area, kind, row, col, width, height]
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            sample:
+              type: string
+              enum: [prompt, inline, question, popup]
+              default: prompt
+              description: the state of the page
+              x-fyai-positional: 0
+              x-fyai-meta: SAMPLE
+            width:
+              type: integer
+              minimum: 20
+              default: 80
+              description: the columns of the page
+              x-fyai-meta: N
+            height:
+              type: integer
+              minimum: 5
+              default: 24
+              description: the rows of the page
+              x-fyai-meta: N
 
   - command: sessions
     title: list the live shell sessions and sub-agents
