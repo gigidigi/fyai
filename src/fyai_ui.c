@@ -141,6 +141,7 @@ static const char *ui_control_sgr(struct fyai_ui *ui);
 static const char *ui_edge(struct fyai_ui *ui, char *buf, size_t size);
 static void ui_popup_style(struct fyai_ui *ui);
 static void ui_completion_configure(struct fyai_ctx *ctx);
+static bool ui_interrupt(struct fyai_ctx *ctx, bool quit);
 
 /* Bands are tiles in the shared work pane. */
 static struct fytim_workband *ui_band_open(struct fyai_ui *ui,
@@ -1784,7 +1785,7 @@ static enum fyai_event_action ui_service(struct fyai_ui *ui)
 			if (ui->note_nlines && !ui->busy)
 				ui_note_clear(ui);
 			else
-				(void)fyai_ui_interrupt(ui->ctx);
+				(void)ui_interrupt(ui->ctx, false);
 			break;
 		case FYTIM_EVENT_QUIT:
 			ui->quit = true;
@@ -2915,7 +2916,12 @@ void fyai_ui_set_busy(struct fyai_ctx *ctx, bool busy)
 }
 
 /* Process Escape or SIGINT. */
-bool fyai_ui_interrupt(struct fyai_ctx *ctx)
+/*
+ * @quit: an idle session with an empty input ends. ^C does that; Escape does
+ * not, because it is too easy to press by mistake, and at an idle empty
+ * input it does nothing.
+ */
+static bool ui_interrupt(struct fyai_ctx *ctx, bool quit)
 {
 	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
 	const char *input;
@@ -2938,15 +2944,21 @@ bool fyai_ui_interrupt(struct fyai_ctx *ctx)
 	if (!ui->busy && !ui->head && !ui->editor_request) {
 		if (input && *input)
 			(void)fytim_set_input(ui->ft, NULL);
-		else {
+		else if (quit) {
 			ui->quit = true;
 			ui->ready = true;
-		}
+		} else
+			return false;
 	}
 	ctx->interrupt_pending = true;
 	if (ui->busy)
 		ui_recall_pending(ui);
 	return false;
+}
+
+bool fyai_ui_interrupt(struct fyai_ctx *ctx)
+{
+	return ui_interrupt(ctx, true);
 }
 
 void fyai_ui_signal(struct fyai_ctx *ctx, int signo)
