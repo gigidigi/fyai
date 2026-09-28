@@ -621,6 +621,8 @@ display makes them again.
 - A delegated sub-agent does not repaint a transcript. Its screen is the result
   of the call, and the conversation behind it is not something anyone asked to
   see there.
+- A delegated sub-agent draws no header row: the head of its tile in the
+  parent names it already, and its screen is the work.
 - The size is read in the pump, and a turn waits on the provider rather than on
   the terminal, so an interactive session keeps a SIGWINCH source to wake the
   display for it.
