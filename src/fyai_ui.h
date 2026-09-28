@@ -88,6 +88,11 @@ int fyai_ui_page_report(struct fyai_ctx *ctx);
  * Returns 0, or -1 when the page renderer does not draw the screen.
  */
 int fyai_ui_page_review(struct fyai_ctx *ctx, const char *how, bool *on);
+/* The layout of the page of the last frame, or "" without a page. */
+const char *fyai_ui_page_layout(struct fyai_ctx *ctx);
+/* The page of the session, or NULL. Borrowed. */
+struct fyai_page;
+const struct fyai_page *fyai_ui_page(struct fyai_ctx *ctx);
 /* The actions of the page of the session, which a page document may name. */
 struct fyai_page_action;
 void fyai_ui_page_actions(const struct fyai_page_action **actions, size_t *n);

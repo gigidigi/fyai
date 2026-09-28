@@ -286,6 +286,14 @@ struct fyai_page_layout {
  */
 int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
 		     bool fullscreen, struct fyai_page_layout *lay);
+/*
+ * Call @fn with the name of each layout of the document of @pg, or of the
+ * embedded document when @pg is NULL. The name is borrowed for the call.
+ * Returns the number of names.
+ */
+size_t fyai_page_layout_names(const struct fyai_page *pg,
+			      void (*fn)(void *arg, const char *name),
+			      void *arg);
 
 /*
  * Make the page. Its document is the file of display/page when that file

@@ -94,9 +94,11 @@ struct fyai_ui {
 	const char *status_hint;	/* the focus hint row, or NULL */
 	struct fyai_page *page;		/* the page renderer, or NULL */
 	bool page_review;		/* paint and name the areas of the page */
-	/* The render width a side layout set, or 0. Only a side layout owns
-	 * cfg->render_width, and only it puts it back. */
-	int side_width;
+	/* The layout of the last frame, for {layout} of the header. */
+	char layout[32];
+	/* The columns of the transcript beside a side column of tiles, or 0.
+	 * While it is set, it is the render width in place of @render_cols. */
+	int side_cols;
 	struct response_buffer pane_grid;	/* the pane source of the page */
 	struct fyai_page_keys page_keys;	/* the keys the page has bound */
 	struct ui_question *questions;	/* first the one the input area shows */
@@ -1016,7 +1018,7 @@ static void ui_apply_resize(struct fyai_ui *ui, int rows, int width)
 
 	cols = width > 1 ? width - 1 : 0;
 
-	ctx->cfg->render_width = cols;
+	ctx->cfg->render_width = ui->side_cols ? ui->side_cols : cols;
 	/* Record the initial size without requesting reflow. */
 	if (!ui->render_cols ||
 	    (rows == ui->render_rows && cols == ui->render_cols))
@@ -1070,16 +1072,22 @@ static bool ui_tile_ground(const struct fyai_ctx *ctx, bool focused,
 }
 
 /*
- * Set the render width of a side layout to @width, or give it back with 0.
- * The width is written only when a side layout starts, changes or ends, so
- * a width that another component holds for a moment stays its own.
+ * Make conversation content for a transcript of @cols beside a side column,
+ * or for the whole terminal with 0. The rows already made are made again at
+ * the new width, as a resize makes them: a column that opens beside the
+ * transcript must not clip what it holds. The width is written only when it
+ * changes, so a width that another component holds for a moment stays its
+ * own.
  */
-static void ui_side_width(struct fyai_ui *ui, int width)
+static void ui_side_width(struct fyai_ui *ui, int cols)
 {
-	if (width == ui->side_width)
+	if (cols == ui->side_cols)
 		return;
-	ui->ctx->cfg->render_width = width;
-	ui->side_width = width;
+	ui->side_cols = cols;
+	ui->ctx->cfg->render_width = cols ? cols : ui->render_cols;
+	ui->reflow_pending = true;
+	ui->repaint_pending = true;
+	ui->frame_pending = true;
 }
 
 /*
@@ -1373,6 +1381,20 @@ static void ui_page_actions_get(const struct fyai_page_action **actions,
 	*n = ui_page_nactions;
 }
 
+const char *fyai_ui_page_layout(struct fyai_ctx *ctx)
+{
+	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+
+	return ui && ui->page ? ui->layout : "";
+}
+
+const struct fyai_page *fyai_ui_page(struct fyai_ctx *ctx)
+{
+	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+
+	return ui ? ui->page : NULL;
+}
+
 void fyai_ui_page_actions(const struct fyai_page_action **actions, size_t *n)
 {
 	ui_page_actions_get(actions, n);
@@ -1465,6 +1487,17 @@ static void ui_page_update(struct fyai_ui *ui)
 	rc = fytim_size(ui->ft, &cols, &rows);
 	fyai_error_check(ctx, rc == FYTIM_OK, err_page,
 			 "cannot read the terminal size for the page");
+	/* The layout of the document is chosen before the fit: it says
+	 * whether the pane takes rows of the page or a column beside it. */
+	rc = fyai_page_layout(ui->page, cols, rows, ui->fullscreen, &layout);
+	fyai_error_check(ctx, !rc, err_page,
+			 "the page document has a layout that is not valid");
+	/* The header names the layout. It is made again before this frame
+	 * reads it: the rows it replaces are the header of the frame. */
+	if (strcmp(ui->layout, layout.name)) {
+		snprintf(ui->layout, sizeof(ui->layout), "%s", layout.name);
+		fyai_session_banner_update(ctx);
+	}
 	st.header = ui->status_top_source;
 	st.header_row = ui->status_top;
 	st.header_right = ui->panel;
@@ -1511,16 +1544,12 @@ static void ui_page_update(struct fyai_ui *ui)
 	fyai_error_check(ctx, n >= 0, err_page,
 			 "cannot measure the work pane separator");
 	sep_cols = n;
-	/* The layout of the document is chosen before the fit: it says
-	 * whether the pane takes rows of the page or a column beside it. */
-	rc = fyai_page_layout(ui->page, cols, rows, ui->fullscreen, &layout);
-	fyai_error_check(ctx, !rc, err_page,
-			 "the page document has a layout that is not valid");
 	st.layout = layout.name;
 	side = layout.side && pane && !fyai_workpane_hidden(ctx->workpane);
 	st.pane_side = side;
-	/* Conversation content is made for the column it stands in. */
-	ui_side_width(ui, layout.side ? cols - layout.pane_cols - sep_cols : 0);
+	/* Conversation content is made for the column it stands in, while
+	 * the column of tiles stands beside it. */
+	ui_side_width(ui, side ? cols - layout.pane_cols - sep_cols - 1 : 0);
 	if (!pane || fyai_workpane_hidden(ctx->workpane) || side) {
 		st.pane_rows = 0;
 	} else {
@@ -2152,7 +2181,7 @@ void fyai_ui_config_reassert(struct fyai_ctx *ctx)
 	ui->saved_color = ctx->cfg->color;
 	if (!ctx->cfg->color || !strcmp(ctx->cfg->color, "auto"))
 		ctx->cfg->color = "on";
-	ctx->cfg->render_width = ui->render_cols;
+	ctx->cfg->render_width = ui->side_cols ? ui->side_cols : ui->render_cols;
 }
 
 /*

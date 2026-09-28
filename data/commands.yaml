@@ -2282,6 +2282,31 @@ commands:
     render:
       message: "{setting}: {value}"
 
+  - command: layout
+    title: the layout of the page, or auto
+    description: |
+      With no value, show the layout of the page. With a value, change it:
+      a layout of the page document by name, or auto for the first that the
+      terminal is large enough for. `display/page_layout` is the key; a
+      session-scoped key changes for this session only, any other key is
+      stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/page_layout}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
   - command: theme
     title: the Markdown theme, name[:auto|dark|light]
     description: |

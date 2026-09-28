@@ -94,6 +94,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 /* Work-pane defaults. */
 #define DEFAULT_WORK_LAYOUT "auto"
 #define DEFAULT_WORK_PANELS "auto"
+#define DEFAULT_PAGE_LAYOUT "auto"
 #define DEFAULT_WORK_POSITION "above-prompt"
 /* Where an editor runs: a tile of the work pane, or the whole terminal. */
 #define DEFAULT_EDITOR_MODE "pane"
@@ -295,6 +296,9 @@ struct fyai_cfg {
 	 * document names, on whatever the size, off never. A panel size of 0
 	 * keeps the size of the document. */
 	const char *work_panels;
+	/* The layout of the page document by name, or auto for the first that
+	 * the terminal is large enough for. */
+	const char *page_layout;
 	int work_panel_cols;
 	int work_panel_rows;
 	int work_min_tile_cols;		/* narrowest tile the auto grid makes */

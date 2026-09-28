@@ -284,6 +284,8 @@ display:
   work_layout: auto
   work_columns: 0
   work_min_tile_cols: 40
+  # The layout of the page document by name, or auto to choose it by size.
+  page_layout: auto
   # A column of panels beside the transcript, from a side layout of the page
   # document: auto at its size, on at any size, off never. A size of 0 keeps
   # the size of the document.

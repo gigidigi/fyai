@@ -26,7 +26,9 @@
 #include "fyai_catalog.h"
 #include "fyai_config.h"
 #include "fyai_markdown.h"
+#include "fyai_page.h"
 #include "fyai_sink.h"
+#include "fyai_ui.h"
 #include "utils.h"
 
 #define FYAI_MODULE FYAIEM_UNKNOWN
@@ -517,6 +519,19 @@ static void kind_setting_value(struct complete_req *r)
 	config_values(r, node, "");
 }
 
+static void page_layout_cand(void *arg, const char *name)
+{
+	cand(arg, name, "a layout of the page document");
+}
+
+/* auto, then the layouts of the page document in use. */
+static void kind_page_layout(struct complete_req *r)
+{
+	cand(r, "auto", "the first layout the terminal is large enough for");
+	(void)fyai_page_layout_names(r->ctx ? fyai_ui_page(r->ctx) : NULL,
+				     page_layout_cand, r);
+}
+
 static void help_topic_cand(void *arg, const char *value, const char *desc)
 {
 	cand(arg, value, desc);
@@ -549,6 +564,7 @@ static const struct {
 	{ "catalog-agent",	kind_catalog_agent },
 	{ "mcp-server",		kind_mcp_server },
 	{ "setting-value",	kind_setting_value },
+	{ "page-layout",	kind_page_layout },
 };
 
 bool fyai_cmd_kind_known(const char *name)

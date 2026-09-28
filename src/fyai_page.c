@@ -1519,13 +1519,52 @@ err_out:
 	return NULL;
 }
 
+/* Take the layout @l when its name is @want and it can stand here. */
+static bool page_layout_take(const struct fyai_cfg *cfg, fy_generic l,
+			     const char *want, int cols, bool fullscreen,
+			     struct fyai_page_layout *lay)
+{
+	fy_generic pane = fy_get(l, "pane", fy_invalid);
+	bool side = !strcmp(fy_get(pane, "place", "band"), "side");
+
+	if (strcmp(fy_get(l, "name", ""), want) || (side && !fullscreen))
+		return false;
+	snprintf(lay->name, sizeof(lay->name), "%s", want);
+	lay->side = side;
+	lay->pane_cols = cfg->work_panel_cols > 0 ? cfg->work_panel_cols :
+			 (int)fy_get(pane, "cols", 0LL);
+	lay->tile_rows = cfg->work_panel_rows > 0 ? cfg->work_panel_rows :
+			 (int)fy_get(pane, "tile_rows", 0LL);
+	return !side || (lay->pane_cols > 0 &&
+			 lay->pane_cols <= cols - FYAI_PAGE_SIDE_MIN_COLS);
+}
+
+size_t fyai_page_layout_names(const struct fyai_page *pg,
+			      void (*fn)(void *arg, const char *name),
+			      void *arg)
+{
+	fy_generic layouts, l;
+	const char *name;
+	size_t n = 0;
+
+	layouts = fy_get(pg ? pg->doc : page_doc(), "layouts", fy_invalid);
+	fy_foreach(l, layouts) {
+		name = fy_get(l, "name", "");
+		if (*name) {
+			fn(arg, name);
+			n++;
+		}
+	}
+	return n;
+}
+
 int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
 		     bool fullscreen, struct fyai_page_layout *lay)
 {
 	const struct fyai_cfg *cfg = pg && pg->ctx ? pg->ctx->cfg : NULL;
 	const char *mode = cfg && cfg->work_panels ? cfg->work_panels : "auto";
 	fy_generic layouts, l, pane, name;
-	const char *place;
+	const char *place, *want;
 	bool side;
 
 	memset(lay, 0, sizeof(*lay));
@@ -1533,6 +1572,13 @@ int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
 	layouts = pg ? fy_get(pg->doc, "layouts", fy_invalid) : fy_invalid;
 	if (!fy_is_sequence(layouts))
 		return 0;
+	/* A layout named by display/page_layout is taken at any size. */
+	want = cfg && !fy_str_empty(cfg->page_layout) &&
+	       strcmp(cfg->page_layout, "auto") ? cfg->page_layout : NULL;
+	fy_foreach(l, layouts) {
+		if (want && page_layout_take(cfg, l, want, cols, fullscreen, lay))
+			return 0;
+	}
 	fy_foreach(l, layouts) {
 		pane = fy_get(l, "pane", fy_invalid);
 		place = fy_get(pane, "place", "band");

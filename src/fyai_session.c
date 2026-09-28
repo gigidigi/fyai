@@ -1215,8 +1215,8 @@ static void session_token_count(char *buf, size_t size, long long tokens)
 void fyai_session_banner_update(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
-	struct fyai_tmpl_var vars[13], top_vars[13];
-	char *coloured[13];
+	struct fyai_tmpl_var vars[14], top_vars[14];
+	char *coloured[14];
 	const struct fyai_tmpl_var *header_vars;
 	bool colour_ok;
 	fy_generic model_entry;
@@ -1346,6 +1346,7 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	vars[10] = (struct fyai_tmpl_var){ "branch", branch };
 	vars[11] = (struct fyai_tmpl_var){ "cwd", directory };
 	vars[12] = (struct fyai_tmpl_var){ "location", location };
+	vars[13] = (struct fyai_tmpl_var){ "layout", fyai_ui_page_layout(ctx) };
 	if (fyai_agents_attached(ctx)) {
 		vars[1].val = "agent";
 		vars[2].val = fyai_agents_state(ctx, fyai_agents_attached(ctx));
@@ -1380,6 +1381,14 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 		fyai_warning(ctx, "cannot colour the prompt header");
 	}
 	top_vars[12] = (struct fyai_tmpl_var){ "location", coloured[12] };
+	if (colour_ok) {
+		coloured[13] = session_series_text(cfg, 12, vars[13].val, true);
+		colour_ok = coloured[13] != NULL;
+		if (!colour_ok)
+			fyai_warning(ctx, "cannot colour the layout of the "
+				     "prompt header");
+	}
+	top_vars[13] = (struct fyai_tmpl_var){ "layout", coloured[13] };
 	header_vars = colour_ok ? top_vars : vars;
 
 	tmpl = cfg->prompt_bottom && *cfg->prompt_bottom ?
@@ -1396,7 +1405,7 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	free(top_md);
 	free(top);
 	free(bottom);
-	for (i = 0; i < 13; i++)
+	for (i = 0; i < 14; i++)
 		free(coloured[i]);
 	free(location);
 	free(directory);
