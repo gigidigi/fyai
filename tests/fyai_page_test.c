@@ -508,7 +508,7 @@ static int page_chrome_keeps_the_margins_run(void)
 	st.status_off = "\x1b[22m";
 	rc = fyai_page_source(&st, &out);
 	FYAI_TCHECK(!rc);
-	FYAI_TCHECK(strstr(out.data, "*&#32;&#32;\x1b[2mSTATUSMARK\x1b[22m"));
+	FYAI_TCHECK(strstr(out.data, "*<fy-space n=\"2\"/>\x1b[2mSTATUSMARK\x1b[22m"));
 	free(out.data);
 
 	/* no activity: a blank gutter of the same width */
@@ -516,7 +516,7 @@ static int page_chrome_keeps_the_margins_run(void)
 	st.activity = NULL;
 	rc = fyai_page_source(&st, &out);
 	FYAI_TCHECK(!rc);
-	FYAI_TCHECK(strstr(out.data, "&#32;&#32;&#32;\x1b[2mSTATUSMARK"));
+	FYAI_TCHECK(strstr(out.data, "<fy-space n=\"3\"/>\x1b[2mSTATUSMARK"));
 	free(out.data);
 	return 0;
 }
