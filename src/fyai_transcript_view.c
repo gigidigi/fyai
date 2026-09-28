@@ -822,6 +822,18 @@ static unsigned view_tail_blank_rows(const struct fyai_transcript_view *v)
 	return rows;
 }
 
+void fyai_transcript_view_invalidate(struct fyai_transcript_view *v)
+{
+	size_t i;
+
+	if (!v)
+		return;
+	/* No render is at a width of -1, so every exchange is made again. */
+	for (i = 0; i < v->nexchanges; i++)
+		v->exchange[i].width = -1;
+	v->rendered = false;
+}
+
 int fyai_transcript_view_refresh(struct fyai_ctx *ctx,
 				 struct fyai_transcript_view *v, int width,
 				 int height)

@@ -124,6 +124,13 @@ char *fyai_transcript_view_copy(struct fyai_transcript_view *v, int height,
 				int row0, int col0, int row1, int col1);
 
 /*
+ * Forget the rows of every exchange, for a change that the width does not
+ * say, such as the measured width of a glyph: the next refresh makes them
+ * again.
+ */
+void fyai_transcript_view_invalidate(struct fyai_transcript_view *v);
+
+/*
  * Bring the stored rows up to the conversation of @ctx at @width columns, for
  * a region of @height rows: an exchange that was stored since, or that
  * changed, is measured, and the exchanges the region shows are rendered; the

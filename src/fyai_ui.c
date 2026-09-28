@@ -1071,6 +1071,13 @@ static bool ui_tile_ground(const struct fyai_ctx *ctx, bool focused,
 	return true;
 }
 
+/* The columns the terminal gives an emoji base that U+FE0F selects, as the
+ * terminal library measured it, or 0 before. */
+static int ui_glyph_width(unsigned int base)
+{
+	return fytim_glyph_width(base);
+}
+
 /*
  * Make conversation content for a transcript of @cols beside a side column,
  * or for the whole terminal with 0. The rows already made are made again at
@@ -1921,6 +1928,14 @@ static enum fyai_event_action ui_service(struct fyai_ui *ui)
 			/* Ctrl-L requests a clean repaint. */
 			ui->repaint_pending = true;
 			break;
+		case FYTIM_EVENT_GLYPH_WIDTH:
+			/* A glyph is narrower than the rows made with it: make
+			 * them again, as a change of width does. */
+			fyai_transcript_view_invalidate(ui->view);
+			ui->reflow_pending = true;
+			ui->repaint_pending = true;
+			ui->frame_pending = true;
+			break;
 		case FYTIM_EVENT_SURFACE_KEYS:
 			/* The keys belong to a program, not to the prompt. */
 			if (ui->keys_fn)
@@ -2130,6 +2145,8 @@ int fyai_ui_open(struct fyai_ctx *ctx)
 	ui->ft = fytim_create(&cfg);
 	if (!ui->ft) goto fail;
 	ui_adopt_probe(ctx, ui, term);
+	/* Markdown takes the widths the terminal library measures. */
+	fymd_set_glyph_width(ui_glyph_width);
 	/* A blank row stands above the header, as it does on the page. */
 	(void)fytim_set_header_rows(ui->ft, 2);
 	ui->tty_fd = ttyout;
@@ -2267,6 +2284,7 @@ void fyai_ui_close(struct fyai_ctx *ctx)
 		q->done(q->user, NULL);
 		ui_question_free(q);
 	}
+	fymd_set_glyph_width(NULL);
 	fytim_destroy(ui->ft);
 	fymd_renderer_destroy(ui->chrome_renderer);
 	if (ui->tty_fd >= 0)
