@@ -1,9 +1,9 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # A bang command is not a part of the conversation. Its line is not drawn as
-# a card, and when its program ends the tile keeps the output, with the keys
-# back at the prompt, until the user dismisses it: nothing of it reaches the
-# transcript or the arena.
+# a card, and when its program ends the tile keeps the output, its buttons and
+# the keys, and the status says that Escape closes it: nothing of it reaches
+# the transcript or the arena.
 set -eu
 . "$(dirname "$0")/../harness.sh"
 
@@ -13,12 +13,12 @@ FYAI_TRACE="$TEST_DIR/trace.log" \
 FYAI_PTY_ROWS=30 FYAI_PTY_COLS=100 \
 FYAI_PTY_INPUT="!printf BANG%sOUT X" \
 FYAI_PTY_NEEDLE="bang-1" FYAI_PTY_TIMEOUT=20 \
-FYAI_PTY_AFTER="wait-screen:BANGXOUT|wait-gone:Ctrl-]|wait-screen:BANGXOUT|send:/kill bang-1|wait-gone:BANGXOUT" \
+FYAI_PTY_AFTER="wait-screen:BANGXOUT|wait-screen:Esc closes|wait-screen:×|raw:1b|wait-gone:BANGXOUT" \
 FYAI_PTY_AFTER_PAUSE=0 FYAI_PTY_AFTER_TIMEOUT=10 \
 "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/pty.out" \
     "$FYAI_BIN" -k test-key --theme dark \
     --set display/markdown=true --set display/renderer=page \
-    -m mock-model -i || driver=$?
+    --set display/work_controls=full -m mock-model -i || driver=$?
 if [ "$driver" -ne 0 ]; then
     tail -c 2000 "$TEST_DIR/pty.out" >&2
     fail "the bang tile did not keep its output and go when dismissed"

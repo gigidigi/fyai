@@ -4,7 +4,7 @@
 # it starts: its terminal is opened at the size of its tile, which the layout
 # gives before the program starts, so what it prints fits the tile. The
 # program prints SIZEDONE in two parts, so only its output holds the word, and
-# the case waits for the keys to be back at the prompt before it leaves.
+# the case closes the finished tile with Escape before it leaves.
 set -eu
 . "$(dirname "$0")/../harness.sh"
 
@@ -14,7 +14,7 @@ FYAI_TRACE="$TEST_DIR/trace.log" \
 FYAI_PTY_ROWS=30 FYAI_PTY_COLS=100 \
 FYAI_PTY_INPUT="!sh -c 'set -- \$(stty size); printf SIZE%sX%sEND \$1 \$2; printf %s%s SIZE DONE'" \
 FYAI_PTY_NEEDLE="bang-1" FYAI_PTY_TIMEOUT=20 \
-FYAI_PTY_AFTER="wait-screen:SIZEDONE|wait-gone:Ctrl-]" \
+FYAI_PTY_AFTER="wait-screen:SIZEDONE|wait-screen:Esc closes|raw:1b|wait-gone:bang-1" \
 FYAI_PTY_AFTER_PAUSE=0 FYAI_PTY_AFTER_TIMEOUT=10 \
 "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/pty.out" \
     "$FYAI_BIN" -k test-key --theme dark \
