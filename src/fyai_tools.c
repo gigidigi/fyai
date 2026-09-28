@@ -3176,15 +3176,16 @@ void fyai_tools_display_closed(struct fyai_ctx *ctx)
 /* End and release every session owned by this invocation. */
 void fyai_shell_sessions_release(struct fyai_ctx *ctx, bool force)
 {
-	struct fyai_shell_session *sess, *next;
+	struct fyai_shell_session *sess;
 
 	if (!ctx)
 		return;
-	for (sess = ctx->shell_sessions; sess; sess = next) {
-		next = sess->next;
+	/* Each session leaves the list before it goes, so what its release
+	 * calls finds only sessions that live. */
+	while ((sess = ctx->shell_sessions) != NULL) {
+		ctx->shell_sessions = sess->next;
 		fyai_shell_session_release_one(sess, force);
 	}
-	ctx->shell_sessions = NULL;
 }
 
 /*
