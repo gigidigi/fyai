@@ -2698,13 +2698,13 @@ static void ui_theme_pair(struct fyai_ui *ui, const char *role,
 
 /*
  * Return the SGR style for tile controls and the header-panel button. Use the
- * palette's work-sigil role, or the theme's strong style without a palette.
+ * palette's text role, or the theme's strong style without a palette.
  */
 static const char *ui_control_sgr(struct fyai_ui *ui)
 {
 	const char *on, *off;
 
-	ui_theme_pair(ui, "tile.sigil.work", FYMD_STYLE_STRONG, &on, &off);
+	ui_theme_pair(ui, "text", FYMD_STYLE_STRONG, &on, &off);
 	return on;
 }
 
@@ -3149,8 +3149,7 @@ void fyai_ui_panel_update(struct fyai_ctx *ctx)
 			 markdown_glyph(ctx->cfg, "panel.shown", "\xe2\x96\xa3");
 	on = off = NULL;
 	if (color)
-		ui_theme_pair(ui, "tile.sigil.work", FYMD_STYLE_STRONG, &on,
-			      &off);
+		ui_theme_pair(ui, "text", FYMD_STYLE_STRONG, &on, &off);
 	rc = response_buffer_append(&out, fy_sprintfa("%s%s%s", on ? on : "",
 			glyph, off ? off : ""));
 	n = fymd_str_width(glyph, strlen(glyph));
