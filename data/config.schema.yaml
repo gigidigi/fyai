@@ -678,6 +678,30 @@ properties:
         description: >-
           Set tile columns when work_layout is columns. 0 keeps the automatic
           grid.
+      work_panels:
+        type: string
+        enum: [auto, "on", "off"]
+        default: auto
+        description: >-
+          Select when the work pane stands as a column of panels beside the
+          transcript, as a side layout of the page document says. auto uses
+          the side layout when the terminal is as large as the document asks;
+          on uses it at any size where the column fits; off keeps the pane in
+          its band. A side layout needs the fullscreen page.
+      work_panel_cols:
+        type: integer
+        minimum: 0
+        default: 0
+        description: >-
+          Set the width of the column of panels. 0 keeps the width of the page
+          document. A column that leaves the transcript no room is not used.
+      work_panel_rows:
+        type: integer
+        minimum: 0
+        default: 0
+        description: >-
+          Set the rows of each panel of the column. 0 keeps the rows of the
+          page document.
       work_min_tile_cols:
         type: integer
         minimum: 0

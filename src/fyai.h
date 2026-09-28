@@ -93,6 +93,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define FYAI_SESSION_MARGIN "  "
 /* Work-pane defaults. */
 #define DEFAULT_WORK_LAYOUT "auto"
+#define DEFAULT_WORK_PANELS "auto"
 #define DEFAULT_WORK_POSITION "above-prompt"
 /* Where an editor runs: a tile of the work pane, or the whole terminal. */
 #define DEFAULT_EDITOR_MODE "pane"
@@ -290,6 +291,12 @@ struct fyai_cfg {
 	const char *completion_mode;	/* tab | auto */
 	const char *command_output;	/* pane | transcript */
 	int work_columns;		/* columns when work_layout is columns */
+	/* A side layout of the page document: auto takes it at the size the
+	 * document names, on whatever the size, off never. A panel size of 0
+	 * keeps the size of the document. */
+	const char *work_panels;
+	int work_panel_cols;
+	int work_panel_rows;
 	int work_min_tile_cols;		/* narrowest tile the auto grid makes */
 	int work_history_rows;		/* rows a tile keeps to scroll back to */
 	int work_max_rows;		/* rows the pane may take (0 = uncapped) */

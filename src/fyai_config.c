@@ -685,6 +685,12 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 						(long long)cfg->focus_bg_mix);
 		cfg->work_columns = fy_get(v, "work_columns",
 					   cfg->work_columns);
+		cfg->work_panels = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "work_panels", cfg->work_panels));
+		cfg->work_panel_cols = fy_get(v, "work_panel_cols",
+					      cfg->work_panel_cols);
+		cfg->work_panel_rows = fy_get(v, "work_panel_rows",
+					      cfg->work_panel_rows);
 		cfg->work_min_tile_cols = fy_get(v, "work_min_tile_cols",
 						 cfg->work_min_tile_cols);
 		cfg->work_history_rows = fy_get(v, "work_history_rows",
@@ -2581,6 +2587,9 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->focus_bg = DEFAULT_FOCUS_BG;
 	cfg->focus_bg_mix = DEFAULT_FOCUS_BG_MIX;
 	cfg->work_columns = 0;
+	cfg->work_panels = DEFAULT_WORK_PANELS;
+	cfg->work_panel_cols = 0;
+	cfg->work_panel_rows = 0;
 	cfg->work_min_tile_cols = DEFAULT_WORK_MIN_TILE_COLS;
 	cfg->work_history_rows = DEFAULT_WORK_HISTORY_ROWS;
 	cfg->work_max_rows = 0;

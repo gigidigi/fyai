@@ -1116,6 +1116,9 @@ static int page_doc_case(struct page_doc_ctx *c, fy_generic kase,
 	return fy_is_valid(body) ? page_doc_nodes(c, body) : 0;
 }
 
+/* The narrowest transcript a side column leaves. */
+#define FYAI_PAGE_SIDE_MIN_COLS 20
+
 /* The prefix of the id of a mark that names an area in a review. */
 #define PAGE_REVIEW_MARK "review:"
 
@@ -1519,8 +1522,11 @@ err_out:
 int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
 		     bool fullscreen, struct fyai_page_layout *lay)
 {
+	const struct fyai_cfg *cfg = pg && pg->ctx ? pg->ctx->cfg : NULL;
+	const char *mode = cfg && cfg->work_panels ? cfg->work_panels : "auto";
 	fy_generic layouts, l, pane, name;
 	const char *place;
+	bool side;
 
 	memset(lay, 0, sizeof(*lay));
 	snprintf(lay->name, sizeof(lay->name), "band");
@@ -1528,25 +1534,36 @@ int fyai_page_layout(const struct fyai_page *pg, int cols, int rows,
 	if (!fy_is_sequence(layouts))
 		return 0;
 	fy_foreach(l, layouts) {
-		if (cols < fy_get(l, "min_cols", 0LL) ||
-		    rows < fy_get(l, "min_rows", 0LL))
-			continue;
 		pane = fy_get(l, "pane", fy_invalid);
 		place = fy_get(pane, "place", "band");
-		/* A column beside the transcript needs the transcript view. */
-		if (!strcmp(place, "side") && !fullscreen)
+		side = !strcmp(place, "side");
+		/* work_panels decides whether a side layout asks for its size,
+		 * and a column beside the transcript needs the transcript view. */
+		if (side && (!strcmp(mode, "off") || !fullscreen))
+			continue;
+		if ((!side || strcmp(mode, "on")) &&
+		    (cols < fy_get(l, "min_cols", 0LL) ||
+		     rows < fy_get(l, "min_rows", 0LL)))
 			continue;
 		name = fy_get(l, "name", fy_invalid);
 		if (!fy_is_string(name))
 			return -1;
 		snprintf(lay->name, sizeof(lay->name), "%s", fy_castp(&name, ""));
-		lay->side = !strcmp(place, "side");
-		lay->pane_cols = (int)fy_get(pane, "cols", 0LL);
-		lay->tile_rows = (int)fy_get(pane, "tile_rows", 0LL);
-		if (lay->side && (lay->pane_cols < 1 || lay->pane_cols >= cols))
-			return -1;
+		lay->side = side;
+		lay->pane_cols = cfg && cfg->work_panel_cols > 0 ?
+				 cfg->work_panel_cols :
+				 (int)fy_get(pane, "cols", 0LL);
+		lay->tile_rows = cfg && cfg->work_panel_rows > 0 ?
+				 cfg->work_panel_rows :
+				 (int)fy_get(pane, "tile_rows", 0LL);
+		/* A column that leaves the transcript no room is not used. */
+		if (side && (lay->pane_cols < 1 ||
+			     lay->pane_cols > cols - FYAI_PAGE_SIDE_MIN_COLS))
+			continue;
 		return 0;
 	}
+	memset(lay, 0, sizeof(*lay));
+	snprintf(lay->name, sizeof(lay->name), "band");
 	return 0;
 }
 

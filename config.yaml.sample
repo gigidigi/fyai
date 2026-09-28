@@ -284,6 +284,12 @@ display:
   work_layout: auto
   work_columns: 0
   work_min_tile_cols: 40
+  # A column of panels beside the transcript, from a side layout of the page
+  # document: auto at its size, on at any size, off never. A size of 0 keeps
+  # the size of the document.
+  work_panels: auto
+  work_panel_cols: 0
+  work_panel_rows: 0
   # Scrollback rows retained per tile; 0 retains none.
   work_history_rows: 1000
   # Work-pane placement relative to the prompt.
