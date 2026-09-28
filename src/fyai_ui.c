@@ -3825,6 +3825,53 @@ static char *ui_tile_buttons(struct fyai_ctx *ctx)
 	return out.data;
 }
 
+/*
+ * The columns that the text of the UI Markdown @s takes on a row: no tag, no
+ * SGR sequence and no emphasis marker counts. With @plain, the text itself
+ * goes to @plain, and a codepoint that would take it past @max columns ends
+ * it. Returns the columns.
+ */
+static int ui_markup_cols(const char *s, struct response_buffer *plain,
+			  int max)
+{
+	unsigned int cp, prev = 0;
+	size_t n, len = s ? strlen(s) : 0;
+	int cols = 0, w;
+	const char *p = s, *end = s + len;
+
+	while (p && p < end) {
+		if (*p == '<') {
+			while (p < end && *p != '>')
+				p++;
+			p += p < end;
+			continue;
+		}
+		if (*p == '\x1b') {
+			for (p++; p < end && !(*p >= '@' && *p <= '~' &&
+					       p[-1] != '\x1b'); p++)
+				;
+			p += p < end;
+			continue;
+		}
+		if (*p == '*' || *p == '`' || *p == '_' || *p == '\\') {
+			p++;
+			continue;
+		}
+		n = fymd_utf8_decode(p, (size_t)(end - p), &cp);
+		if (!n)
+			break;
+		w = fymd_cp_width_next(prev, cp);
+		if (plain && cols + w > max)
+			break;
+		if (plain && response_buffer_append_data(plain, p, n))
+			break;
+		cols += w;
+		prev = cp;
+		p += n;
+	}
+	return cols;
+}
+
 int fyai_ui_surface_set_head_right(struct fyai_ctx *ctx,
 				   struct fytim_surface *sf,
 				   const char *title, const char *right,
@@ -3837,38 +3884,51 @@ int fyai_ui_surface_set_head_right(struct fyai_ctx *ctx,
 		[FYAI_UI_MARK_OK] = FYMD_INDICATOR_SUCCESS,
 		[FYAI_UI_MARK_FAILED] = FYMD_INDICATOR_FAILURE,
 	};
-	struct response_buffer out = {0};
+	struct response_buffer out = {0}, cut = {0};
 	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
 	struct markdown_region *regions = NULL;
 	size_t nregions = 0;
+	const char *short_title = NULL;
 	char *escaped = NULL;
 	char *buttons = NULL;
 	char *head = NULL;
 	char *margin;
 	size_t tlen;
 	int saved_width, margin_cols = 0;
-	int cols;
+	int cols, granted, room;
 	int rc;
 
 	if (!ui || !sf || !title)
 		return -1;
+	/* fyai writes @right and the buttons, so they take the right edge as
+	 * they are. A tile that ended is committed to the transcript, where a
+	 * button acts on nothing, unless it stays in the pane. */
+	buttons = mark == FYAI_UI_MARK_RUNNING ||
+		  fyai_tools_kept_surface(ctx, sf) ? ui_tile_buttons(ctx) : NULL;
+	/*
+	 * The title row is one row: a title that would wrap takes the buttons
+	 * with it. The title keeps the columns that the gutter, @right and the
+	 * buttons leave, and loses the rest to an ellipsis.
+	 */
+	granted = fyai_ui_surface_granted_cols(ctx, sf);
+	room = granted - markdown_gutter_cols(ctx->cfg) - 1 -
+	       ui_markup_cols(right, NULL, 0) -
+	       ui_markup_cols(buttons, NULL, 0) - 1;
+	if (granted > 0 && room > 1 && ui_markup_cols(title, NULL, 0) > room) {
+		(void)ui_markup_cols(title, &cut, room - 1);
+		if (!response_buffer_append(&cut, "\xe2\x80\xa6"))
+			short_title = cut.data;
+	}
 	/*
 	 * The title holds what a model or a program wrote. Escape it, then
 	 * make it the label that gives the tile the keys.
 	 */
-	escaped = markdown_ui_escape(title);
+	escaped = markdown_ui_escape(short_title ? short_title : title);
 	if (escaped) {
 		tlen = strlen(escaped);
 		while (tlen && (escaped[tlen - 1] == '\n' ||
 				escaped[tlen - 1] == '\r'))
 			tlen--;
-		/* fyai writes @right and the buttons, so they take the right
-		 * edge as they are. A tile that ended is committed to the
-		 * transcript, where a button acts on nothing, unless it stays
-		 * in the pane. */
-		buttons = mark == FYAI_UI_MARK_RUNNING ||
-			  fyai_tools_kept_surface(ctx, sf) ?
-			  ui_tile_buttons(ctx) : NULL;
 		if (asprintf(&head,
 			     "<fy-act id=\"tile:focus\">%.*s</fy-act>%s%s%s\n",
 			     (int)tlen, escaped,
@@ -3905,6 +3965,7 @@ int fyai_ui_surface_set_head_right(struct fyai_ctx *ctx,
 	free(head);
 	free(buttons);
 	free(escaped);
+	free(cut.data);
 	/* The tile keeps the regions of the head it shows. */
 	fyai_workpane_tile_set_regions(ctx->workpane, sf, regions, nregions);
 	if (!rc) {
