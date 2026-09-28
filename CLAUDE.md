@@ -671,11 +671,12 @@ draws its slots.
 - The chrome goes in a stated order when the terminal is short: the cap row
   (`fy-drop order="0"`), the status, the header, then the rules. The prompt
   has no drop.
-- A margin at the start of a row is `&#32;`: Markdown removes a plain blank
-  there, and a non-breaking space reaches the terminal as a different
-  character.
+- A margin at the start of a row is `<fy-space n="N"/>` (`space: N` in the
+  document): Markdown removes a plain blank there, and a non-breaking space
+  reaches the terminal as a different character.
 - The page is one `fy-tight`: a blank row between two parts of the chrome is
-  not part of it.
+  not part of it. A blank row of the chrome is `blank: true`, which is
+  `<fy-space/>` on a line of its own.
 - Text that the configuration or a program wrote goes into the source through
   `page_append_text()`: it is escaped, loses its SGR and its line breaks, and
   loses its leading blanks at the start of a row, where four of them make an
