@@ -51,6 +51,7 @@
 #include "fyai_terminal_session.h"
 #include "fyai_tool_spec.h"
 #include "fyai_turn.h"
+#include "fyai_branch.h"
 
 static enum fyai_event_action fyai_signal_cb(const struct fyai_event *ev)
 {
@@ -2656,20 +2657,86 @@ static void fyai_interactive_prepare(struct fyai_ctx *ctx,
 		fyai_session_banner_update(ctx);
 }
 
-/* Handle a slash command. Return -1 when @line is an ordinary user turn. */
-static int fyai_interactive_handle_slash(struct fyai_ctx *ctx,
-					 const char *histfile, char *line)
+/*
+ * Store @line in the conversation: a turn with no messages, whose display
+ * record draws the card of the command and, with display/command_output set
+ * to transcript, the output that the command drew. The model never sees it.
+ * A command that moved the head, or changed the branch, is recorded by the
+ * operation that it did, and not here.
+ */
+static void fyai_interactive_record_command(struct fyai_ctx *ctx,
+					    const char *line, fy_generic head,
+					    const char *branch)
 {
+	struct fy_generic_builder *gb;
+	fy_generic turn, record;
+	char *output;
+
+	output = fyai_ui_pane_take(ctx);
+	/* A session that holds no exchange yet is not stored for a command. */
+	if (ctx->session_unstored ||
+	    ctx->last_message.v != head.v || fy_is_invalid(head) ||
+	    !ctx->branch || !branch || strcmp(ctx->branch, branch))
+		goto out;
+	gb = fyai_ctx_transient_gb(ctx);
+	fyai_error_check(ctx, gb, out, "could not store the command %s", line);
+	record = fy_null_filtered_mapping(gb,
+		"tag", "command",
+		"markdown", line,
+		"output", output ? fy_value(gb, output) : fy_null);
+	turn = fyai_turn_append(ctx, head, fy_seq_empty);
+	turn = fyai_turn_append_display_output(ctx, turn, record);
+	fyai_error_check(ctx, fy_is_valid(turn), out,
+			 "could not store the command %s", line);
+	ctx->last_message = fy_gb_internalize(ctx->gb, turn);
+	fyai_error_check(ctx, fy_is_valid(ctx->last_message), err_restore,
+			 "could not store the command %s", line);
+	fyai_branch_op_set(ctx, FYAI_BRANCH_OP_COMMAND, NULL);
+	if (fyai_publish_state(ctx))
+		fyai_error(ctx, "could not publish the command %s on branch %s",
+			   line, branch);
+out:
+	free(output);
+	return;
+err_restore:
+	ctx->last_message = head;
+	free(output);
+}
+
+/*
+ * Handle a slash command. Return -1 when @line is an ordinary user turn.
+ * With display/command_output set to transcript, the command is a part of the
+ * transcript: its card is drawn and, with @record, the command is stored. A
+ * command beside a turn is not stored, because the turn owns the head. With
+ * pane, the output goes to the pane and the transcript keeps nothing.
+ */
+static int fyai_interactive_handle_slash(struct fyai_ctx *ctx,
+					 const char *histfile, char *line,
+					 bool record)
+{
+	fy_generic head;
+	char *branch;
+	bool transcript;
 	int rc;
 
 	if (line[0] != '/' || line[1] == '/')
 		return -1;
+	transcript = !strcmp(ctx->cfg->command_output, "transcript");
 	fyai_ui_history_save(ctx, histfile, line);
-	fyai_echo_user_turn(ctx, line);
+	if (transcript)
+		fyai_echo_user_turn(ctx, line);
+	head = ctx->last_message;
+	branch = ctx->branch ? strdup(ctx->branch) : NULL;
 	rc = fyai_session_slash(ctx, line);
+	/* /exit and /quit end the session and store nothing. */
+	if (transcript && record && rc == 0 && branch)
+		fyai_interactive_record_command(ctx, line, head, branch);
+	else
+		free(fyai_ui_pane_take(ctx));
+	free(branch);
 	fyai_error_check(ctx, rc >= 0, out,
 			 "could not run the slash command");
-	if (ctx->cfg->markdown && ctx->stdout_tty)
+	if (transcript && ctx->cfg->markdown && ctx->stdout_tty)
 		(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT, "\n", 1);
 out:
 	fyai_ui_drain_output(ctx);
@@ -2786,7 +2853,7 @@ fyai_interactive_start_line(struct fyai_ctx *ctx, const char *histfile,
 	fy_generic turn;
 	int rc;
 
-	rc = fyai_interactive_handle_slash(ctx, histfile, line);
+	rc = fyai_interactive_handle_slash(ctx, histfile, line, true);
 	if (rc >= 0)
 		return rc;
 	fyai_interactive_prepare_user_line(ctx, histfile, line);
@@ -3017,7 +3084,7 @@ static enum fyai_line_result fyai_interactive_read_busy(struct fyai_ctx *ctx,
 		fyai_ui_diag_drain(ctx, "error");
 		return FYAILR_ERROR;
 	}
-	rc = fyai_interactive_handle_slash(ctx, histfile, line);
+	rc = fyai_interactive_handle_slash(ctx, histfile, line, false);
 	fyai_scratch_leave(ctx, &st);
 	if (rc > 0)
 		return FYAILR_QUIT;
@@ -3367,7 +3434,7 @@ int fyai_prompt_interactive(struct fyai_ctx *ctx)
 				break;
 			continue;
 		}
-		rc = fyai_interactive_handle_slash(ctx, histfile, line);
+		rc = fyai_interactive_handle_slash(ctx, histfile, line, true);
 		if (rc >= 0) {
 			free(line);
 			line = NULL;

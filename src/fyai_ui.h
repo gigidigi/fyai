@@ -140,6 +140,11 @@ void fyai_ui_tool_end(struct fyai_ctx *ctx, bool ok, const char *cause);
 void fyai_ui_pane_begin(struct fyai_ctx *ctx);
 void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
 		      bool show_output);
+/*
+ * The output that the last pane drew into the transcript, with
+ * display/command_output set to transcript, or NULL. The caller frees it.
+ */
+char *fyai_ui_pane_take(struct fyai_ctx *ctx);
 void fyai_ui_diag_drain(struct fyai_ctx *ctx, const char *title);
 
 /* A grid of terminal cells displayed in a work band. */

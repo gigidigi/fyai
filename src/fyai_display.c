@@ -3493,6 +3493,24 @@ err_out:
 	return fy_seq_empty;
 }
 
+/* A stored slash command: its card, then the output it drew into the
+ * transcript, which the record keeps as the rows that were presented. */
+static void fyai_display_command_output(struct fyai_ctx *ctx,
+					fy_generic output, const char *line)
+{
+	fy_generic gtext = fy_get(output, "output");
+	const char *text = fy_castp(&gtext, "");
+	size_t len = strlen(text);
+
+	(void)fyai_render_display_output(ctx, "user", line);
+	if (!len)
+		return;
+	(void)fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT, FYAI_FLOW_NOTICE);
+	(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT, text, len);
+	if (text[len - 1] != '\n')
+		(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT, "\n", 1);
+}
+
 static int fyai_display_stored_outputs(struct fyai_ctx *ctx,
 				       const struct fyai_turn_stack *stack,
 				       size_t lo, size_t hi, bool *emitted_io)
@@ -3542,7 +3560,8 @@ static int fyai_display_stored_outputs(struct fyai_ctx *ctx,
 						tool_results,
 						&tool_result_pos))
 					return -1;
-			}
+			} else if (fy_equal(tag, "command"))
+				fyai_display_command_output(ctx, output, md);
 			else
 				(void)fyai_render_display_output(ctx, tag, md);
 			emitted = true;
@@ -4107,13 +4126,25 @@ static size_t fyai_display_output_rows(struct fyai_ctx *ctx,
 				       size_t *result_pos)
 {
 	struct measure_walk w;
+	fy_generic gtext;
+	const char *text;
+	size_t rows;
 
 	memset(&w, 0, sizeof(w));
 	w.m = m;
 	fyai_flow_reset(&w.flow, ctx->cfg);
 	(void)fyai_fragment_walk(ctx, output, results, result_pos,
 				 &measure_walk_ops, &w);
-	return w.rows;
+	rows = w.rows;
+	/* A command keeps the rows its output drew, and the row above them. */
+	if (fy_equal(fy_get(output, "tag"), "command")) {
+		gtext = fy_get(output, "output");
+		text = fy_castp(&gtext, "");
+		if (*text)
+			rows += 1 + fyai_count_newlines(text, strlen(text)) +
+				(text[strlen(text) - 1] != '\n');
+	}
+	return rows;
 }
 
 /* Estimate the rendered rows for one exchange. */

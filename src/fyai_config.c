@@ -504,6 +504,8 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 			fy_get(v, "editor", cfg->editor_mode));
 		cfg->completion_mode = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "completion", cfg->completion_mode));
+		cfg->command_output = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "command_output", cfg->command_output));
 		cfg->focus_bg = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "focus_bg", cfg->focus_bg));
 		cfg->focus_bg_mix = (int)fy_get(v, "focus_bg_mix",
@@ -2371,6 +2373,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->work_position = DEFAULT_WORK_POSITION;
 	cfg->editor_mode = DEFAULT_EDITOR_MODE;
 	cfg->completion_mode = DEFAULT_COMPLETION_MODE;
+	cfg->command_output = DEFAULT_COMMAND_OUTPUT;
 	cfg->focus_bg = DEFAULT_FOCUS_BG;
 	cfg->focus_bg_mix = DEFAULT_FOCUS_BG_MIX;
 	cfg->work_columns = 0;

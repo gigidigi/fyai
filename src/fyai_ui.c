@@ -103,6 +103,7 @@ struct fyai_ui {
 	off_t capture_out;
 	off_t capture_err;
 	struct response_buffer pane_out;	/* what a pane captured */
+	char *pane_kept;		/* output drawn into the transcript */
 	struct response_buffer open_row;	/* a row not ended yet */
 	bool capture;
 	bool recalled;
@@ -2158,6 +2159,7 @@ void fyai_ui_close(struct fyai_ctx *ctx)
 	free(ui->stream_rows.data);
 	free(ui->pane_out.data);
 	free(ui->open_row.data);
+	free(ui->pane_kept);
 	/* Nobody can answer a question now. */
 	while (ui->questions) {
 		q = ui->questions;
@@ -2204,6 +2206,8 @@ void fyai_ui_pane_begin(struct fyai_ctx *ctx)
 
 	if (!ui)
 		return;
+	free(ui->pane_kept);
+	ui->pane_kept = NULL;
 	fyai_ui_drain_output(ctx);
 	ui_band_close(ui, &ui->message_band);
 	ui->pane_out.len = 0;
@@ -2212,14 +2216,58 @@ void fyai_ui_pane_begin(struct fyai_ctx *ctx)
 	ui->capture = true;
 }
 
-void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
-		      bool show_output)
+/* The heading of the output of a command. The caller frees it. */
+static char *ui_pane_heading(struct fyai_ui *ui, const char *title, bool error)
 {
-	struct response_buffer out = {0};
-	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+	struct fyai_cfg *cfg = ui->ctx ? ui->ctx->cfg : NULL;
 	const char *color, *off;
 	char *heading;
 	size_t len;
+
+	color = error ? markdown_role_on(cfg, "notice.sigil", "\033[31m") :
+			markdown_role_on(cfg, "chrome", "\033[36m");
+	off = markdown_role_off(cfg, error ? "notice.sigil" : "chrome",
+				"\033[0m");
+	if (!title)
+		title = error ? "error" : "status";
+	len = strlen(title) + strlen(color) + strlen(off) + FYAI_GLYPH_MAX + 2;
+	heading = malloc(len);
+	if (!heading)
+		return NULL;
+	/* A palette theme marks a diagnostic with ! and a report with ∷. */
+	snprintf(heading, len, "%s%s %s%s", color,
+		 markdown_glyph(cfg, error ? "gutter.diag" : "gutter.system",
+				"●"),
+		 title, off);
+	return heading;
+}
+
+/* Draw the output of a command into the transcript, under the card of the
+ * command, which names it, and keep it for the record of the command. */
+static void ui_pane_to_transcript(struct fyai_ui *ui,
+				  struct response_buffer *out)
+{
+	struct fyai_flow *flow = fyai_sink_flow(ui->ctx->sink);
+
+	(void)ui_flow_fence(ui->ctx, FYAI_FLOW_NOTICE);
+	if (ui_present(ui, out->data, out->len) ||
+	    (out->data[out->len - 1] != '\n' && ui_present(ui, "\n", 1)))
+		fyai_warning(ui->ctx, "could not draw the output of a command");
+	fyai_flow_emitted(flow, FYAI_FLOW_NOTICE, true);
+	free(ui->pane_kept);
+	ui->pane_kept = strndup(out->data, out->len);
+	if (!ui->pane_kept)
+		fyai_warning(ui->ctx, "could not keep the output of a command");
+}
+
+/* @command: the output of a slash command, which display/command_output
+ * places. */
+static void ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
+			bool show_output, bool command)
+{
+	struct response_buffer out = {0};
+	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+	char *heading;
 
 	if (!ui || !ui->capture)
 		return;
@@ -2242,6 +2290,18 @@ void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
 		free(out.data);
 		return;
 	}
+	if (command && !strcmp(ctx->cfg->command_output, "transcript")) {
+		ui_pane_to_transcript(ui, &out);
+		free(out.data);
+		return;
+	}
+	heading = ui_pane_heading(ui, title, error);
+	if (!heading) {
+		fyai_error(ctx, "could not make the heading of %s",
+			   title ? title : "the command");
+		free(out.data);
+		return;
+	}
 	/* A fullscreen page has no scrollback for a view: it shows it in the
 	 * notice band. */
 	if (!show_output && !error && !ui->fullscreen) {
@@ -2249,28 +2309,10 @@ void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
 		(void)fytim_commit(ui->ft, out.data, out.len);
 		fyai_flow_observe(fyai_sink_flow(ui->ctx ? ui->ctx->sink : NULL),
 				  out.data, out.len);
+		free(heading);
 		free(out.data);
 		return;
 	}
-	color = error ?
-		markdown_role_on(ui->ctx ? ui->ctx->cfg : NULL, "notice.sigil",
-				 "\033[31m") :
-		markdown_role_on(ui->ctx ? ui->ctx->cfg : NULL, "chrome",
-				 "\033[36m");
-	off = markdown_role_off(ui->ctx ? ui->ctx->cfg : NULL,
-			 error ? "notice.sigil" : "chrome", "\033[0m");
-	len = strlen(title ? title : "status") + strlen(color) + 16 +
-	      FYAI_GLYPH_MAX;
-	heading = malloc(len);
-	if (!heading) {
-		free(out.data);
-		return;
-	}
-	/* A palette theme marks a diagnostic with ! and a report with ∷. */
-	snprintf(heading, len, "%s%s %s%s", color,
-		 markdown_glyph(ui->ctx ? ui->ctx->cfg : NULL,
-				error ? "gutter.diag" : "gutter.system", "●"),
-		 title ? title : (error ? "error" : "status"), off);
 	/* A fullscreen page shows it above the status, or in its popup. */
 	if (ui->fullscreen) {
 		ui_popup_append(ui, title ? title : (error ? "error" : "status"),
@@ -2288,6 +2330,24 @@ void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
 	free(out.data);
 }
 
+void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
+		      bool show_output)
+{
+	ui_pane_end(ctx, title, error, show_output, true);
+}
+
+char *fyai_ui_pane_take(struct fyai_ctx *ctx)
+{
+	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+	char *kept;
+
+	if (!ui)
+		return NULL;
+	kept = ui->pane_kept;
+	ui->pane_kept = NULL;
+	return kept;
+}
+
 void fyai_ui_diag_drain(struct fyai_ctx *ctx, const char *title)
 {
 	struct fyai_diag *diag;
@@ -2301,7 +2361,7 @@ void fyai_ui_diag_drain(struct fyai_ctx *ctx, const char *title)
 	}
 	fyai_ui_pane_begin(ctx);
 	fyai_diag_drain(diag);
-	fyai_ui_pane_end(ctx, title ? title : "error", true, true);
+	ui_pane_end(ctx, title ? title : "error", true, true, false);
 }
 
 bool fyai_ui_active(const struct fyai_ctx *ctx) { return ctx && ctx->ui; }

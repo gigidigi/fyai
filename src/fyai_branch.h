@@ -106,6 +106,7 @@ const char *fyai_branch_cwd(const struct fyai_branch *b);
 #define FYAI_BRANCH_OP_DESCRIBE	"describe"
 #define FYAI_BRANCH_OP_REBASE	"rebase"
 #define FYAI_BRANCH_OP_MERGE	"merge"
+#define FYAI_BRANCH_OP_COMMAND	"command"
 
 /* Set the operation and previous name for the next publish. */
 void fyai_branch_op_set(struct fyai_ctx *ctx, const char *op, const char *from);
