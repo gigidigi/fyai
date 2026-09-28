@@ -1204,7 +1204,15 @@ command.
   its screen, not its output, whether or not a turn runs beside it. When the
   program ends, its tile stays with the outcome and gives the keys to the
   prompt, until the user dismisses it with Escape or `q` in the tile, its
-  close button, or `/kill`.
+  close button, or `/kill`. A full-screen program - one that entered the
+  alternate screen - leaves nothing to read, and its tile goes at once.
+- A program that prints once and ends, such as `ls`, reads the size of its
+  terminal when it starts; `ls` takes the terminal size over `COLUMNS`. The
+  tile of a terminal session is registered before its program starts, so
+  `fyai_ui_layout_now()` solves the page then, and `tool/run` carries the
+  grant as `size`: the terminal opens at the size of its tile. A size the
+  call asks for wins. `COLUMNS` and `LINES` stay unset, because a resize
+  cannot change the environment of a running program.
 - A user-owned tile can take more rows than the shared pane granted it. A tile
   of a tool call keeps the grant.
 - `display/work_zoom_rows` is the height of the work pane. `full` uses the
