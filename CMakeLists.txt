@@ -664,6 +664,7 @@ if(BUILD_TESTING)
 
     # Cases that need more wall clock than the common budget.
     set(FYAI_CASE_TIMEOUT_tool_terminate 120)
+    set(FYAI_CASE_TIMEOUT_tool_timeout 120)
     set(FYAI_CASE_TIMEOUT_ui_page_layouts 240)
 
     # Every deadline in the suite is multiplied by this. A sanitized build, or
@@ -701,7 +702,7 @@ if(BUILD_TESTING)
         # resizes, tool interrupts, and termination. The rest assert
         # through polled needles with room in their budgets, so they run
         # free. Grow this list from failure evidence, not suspicion.
-        if(case_name MATCHES "^(ui_interactive|ui_pattern_tty_resize|ui_curses_tty_resize|ui_bang_resize|ui_bang_multi_resize|ui_idle_resize_repaint|ui_band_resize_width|ui_reflow_width|term|shell_tty_resize|ui_tool_interrupt|ui_tool_interrupt_ctrl_c|ui_native_shell_interrupt|ui_mcp_stdio_interrupt|tool_terminate)$")
+        if(case_name MATCHES "^(ui_interactive|ui_pattern_tty_resize|ui_curses_tty_resize|ui_bang_resize|ui_bang_multi_resize|ui_idle_resize_repaint|ui_band_resize_width|ui_reflow_width|term|shell_tty_resize|ui_tool_interrupt|ui_tool_interrupt_ctrl_c|ui_native_shell_interrupt|ui_mcp_stdio_interrupt|tool_terminate|tool_timeout)$")
             set_tests_properties(fyai/case_${case_name} PROPERTIES
                 RESOURCE_LOCK fyai_pty)
         endif()
