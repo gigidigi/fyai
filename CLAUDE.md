@@ -763,10 +763,17 @@ draws its slots.
   layout is taken: `auto` at the size of the document, `on` at any size
   where its column leaves the transcript room, `off` never.
   `display/work_panel_cols` and `display/work_panel_rows` replace the
-  `cols` and `tile_rows` of the document when they are not 0. While it
-  stands, the UI sets
-  `cfg->render_width` to the column the transcript has, and only it puts it
-  back.
+  `cols` and `tile_rows` of the document when they are not 0.
+  `display/page_layout` (`/layout`) names a layout that is taken at any
+  size, or `auto`; a side layout that cannot stand falls back to `auto`.
+  The header templates name the layout of the last frame as `{layout}`.
+  The UI makes the header again when the layout changes, before the frame
+  reads it: the rows it replaces are the header of that frame. While a
+  column of tiles stands beside it, the transcript takes the render width
+  of its own column (`side_cols` of the UI), else that of the terminal, and
+  every writer of `cfg->render_width` in the UI honours it. A change of that
+  width makes the rows already made again, as a resize does: a column that
+  opens beside the transcript must not clip it.
 - `display/screen: fullscreen`, the default, puts the page on the alternate
   screen when the session starts (`FYTIM_SCREEN_ALT`). There is no scrollback
   there, so the transcript is a view of the page, `src/fyai_transcript_view.c`, drawn into

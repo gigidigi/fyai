@@ -3795,6 +3795,31 @@ key is stored.
 | --- | --- |
 | `-h`, `--help` | show this help |
 
+## /layout
+
+the layout of the page, or auto
+
+**Usage:** `/layout [VALUE]`
+
+With no value, show the layout of the page. With a value, change it:
+a layout of the page document by name, or auto for the first that the
+terminal is large enough for. `display/page_layout` is the key; a
+session-scoped key changes for this session only, any other key is
+stored.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `VALUE` | the new value |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
 ## /theme
 
 the Markdown theme, name[:auto|dark|light]
