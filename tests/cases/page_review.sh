@@ -57,9 +57,34 @@ import json
 import sys
 
 rows = {a["area"]: a["row"] for a in json.loads(sys.argv[1])}
-if not rows["pane"] > rows["status.row"]:
+if not rows["head:1"] > rows["status.row"]:
     raise SystemExit("the pane is not under the status: %r" % rows)
 PY
+# A terminal as wide as the side layout asks for stands the tiles in a column
+# of panels beside the transcript; one column less keeps the band.
+side=$("$FYAI_BIN" page review --width 170 --height 40 --output json) ||
+    fail "page review did not draw the side layout"
+band=$("$FYAI_BIN" page review --width 169 --height 40 --output json) ||
+    fail "page review did not draw the band layout"
+"$PYTHON" - "$side" "$band" <<'PY' || fail "the layout does not follow the size"
+import json
+import sys
+
+side = {a["area"]: a for a in json.loads(sys.argv[1])}
+band = {a["area"]: a for a in json.loads(sys.argv[2])}
+t, h1, s1, h2 = side["transcript"], side["head:1"], side["screen:1"], side["head:2"]
+if t["col"] != 0 or t["width"] != 88 or t["height"] != 33:
+    raise SystemExit("side transcript %r" % t)
+if h1["col"] != 88 or h1["width"] != 82 or h1["row"] != 0:
+    raise SystemExit("side head %r" % h1)
+if s1["height"] != 24 or h2["row"] != 25 or h2["col"] != 88:
+    raise SystemExit("side panels %r %r" % (s1, h2))
+if "pane/blank" in side or "pane.cap" in side:
+    raise SystemExit("the side layout kept the rows of the band")
+if band["transcript"]["width"] != 169 or band["head:1"]["row"] <= band["transcript"]["row"]:
+    raise SystemExit("band %r" % band["head:1"])
+PY
+
 if "$FYAI_BIN" page review --page "$DOCS/bad.yaml" >"$TEST_DIR/bad.out" 2>&1; then
     fail "page review drew a document that does not load"
 fi

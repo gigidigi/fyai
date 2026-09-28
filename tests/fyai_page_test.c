@@ -35,6 +35,7 @@
 FYAI_TEST_ENTRY(page, source_orders_the_chrome, page_source_orders_the_chrome)
 FYAI_TEST_ENTRY(page, source_escapes_text, page_source_escapes_text)
 FYAI_TEST_ENTRY(page, review_marks_each_row, page_review_marks_each_row)
+FYAI_TEST_ENTRY(page, side_column_of_panels, page_side_column_of_panels)
 FYAI_TEST_ENTRY(page, source_omits_empty_slots, page_source_omits_empty_slots)
 FYAI_TEST_ENTRY(page, rows_are_adjacent, page_rows_are_adjacent)
 FYAI_TEST_ENTRY(page, palette_margin_keeps_width, page_palette_margin_keeps_width)
@@ -815,6 +816,55 @@ int page_review_marks_each_row(void);
 int page_review_marks_each_row(void)
 {
 	return page_review_marks_each_row_run();
+}
+
+/* A side layout stands the tiles in a column of panels beside a lead cell,
+ * and the rows the panels leave go to the last row; a zoomed tile takes the
+ * whole column. */
+static int page_side_column_of_panels_run(void)
+{
+	struct fyai_page_layout lay = {
+		.name = "side", .side = true, .pane_cols = 82, .tile_rows = 25,
+	};
+	struct fyai_page_cell cells[2];
+	struct response_buffer src = {0};
+	struct fyai_workpane_grid g;
+	int i, rows, rc;
+
+	fyai_page_side_place(&lay, 2, false, &g);
+	FYAI_TCHECK(g.cols == 2 && g.col_size[0] == 0 && g.col_size[1] == 82);
+	FYAI_TCHECK(g.rows == 3 && g.row_size[0] == 25 &&
+		    g.row_size[1] == 25 && g.row_size[2] == 0);
+	FYAI_TCHECK(g.place[0].col == 1 && g.place[1].row == 1);
+
+	memset(cells, 0, sizeof(cells));
+	for (i = 0; i < 2; i++) {
+		cells[i].slot = (unsigned int)i + 1;
+		cells[i].row = g.place[i].row;
+		cells[i].col = 1;
+		cells[i].row_span = cells[i].col_span = 1;
+		cells[i].rows = 4;
+		cells[i].screen = true;
+	}
+	rc = fyai_page_grid_lead(NULL, &g, cells, 2, 60, "", 0, "transcript",
+				 &src, &rows);
+	FYAI_TCHECK(!rc && rows == 60 && src.data);
+	FYAI_TCHECK(strstr(src.data, "cols=\"*,82\""));
+	FYAI_TCHECK(strstr(src.data, "rows=\"25,25,10\""));
+	FYAI_TCHECK(strstr(src.data, "<fy-cell row=\"0\" col=\"0\" "
+			   "rowspan=\"3\" colspan=\"1\">\n\n"
+			   "<fy-slot id=\"transcript\" height=\"60\"/>"));
+	free(src.data);
+
+	fyai_page_side_place(&lay, 1, true, &g);
+	FYAI_TCHECK(g.rows == 1 && g.row_size[0] == 0);
+	return 0;
+}
+
+int page_side_column_of_panels(void);
+int page_side_column_of_panels(void)
+{
+	return page_side_column_of_panels_run();
 }
 
 int page_source_escapes_text(void)
