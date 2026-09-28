@@ -482,8 +482,7 @@ replay, and the measuring pass that sizes the recap window thus agree.
   commit has no blank row above it while it runs.
 - A medium that replaces its rows sets the tail of the flow again. The
   transcript view does this when the stored exchange replaces the live rows.
-  A separation that goes on another path than its unit lands after it: the
-  live card takes its separation through `fyai_ui_unit()`.
+  A separation must go on the same path as its unit, or it lands after it.
 - Spooled bytes continue the unit being presented. They are not a unit and take
   no separation. A fence there draws blank rows into a live band.
 - Blank lines in an assistant document are Markdown syntax, not presentation.
@@ -523,6 +522,13 @@ document backend, such as HTML, uses the capture backend. Tests also use it to
 read the output of a run. Each entry point can be NULL. If a backend cannot
 present content, the sink discards the content. A producer does not examine the
 destination.
+
+While the terminal UI is active, the terminal backend presents the transcript
+and notice streams through `fyai_ui_present()`, never through standard output.
+The UI keeps what a pane captures in a buffer of its own. Standard output is
+spooled only to catch a stray writer. The scrollback takes whole rows: the UI
+holds a row that has not ended until its newline arrives, or until the next
+drain.
 
 ### Documents
 
