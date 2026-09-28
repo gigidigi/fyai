@@ -1834,7 +1834,9 @@ static enum fyai_event_action ui_service(struct fyai_ui *ui)
 							  ev.text_len);
 			break;
 		case FYTIM_EVENT_SCROLLBACK:
-			ui->activity_paused = true;
+			/* Fullscreen status updates do not change terminal scrollback. */
+			if (!ui->fullscreen)
+				ui->activity_paused = true;
 			/* An open popup covers the page: every scroll is its.
 			 * Else a key, or the wheel over the transcript, scrolls
 			 * the view of a fullscreen page. */
