@@ -1199,6 +1199,12 @@ command.
   A user-owned session has no such limit: the user reads its screen. It is
   not watched for input waits: the model is not told that it waits, because
   that would give the model its output and start a turn.
+- A bang command is not a part of the conversation. Its line is not drawn as
+  a card, and its session records nothing and commits nothing: not
+  its screen, not its output, whether or not a turn runs beside it. When the
+  program ends, its tile stays with the outcome and gives the keys to the
+  prompt, until the user dismisses it with Escape or `q` in the tile, its
+  close button, or `/kill`.
 - A user-owned tile can take more rows than the shared pane granted it. A tile
   of a tool call keeps the grant.
 - `display/work_zoom_rows` is the height of the work pane. `full` uses the
