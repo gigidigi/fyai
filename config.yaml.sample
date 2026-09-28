@@ -1,80 +1,52 @@
-# fyai configuration (sample)
+# fyai configuration sample
 #
-# Use it as:
-#   $XDG_CONFIG_HOME/fyai/config.yaml   (user bootstrap file,
-#                                        else ~/.config/fyai/config.yaml)
-#   fyai init / fyai config import <file>   (repository: ingested into the
-#                                            selected branch in .fyai/arena)
-# or pass any file explicitly with --config/-C (overlays the arena or bootstrap
-# config; later command-line overlays still take precedence).
-# Edit the repository config in place with `fyai config edit`, inspect it
-# with `fyai config export`. Individual keys can be poked from the command
-# line with `--set <key[=value]>` / `--get <key>` / `--delete <key>` (or the
-# matching `fyai config set|get|delete` subcommands); keys are slash paths,
-# e.g. `fyai --set display/color=on`. Add `--transient` to keep a session's
-# edits (and its conversation state) in memory only.
+# Install at $XDG_CONFIG_HOME/fyai/config.yaml (or ~/.config/fyai/config.yaml)
+# to initialize a branch that has no stored configuration. Import a file with
+# `fyai config import <file>` or edit stored configuration with
+# `fyai config edit`. Inspect it with `fyai config export`.
 #
-# There is one persisted configuration source: the arena config. The user file
-# above is bootstrap-only: it becomes the base only when the arena has no
-# config, and is never overlaid onto one. The merged document is, in order:
-#   arena config (or user bootstrap) -> --config file -> command-line overlays
-# Built-in defaults back any key the merged document omits. The catalogue
-# derives provider/url/grammar/wire-id read-only when the model resolves; those
-# resolved values are not persisted as configuration intent.
+# Configuration precedence: stored branch configuration (or the user file on
+# initial setup), explicit --config/-C file, then command-line --set changes.
+# The user file does not overlay an existing stored configuration. Unset keys
+# use built-in defaults. --transient keeps changes and conversation state in
+# memory without publishing them.
 #
-# Every key below is set to its actual compiled-in default, explicitly -
-# nothing is left to an invisible C-level default. Most run-shaping switches
-# (temperature, reasoning, streaming, markdown rendering, stats, logprobs,
-# obfuscation, ...) have no dedicated CLI flag at all; they are config keys
-# only, poked via `config set` / `--set`. Stylistic options live under
-# `display:`, logging controls under `logging:`.
+# Use slash-separated paths with `fyai config set|get|delete` or --set,
+# --get, and --delete; for example, `fyai --set display/color=on`.
+# Display settings are under display; logging settings are under logging.
 
 # --- Model selection -------------------------------------------------------
 #
-# A single `model` key drives provider selection. The catalogue
-# (`fyai catalog list`) maps the model to its canonical provider, endpoint
-# URL, API grammar and provider wire-id. Prefix with `provider/` to pin a
-# specific provider that also offers the model, e.g. `openrouter/glm-5.2`.
-# Override on the command line with `--model`/`-m`.
+# The catalogue maps model to provider, endpoint, API grammar, and wire ID.
+# Prefix a model with `provider/` to select a specific provider; for example,
+# `openrouter/glm-5.2`. --model/-m overrides this setting for one invocation.
 model: gpt-5.4-mini
 
-# `provider` is never a config key - it is derived read-only from `model` at
-# resolve time and shown by `/model`, `/status`, `fyai list providers`, etc.
+# Provider is derived from the selected model; it is not a configuration key.
 
-# Authentication selection. `auto` preserves API-key precedence and falls
-# back to a machine-local ChatGPT login for OpenAI Responses requests.
+# auto uses API-key precedence, then a saved ChatGPT login for OpenAI Responses.
 auth: auto # auto | api-key | chatgpt
 
-# API grammar: responses | chat-completions | messages. A model change
-# re-derives it - and the endpoint - from the new model's provider, which
-# offers the richest grammar it has, so both hold only until the model
-# changes.
+# API grammar: responses, chat-completions, or messages. Selecting another
+# catalogue model re-derives the grammar and endpoint.
 api: responses
 
-# `api_url` is derived from the catalogue by default; set explicitly only to
-# override the endpoint the catalogue resolves for the current model/api.
+# Set api_url to override the catalogue endpoint for the selected model/API.
 # api_url: https://api.openai.com/v1/responses
 
-# Automatic API-key lookup tries `--api-key`/`-k`, the provider's conventional
-# environment variable, then the logical secret `api-key/<provider>`.
-# <PROVIDER>_API_KEY (OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
-# DEEPSEEK_API_KEY, GOOGLE_API_KEY...). Secrets are never written as raw values;
-# Pin `type: env` or `type: secret` to require a particular indirection.
-# The Linux backend is volatile across reboot; create an entry with
-# `fyai secret set api-key/openai`. No raw credential appears here; `auto` is
-# the compiled default.
+# Automatic key lookup checks --api-key/-k, the provider's environment
+# variable (such as OPENAI_API_KEY), then `api-key/<provider>` in the secret
+# store. Use type: env or type: secret to select a specific source. Never
+# place a raw credential in this file. Linux secrets do not survive reboot.
 api_key: { type: auto }
 # api_key: { type: env, value: OPENAI_API_KEY }
 # api_key: { type: secret, value: api-key/openai }
 
 # --- Local / self-hosted models ---------------------------------------------
 #
-# Ollama, llama.cpp's llama-server, vLLM, LM Studio, text-generation-webui,
-# ... all speak the OpenAI Chat Completions wire format already implemented
-# above, and normally need no key. Point api_url at the local server, set
-# no_auth so fyai neither requires nor sends a key, and pick whatever model
-# name the server reports (`ollama list`, etc.) - no catalogue entry needed,
-# since api_url is set explicitly.
+# For a local server with a Chat Completions endpoint, set its model name and
+# URL explicitly. Set no_auth only if the server does not require a key.
+# An explicit URL does not require a catalogue entry for the model.
 # model: llama3
 # api: chat-completions
 # api_url: http://localhost:11434/v1/chat/completions
@@ -90,26 +62,22 @@ parallel_tool_calls_prompt: >-
   in separate responses.
 temperature: 0
 max_tool_iterations: 1000
-# Output-token cap per model call. Required by the Anthropic Messages API
-# (sent on every request there); defaults from the catalogue otherwise.
+# Output-token limit per request. Messages requests require this value;
+# other grammars can derive it from the catalogue.
 max_tokens: 8192
 
-# Automatic retry of a provider request that failed for a transient reason: a
-# refused or lost connection, a timeout, or HTTP 408, 429, 500, 502, 503 or
-# 504. The delay doubles after each attempt and keeps a random part, so
-# parallel requests do not come back together; a `Retry-After` header replaces
-# the calculated delay. `max_attempts` counts the first attempt (1 disables
-# retry); `max_delay_ms` bounds one delay (0 removes the bound).
+# Retry transient connection failures, timeouts, and HTTP 408, 429, 500, 502,
+# 503, or 504. Delay doubles with jitter; Retry-After overrides that delay.
+# max_attempts includes the first request (1 disables retries). max_delay_ms
+# caps each delay; 0 removes the cap. Stream retries require no shown content.
 retry:
   max_attempts: 8
   initial_delay_ms: 500
   max_delay_ms: 30000
 
-# `fyai catalog update` runs `command` to write a catalogue: a
-# scrape-providers compatible program, given --format yaml and the selection
-# options. It gets only the provider keys that `credentials` names, and is
-# stopped after `timeout_ms` (0 never). These are the keys scrape-providers
-# reads.
+# `fyai catalog update` runs a scrape-providers-compatible command with
+# --format yaml and selection options. Only listed credentials are retained.
+# timeout_ms limits the run; 0 disables the limit.
 catalog_update:
   command: scrape-providers
   timeout_ms: 600000
@@ -121,24 +89,17 @@ catalog_update:
     - OPENAI_API_KEY
     - OPENCODE_API_KEY
 
-# Limits for the shell tool. `timeout_ms` (milliseconds) applies when the
-# model gives no `timeout`; `max_timeout_ms` bounds the one it gives.
-# Output is bounded too, because it becomes prompt text: a command that
-# returns more than `max_output_tokens` keeps its end, since a command
-# reports its conclusion last, and standard error is served first so the
-# reason a command failed survives a noisy standard output.
-# `hard_max_output_tokens` bounds a `max_output_tokens` the model gives.
-# 0 disables any of these limits.
+# Shell limits: timeout_ms applies when a call gives no timeout; max_timeout_ms
+# caps a model-supplied timeout. max_output_tokens applies when a call gives
+# no limit; hard_max_output_tokens caps a model-supplied limit. Truncation
+# retains the end of output. Zero disables each limit.
 #
-# `shell` and `login` decide the shell a call runs under when the call names
-# neither: empty runs /bin/sh, and `login` reads the profile of the user.
-#
-# A call that asks for a terminal runs on a pseudo-terminal of `tty_rows` by
-# `tty_cols` (0 follows the real terminal, else 24 by 80) with TERM set to
-# `tty_term`. `tty` gives one to a call that asks for none, which is the only
-# way to give the native Responses `shell_call` a terminal. A named session is
-# ended after `session_timeout_ms` with no read and no write (0 never), and is
-# asked every `input_poll_ms` whether its program waits for input (0 never).
+# Empty shell selects /bin/sh. login reads the user's shell profile. A TTY
+# call uses tty_term and tty_rows/tty_cols; 0 follows the terminal or uses
+# 24 rows and 80 columns without one. tty enables a terminal by default.
+# session_timeout_ms ends an idle named session. input_poll_ms controls how
+# often the session checks whether its program waits for input; 0 disables
+# either timer.
 shell:
   timeout_ms: 120000
   max_timeout_ms: 600000
@@ -153,32 +114,28 @@ shell:
   session_timeout_ms: 900000
   input_poll_ms: 400
 
-# Size limits for read_file results, in bytes. `max_bytes` is the default.
-# `hard_max_bytes` limits a value from the model. 0 disables a limit.
-#
-# Use `offset` and `limit` to read a window of lines. Use the reported
-# `offset_bytes` to continue after a byte-limited result.
+# read_file limits, in bytes: max_bytes is the default; hard_max_bytes caps a
+# model-supplied value. Zero disables either limit. Use offset_bytes from a
+# truncated result to continue reading.
 read:
   max_bytes: 262144
   hard_max_bytes: 4194304
 
-# Time limits for one sub-agent job, in milliseconds. The job and every
-# process below it are stopped when a limit expires. `timeout_ms` applies
-# when neither the call nor the persona asks for one; `max_timeout_ms`
-# bounds the one the model asks for. 0 removes either limit.
+# Sub-agent time limits, in milliseconds. timeout_ms applies when neither
+# the call nor persona sets one. max_timeout_ms caps a model-supplied limit.
+# Zero disables either limit. Expiration stops the job and its descendants.
 agent:
   timeout_ms: 0
   max_timeout_ms: 3600000
-  # How a sub-agent child starts: `exec` runs fyai again, `fork` continues
-  # the image of the parent. A transient run and a pinned root use `fork`.
+  # exec starts another fyai process; fork continues the child process.
+  # Transient runs and pinned roots use fork.
   spawn: exec
-  # Maximum nesting depth of sub-agent branches below a top-level branch.
-  # Recursive delegation also uses this allocator limit.
+  # Maximum depth of sub-agent branch paths, including ordinary components.
   max_branch_depth: 8
-  # Maximum number of live delegated agents across this invocation.
+  # Maximum admitted agents in this invocation's descendant tree.
   max_live_agents: 16
-  # Named sub-agent personas. The `persona` parameter of the agent tool picks
-  # one; a key that a persona does not set keeps the value in force.
+  # Named personas selected by the agent tool. Unset keys inherit current
+  # settings.
   personas:
     explore:
       description: Read-only search of the workspace.
@@ -196,56 +153,49 @@ agent:
       reasoning:
         effort: high
 
-# Reasoning / thinking effort for reasoning-capable models. Maps to the
-# Responses API `reasoning: { effort, summary }` and to Chat Completions
-# `reasoning_effort` (summary is Responses-only and ignored otherwise). No
-# dedicated flag - `config set reasoning/effort high` / `--set
-# reasoning/effort=high`. Default is unset (no reasoning requested) - there
-# is no valid enum value for "off", so the key is absent rather than null.
+# Optional reasoning settings. Responses supports effort and summary; Chat
+# Completions supports effort. Omit the whole mapping to request no reasoning
+# setting; "off" and null are not valid effort values.
 # reasoning:
 #   effort: medium      # minimal | low | medium | high
 #   summary: auto       # auto | concise | detailed
 
 tools: true
-# The native OpenAI shell tool runs one command on pipes. It cannot ask for a
-# terminal or keep a named session, which `exec_command` does on every
-# provider. Turn it on only if you want the provider-side tool.
+# Enable the native OpenAI shell tool instead of the exec_command function.
+# Native calls use pipes and cannot request a terminal or named session.
 builtin_shell: false
-# Landlock-confine shell-tool sub-executions (Linux only; no-op elsewhere):
-# read-only system paths, read/write the project and temp dirs, everything else
-# denied. Best-effort - the allow-list/prompt remains the portable floor when
-# Landlock is unavailable. Either a bool (enable with defaults) or a mapping:
+# Landlock confines shell sub-executions on supported Linux systems. Defaults
+# grant read-only system paths and read/write project and temporary paths.
+# Command admission remains separate from filesystem confinement. Use a
+# boolean for the default policy or a mapping for explicit rules:
 #   sandbox:
 #     enabled: true
-#     deny:                 # carved out of the project (the .fyai arena is
-#       - secrets           # always denied); paths are project-relative,
-#       - ~/.ssh            # absolute (/...), or ~-relative
-#     allow:                # extra grants outside the project
-#       - /opt/toolchain            # string => read/write (rw)
-#       - { path: /ro/data, mode: ro }      # read + execute only
-#       - { path: /src, mode: edit }        # modify existing, no create/delete
-#       - { path: /logs, mode: append }     # write without truncating
-#       # modes: rw (default) | ro | edit | append
-#     network:              # present => restrict egress to these TCP ports
-#       ports: [443]        # (omit `network` entirely to leave egress open;
-#                           #  empty ports denies all egress)
-# `fyai sandbox on` stores this canned policy:
+#     deny:                 # Paths excluded from grants; .fyai is excluded.
+#       - secrets           # Paths can be project-relative, absolute, or ~-relative.
+#       - ~/.ssh
+#     allow:                # Additional grants outside the project.
+#       - /opt/toolchain    # String grants read/write access.
+#       - { path: /ro/data, mode: ro }      # Read and execute.
+#       - { path: /src, mode: edit }        # Modify existing files.
+#       - { path: /logs, mode: append }     # Write without truncation.
+#       # Modes: rw (default), ro, edit, append.
+#     network:              # Restrict egress to listed TCP ports.
+#       ports: [443]        # Omit network to allow egress; [] denies egress.
+# `fyai sandbox on` stores this policy:
 # sandbox: { enabled: true, deny: [secrets, ~/.ssh], network: { ports: [443] } }
 sandbox: false
 
 logprobs: false
 top_logprobs: -1
-token_extents: false     # record streamed token extents in turn metadata
+token_extents: false     # Record streamed token extents in turn metadata.
 no_obfuscation: false
-whitewash_api_keys: true # redact API keys in wire logs
-response_chain: false    # chain via previous_response_id (Responses API;
-                          # missing server state falls back to local history)
-no_auth: false           # skip the api_key requirement and the auth header,
-                          # for local no-auth model servers (see "Local /
-                          # self-hosted models" above)
+whitewash_api_keys: true # Redact API keys in wire logs.
+response_chain: false    # Use previous_response_id for Responses requests;
+                          # replay local history if server state is unavailable.
+no_auth: false           # Do not require or send an API key.
 
-# No default - computed at runtime (nearest .fyai walking up from cwd);
-# override only to pin a specific arena location.
+# By default, fyai finds .fyai by walking up from the working directory.
+# Set arena_dir to select a specific arena.
 # arena_dir: /path/to/.fyai/arena
 
 logging:
@@ -256,169 +206,133 @@ logging:
 
 # --- Display / theming ------------------------------------------------------
 #
-# All stylistic options are grouped here (this nested form is the only one).
+# Display settings have no top-level equivalents.
 display:
-  markdown: true          # render markdown output
-  stream: true             # stream the response
-  # Exchanges of history replayed when an interactive session starts:
-  # -1 as many as the screen holds, 0 none.
+  markdown: true          # Render Markdown output.
+  stream: true            # Present model output as it arrives.
+  # Exchanges replayed at session start: -1 fills the screen; 0 skips replay.
   recap_exchanges: -1
-  # How the live screen is composed: page states the screen as one UI Markdown
-  # page (needs a libfytimui and a libfymd4c with page support, else stack is
-  # used); stack draws the fixed chrome of the terminal library.
+  # page composes the screen as UI Markdown; stack uses terminal-library
+  # chrome. A build without page support uses stack.
   renderer: page
-  # Where a page stands, when the session starts: fullscreen takes the
-  # alternate screen, where the transcript is a view that the wheel, PageUp
-  # and PageDown scroll; inline keeps the transcript in the scrollback of the
-  # terminal, which scrolls it as it scrolls any other program.
+  # fullscreen uses the alternate screen and a scrollable transcript view;
+  # inline uses terminal scrollback.
   screen: fullscreen
-  # The page document of the page renderer, a YAML file; empty uses the
-  # embedded data/page.yaml. `/page` shows the document in use.
+  # YAML page document; empty selects embedded data/page.yaml.
+  # `/page` reports the document in use.
   page: ""
-  # Rendered rows of a bounded tool result.
+  # Rendered rows shown for a bounded tool result.
   tool_preview_lines: 5
-  # Minimum progressive tool redraw period; 0 redraws every update.
+  # Minimum period between tool redraws; 0 redraws every update.
   tool_update_interval_ms: 33
-  # none hides bodies; brief bounds all; default specializes; full shows all.
+  # Tool result detail: none, brief, default, or full.
   tool_detail: default
-  transcript_system: false # include system messages in transcript output
-  # How streamed markdown is rendered (only with markdown + stream):
-  markdown_mode: line      # line (per line, default) | stream (redraw per chunk) | oneshot (at end)
-  # Minimum interval between progressive redraws in stream mode, 0 to 1000
-  # milliseconds; 0 repaints every update.
+  transcript_system: false # Include system messages in transcript output.
+  # Markdown streaming mode: line renders each line; stream redraws on chunks;
+  # oneshot renders at completion. Applies when markdown and stream are true.
+  markdown_mode: line
+  # Minimum interval between stream-mode redraws, in milliseconds;
+  # 0 redraws every update.
   markdown_update_interval_ms: 50
-  color: auto               # auto (colour iff a terminal) | off | on (force, even piped)
-  # One theme controls Markdown, fenced code, and terminal chrome: a libfymd4c
-  # theme (default, catppuccin, solarized, ...) or a libfypalette theme such as
-  # ember. Append :auto, :dark, or :light to select its background variant.
-  # `/theme` lists the themes of the build. ember:auto is the default of a
-  # build with libfypalette; a build without it uses default:auto.
+  color: auto             # auto for terminals, off, or on even when piped.
+  # Theme for Markdown, code, and terminal chrome. Select a variant with
+  # :auto, :dark, or :light. `/theme` lists themes in this build.
+  # Builds without libfypalette use default:auto.
   theme: ember:auto
-  # The background a palette theme draws for: theme uses the ground of the
-  # theme (a fullscreen page fills its default backgrounds with it); terminal
-  # asks the terminal for its background and keeps the neutral steps over it.
+  # Palette ground: theme fills default backgrounds of fullscreen pages;
+  # terminal uses the detected terminal background.
   theme_ground: theme
-  # Override the selected theme's table border:
-  # theme (follow the theme) | grid (force borders) | none (borderless).
+  # Table border: theme, grid, or none.
   table_border: theme
-  # Separators (rendered as markdown, themed by the renderer). turn_separator
-  # breaks turns in the history view ("---" => a themed rule, "" => blank line);
-  # tool_separator is rendered before each tool result; section_separator sits
-  # between streamed reasoning and the answer. Empty ("") emits nothing / a
-  # blank line.
+  # Markdown separators: turn_separator separates history exchanges;
+  # tool_separator precedes a tool result; section_separator separates
+  # reasoning from the answer. Empty strings add no rule.
   turn_separator: ""
   tool_separator: ""
   section_separator: ""
-  # Blank rows, 0 to 8: around a tool exchange, and between the user card and
-  # the answer under it.
+  # Blank rows around tool exchanges and below user cards (0 to 8).
   tool_group_fence: 1
   user_card_fence: 1
-  # Interactive prompt bubble. prompt is the input marker; prompt_top and
-  # prompt_bottom are {key} templates over the session vars (model, provider,
-  # api, effort, summary, temp, ctx, branch, cwd, location).
-  # prompt_bottom replaces the banner. All
-  # may carry SGR colour escapes (e.g. "\e[36m{model}\e[0m"). The values below
-  # are the built-in defaults; an empty string re-selects them (prompt then
-  # falls back to "> " when markdown is off, "  > " with markdown).
-  # The top row identifies the fyai branch and working directory; a blank row
-  # stands above it. With a palette theme each value of prompt_top and
-  # prompt_bottom takes the next colour of the theme's series.
+  # prompt is the input marker. prompt_top and prompt_bottom expand session
+  # fields such as {location} and {model}; prompt_bottom replaces the banner.
+  # Empty strings select built-in prompt defaults. Templates may contain SGR
+  # escapes. Palette themes color template values in series order.
   prompt: "  > "
   prompt_top: " {location}"
-  # Branch diagrams use libfymermaid at the width granted by the work pane.
-  # In /branches, g cycles tree/gitgraph/list. The setting below is the default.
+  # Initial /branches view: tree or gitgraph; g cycles the available views.
   branch_view: tree
-  # Where the branch and resume browsers render the end of the selected
-  # session: auto (right of a wide pane, foot of a tall one) | right | bottom |
-  # off. `p` cycles it in a browser. branch_preview_size is its share of the
-  # pane in percent, 10 to 80.
+  # Browser preview placement: auto, right, bottom, or off; p cycles it.
+  # branch_preview_size is the pane share in percent (10 to 80).
   branch_preview: auto
   branch_preview_size: 40
-  # Right-side preview width: half, quarter, 10%-80%, or exact columns.
-  # When unset, branch_preview_size applies.
+  # Right-side preview width: half, quarter, percent, or column count.
+  # Unset uses branch_preview_size.
   # branch_preview_width: quarter
-  # Empty follows light/dark; named themes: default, light, mono.
+  # Empty follows the active variant; named themes: default, light, mono.
   diagram_theme: ""
   diagram_charset: auto
-  # Gitgraph: legend moves long labels below; shrink compresses; clip crops.
-  # Tree rows have fixed spacing; all fit policies clip long labels.
+  # Gitgraph label fit: legend moves labels, shrink compresses, clip crops.
+  # Tree layout clips long labels for every fit policy.
   diagram_fit: legend
   prompt_bottom: " {model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}"
-  # How the live screens of shell sessions and sub-agents share the work
-  # pane: auto, columns, stack, main-top, or main-left.
+  # Work-pane tile arrangement: auto, columns, stack, main-top, or main-left.
   work_layout: auto
   work_columns: 0
   work_min_tile_cols: 40
-  # Rows a tile keeps to scroll back to with its bar and the wheel; 0 keeps
-  # none.
+  # Scrollback rows retained per tile; 0 retains none.
   work_history_rows: 1000
-  # Where the pane stands: above-prompt, or below-prompt for the rows under
-  # the input.
+  # Work-pane placement relative to the prompt.
   work_position: above-prompt
-  # When the completion popup opens: tab on Tab; auto as the line is typed,
-  # when the line has candidates, such as after a slash.
+  # Completion popup: tab opens on Tab; auto opens when typing finds matches.
   completion: tab
-  # Where a slash command goes: pane shows its output in a popup or a tile,
-  # and the transcript keeps nothing of it; transcript draws the command and
-  # its output in the transcript, and stores both.
+  # Slash-command output: pane shows a tile or popup without storing it;
+  # transcript draws and stores the command and output.
   command_output: pane
-  # Where an editor runs for /edit, config edit and a log view: pane runs it
-  # in a tile of the work pane that takes the pane and the keys; terminal
-  # gives it the whole terminal. Without an interactive UI it is the terminal.
+  # Editor location for /edit, config edit, and log views: pane or terminal.
+  # Without an interactive UI, the editor uses the terminal.
   editor: pane
-  # A further ceiling on work_zoom_rows; 0 leaves the height to it alone.
+  # Additional work-pane row cap; 0 applies no additional cap.
   work_max_rows: 0
-  # Height of the work pane: full, half, quarter, or a positive row count.
+  # Work-pane height: full, half, quarter, or a positive row count.
   work_zoom_rows: half
-  # The ground of what holds the keys - the prompt, a picker, a focused tile:
-  # theme for the focus wash of a palette theme (reverse without one),
-  # reverse for the ground the terminal draws text in, or #rrggbb for one of
-  # your own. An empty string reverses the margin of the tile instead.
-  # focus_bg_mix is how much of the ground reaches a cell the program
-  # coloured itself.
+  # Focus background for prompt, picker, and focused tile: theme uses the
+  # palette focus role (or reverse without a palette); reverse uses terminal
+  # reverse video; #rrggbb selects a color. Empty reverses only the margin.
+  # focus_bg_mix controls the percentage mixed into program-colored cells.
   focus_bg: theme
   focus_bg_mix: 35
-  # The chrome of the pane: work_frame above it, tile_frame around a tile,
-  # tile_sep between two tiles of a row, and session_margin the gutter at the
-  # left of a terminal session ("" draws none). work_cap draws a cap row with
-  # the height, the tiles and the keys in place of work_frame.
+  # Pane chrome: work_frame surrounds the pane, tile_frame ends each tile,
+  # tile_sep divides columns, and session_margin precedes terminal rows.
+  # work_cap replaces the upper frame with pane and tile status.
   work_frame: none
   tile_frame: none
   tile_sep: " ┃ "
   session_margin: "  "
   work_cap: false
-  # Mouse controls: full adds the buttons of a tile, a scroll bar and the
-  # wheel; zoom adds the buttons alone; none disables them. Anything but none
-  # takes the mouse for the session: selection and copy are then fyai's, which
-  # copies through the terminal, and not the terminal's own.
+  # Mouse controls: full adds buttons and scrolling; zoom adds buttons only;
+  # none disables controls. With controls enabled, fyai handles selection.
   work_controls: full
-  pretty: false           # pretty (YAML) debug dumps
-  thinking: true           # display model reasoning/thinking output
-  cache_info: false       # print provider cache info
-  stats: false            # print session token usage to stderr
+  pretty: false           # Format debug dumps as YAML.
+  thinking: true          # Display model reasoning output.
+  cache_info: false       # Show provider cache information.
+  stats: false            # Show session token usage.
 
 # --- MCP (Model Context Protocol) server support --------------------------
 mcp:
   enabled: false
-  # Hold the first model step until every server has settled, so the initial
-  # turn sees the complete toolset. false submits optimistically while servers
-  # keep connecting in the background.
+  # Wait for all servers before the first model request. false permits a
+  # request while servers continue connecting.
   startup_wait: true
-  # Legacy single-server form. Used as the server named "default" when
-  # servers is empty.
+  # Single-server endpoint, named "default" when servers is empty.
   endpoint: ""
   auth_token: { type: env, value: MCP_API_KEY }
   protocol_version: "2024-11-05"
   timeout: 30
-  # Named Streamable HTTP or local stdio servers. Per-server `enabled`,
-  # `protocol_version`, `timeout`, and `auth_token` override the group values;
-  # disabled entries are skipped. HTTP entries use `endpoint` and may set
-  # `transport: streamable-http` (or the `http` alias). Stdio entries use
-  # `transport: stdio`, `command`, optional `args`, `env`, and `cwd`.
-  # HTTP authentication defaults to bearer-token mode. `auth: { type: oauth }`
-  # enables discovery/browser OAuth and may also set `allow_browser`, `scopes`,
-  # `authorization_params`, or a pre-registered `client`.
-  # Tool names are exposed as mcp__<server>__<tool>.
+  # Named Streamable HTTP or stdio servers. Server enabled, protocol_version,
+  # timeout, and auth_token override group settings. HTTP uses endpoint;
+  # stdio uses command with optional args, env, and cwd. OAuth authentication
+  # uses auth: { type: oauth } and optional discovery/browser settings.
+  # Exposed tool names have the form mcp__<server>__<tool>.
   servers: {}
   # servers:
   #   github:
@@ -433,14 +347,12 @@ mcp:
   #     env: { LOG_LEVEL: warn }
   #     cwd: .
 
-# `catalog:` is written by fyai on every configuration commit: the catalogue
-# entry of the configured model (display_name, context_window, capabilities,
-# ...) and its canonical_provider. It is read-only; never set it by hand.
+# fyai maintains the selected model's informational catalogue block on
+# configuration commits. Do not set the derived model information manually.
 
-# Branch behaviour.
+# Branch conflict handling.
 branch:
-  # What to do when another invocation advanced this branch while this one was
-  # running: abort (write nothing, the default), or replay our turns on top of
-  # theirs with rebase or merge. Invocations on different branches never
-  # conflict, so this only applies to the same branch.
+  # When another invocation advances this branch: abort without publishing,
+  # or replay unpublished turns with rebase or merge. Other branches do not
+  # conflict.
   on_conflict: abort

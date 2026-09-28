@@ -1,38 +1,30 @@
-# fyai configuration document schema (JSON Schema 2020-12 subset). The exact
-# supported, ignored, and explicitly rejected keyword sets are documented in
-# doc/schema-validator-plan.md.
-# `description` is decorative only (not a validated keyword); kept in sync
-# with config.yaml.sample, the authoritative source of the key list and
-# their compiled-in defaults.
-#
-# Deliberately permissive at every level (additionalProperties left unset,
-# i.e. true): this validates the shape/type/enum of keys fyai actually reads,
-# not a closed vocabulary - an unknown key is silently ignored by the loader
-# today, so rejecting it here would just be a second, divergent source of
-# truth. `x-fyai-scope: session` on a key or a group says that a session
-# setting changes it for that session only, in the session layer; a key
-# without it is stored. Wired into the commit-time validation gate
-# (config_validate_report_shallow in src/fyai_config.c), so every commit
-# path (set/import/edit/--set) is checked against it; also available
-# directly via `fyai config validate` and `fyai config schema`.
+# fyai configuration schema (JSON Schema 2020-12 subset).
+# See doc/schema-validator-plan.md for supported validation keywords.
+# The first sentence of each description is a completion hint (max 72 chars).
+# Keep keys and defaults consistent with config.yaml.sample.
+# Unknown keys are ignored by the loader, so most mappings permit additional
+# properties. `x-fyai-scope: session` marks settings stored in the session
+# layer; other settings are stored in the branch. Validation applies to each
+# configuration commit and to `fyai config validate`.
 type: object
 description: >-
-  Top-level fyai config document (arena-resident; see config.yaml.sample).
+  Configuration settings for fyai. The document resides in an arena; see
+  config.yaml.sample for the key list and defaults.
 properties:
   auth:
     type: string
     enum: [auto, api-key, chatgpt]
     default: auto
     description: >-
-      Credential selection. auto preserves API-key precedence and otherwise
-      uses a saved ChatGPT login for the OpenAI Responses provider; api-key
+      Select the credential method. auto preserves API-key precedence and uses
+      a saved ChatGPT login for OpenAI Responses if no key is available; api-key
       and chatgpt force the selected method.
   model:
     x-fyai-complete: model
     type: string
     description: >-
-      Selects the model; the catalogue maps it to provider/endpoint/grammar/
-      wire-id. May carry a `provider/` prefix to pin a specific provider
+      Select the model. The catalogue maps it to provider, endpoint, grammar,
+      and wire ID. A `provider/` prefix pins a specific provider
       offering it (e.g. openrouter/glm-5.2). No default; falls back to a
       built-in model when unset.
   api:
@@ -40,35 +32,36 @@ properties:
     enum: [responses, chat-completions, chat, messages]
     default: responses
     description: >-
-      API grammar intent (not derived): responses | chat-completions |
-      messages. Re-derived alongside api_url when `model` changes onto a
+      Select the provider API grammar. Valid grammars are responses,
+      chat-completions, and messages; chat is an alias. The grammar is
+      re-derived alongside api_url when `model` changes to a
       known catalogue entry.
   api_url:
     type: string
     description: >-
-      Endpoint URL. Derived from the catalogue by default; set explicitly
-      only to override the endpoint the catalogue resolves for the current
+      Set the provider endpoint URL. It comes from the catalogue by default;
+      set it only to override the endpoint resolved for the current
       model/api (e.g. a self-hosted mirror).
   api_key:
     type: object
     required: [type]
     description: >-
-      Non-secret pointer to the credential: never a raw value (raw
-      api_key is rejected on every ingestion path). Falls back to
-      --api-key/-k, then the provider's conventional
-      <PROVIDER>_API_KEY environment variable.
+      Reference an API credential without storing its value. Raw api_key
+      values are rejected on every ingestion path. Automatic lookup uses
+      --api-key/-k, the provider's conventional <PROVIDER>_API_KEY
+      environment variable, then its logical secret.
     properties:
       type:
         type: string
         enum: [auto, env, secret]
-        description: Automatic provider lookup, environment, or logical secret reference.
+        description: Select automatic lookup, an environment variable, or a secret reference.
       value:
         type: string
-        description: Environment variable or logical fyai secret name; omitted for auto.
+        description: Name an environment variable or fyai secret. Omit for auto.
   system_prompt:
     type: string
     default: You are a concise assistant.
-    description: The system prompt prepended to every conversation.
+    description: Set the system prompt for each conversation.
   parallel_tool_calls_prompt:
     type: string
     default: >-
@@ -76,20 +69,20 @@ properties:
       execute in parallel. Keep dependent or potentially conflicting tool
       calls in separate responses.
     description: >-
-      Guidance appended to a new conversation's system prompt while parallel
-      tool calls are enabled. Set to an empty string to suppress the guidance
-      without disabling parallel execution.
+      Set guidance for parallel tool calls. It is appended to a new
+      conversation's system prompt while parallel calls are enabled. An empty
+      string suppresses the guidance without disabling parallel execution.
   parallel_tool_calls:
     type: boolean
     default: true
     description: >-
-      Allow independent built-in tool calls returned in one model response to
-      execute concurrently.
+      Run independent built-in tool calls concurrently. Calls returned in
+      one model response can run together.
   web_search:
     type: boolean
     default: true
     description: >-
-      Enable the selected provider's native web-search tool. This is only
+      Enable the provider's hosted web-search tool. This is only
       available when the catalogue endpoint declares hosted web search.
   temperature:
     type: number
@@ -102,30 +95,28 @@ properties:
     exclusiveMinimum: 0
     default: 1000
     description: >-
-      Tool-call loop iteration cap per turn. It stops a runaway loop; the
+      Limit tool-call iterations per turn. On reaching the limit, the
       turn keeps the steps that completed and reports the limit as its cause.
   max_tokens:
     type: integer
     exclusiveMinimum: 0
     default: 8192
     description: >-
-      Output-token cap per model call. Required by the Anthropic Messages
-      API (sent on every request there); defaults from the catalogue
-      otherwise.
+      Limit output tokens per model call. The Anthropic Messages API requires
+      this value on every request; other APIs can use the catalogue limit.
   branch:
     type: object
     description: >-
-      Branch behaviour. A branch is one independent line of work with its own
-      conversation and its own configuration.
+      Configure branch conflict handling. Each branch has its own
+      conversation and configuration.
     properties:
       on_conflict:
         type: string
         enum: [abort, rebase, merge]
         description: >-
-          What to do when another invocation advanced this branch while this
-          one was running. `abort` writes nothing and reports it, which is the
-          default because reordering a conversation unasked is the user's
-          decision. `rebase` and `merge` replay this invocation's turns on top
+          Select how to handle a concurrent change to this branch. `abort`
+          writes nothing and reports the conflict; it is the default.
+          `rebase` and `merge` replay this invocation's turns on top
           of the ones already committed; they agree here, because unpublished
           turns have no recorded time while committed ones already happened.
           Invocations on *different* branches never conflict.
@@ -133,7 +124,7 @@ properties:
   reasoning:
     type: object
     description: >-
-      Reasoning/thinking effort for reasoning-capable models. Maps to the
+      Configure reasoning for supported models. The setting maps to the
       Responses API `reasoning: { effort, summary }` and to Chat
       Completions `reasoning_effort` (summary is Responses-only). Default
       is unset (no reasoning requested) - there is no valid enum value for
@@ -142,11 +133,11 @@ properties:
       effort:
         type: string
         enum: [minimal, low, medium, high]
-        description: Requested reasoning effort.
+        description: Set the reasoning effort for supported models.
       summary:
         type: string
         enum: [auto, concise, detailed]
-        description: Requested reasoning summary verbosity (Responses API only).
+        description: Set the reasoning summary detail for Responses requests.
   tools:
     type: boolean
     default: true
@@ -155,19 +146,17 @@ properties:
     type: boolean
     default: false
     description: >-
-      Enable the OpenAI built-in shell tool in place of the `exec_command`
-      function tool. It runs one command on pipes: it cannot ask for a
-      terminal and it cannot keep a named session, so the session tools have
-      nothing to attach to. Off by default, and forced off automatically for
-      the Messages API grammar (which has no native shell tool support).
+      Use the provider's native shell tool. It replaces the `exec_command`
+      function tool. Native calls use pipes and cannot request a terminal or
+      keep a named session. The Messages API does not support native shell.
   retry:
     type: object
     additionalProperties: false
     description: >-
-      Automatic retry of a provider request that failed for a transient
-      reason: a refused or lost connection, a timeout, or HTTP 408, 429,
-      500, 502, 503 or 504. The delay doubles after each attempt and keeps
-      a random part, so parallel requests do not come back together. A
+      Retry transient provider request failures. These include a refused or
+      lost connection, a timeout, or HTTP 408, 429,
+      500, 502, 503 or 504. The delay doubles after each attempt and includes
+      jitter. A
       `Retry-After` header replaces the calculated delay.
     properties:
       max_attempts:
@@ -175,9 +164,8 @@ properties:
         minimum: 1
         default: 8
         description: >-
-          Attempts made for one request, the first one included. 1 disables
-          retry. A token-per-minute limit can hold a request for most of a
-          minute, which needs more attempts than a short outage does.
+          Set the maximum attempts per request. The first attempt counts;
+          1 disables retries. Rate limits may require several attempts.
       initial_delay_ms:
         type: integer
         minimum: 0
@@ -188,22 +176,22 @@ properties:
         minimum: 0
         default: 30000
         description: >-
-          Upper bound on one delay, applied to the calculated delay and to a
+          Limit the delay between retry attempts. This also caps a
           `Retry-After` value. 0 removes the bound.
   catalog_update:
     type: object
     additionalProperties: false
     description: >-
-      The program that `fyai catalog update` runs to write a catalogue.
+      Configure the catalogue update program.
     properties:
       command:
         type: string
         default: scrape-providers
         description: >-
-          Command line of a scrape-providers compatible program. fyai adds
-          --format yaml and the selection options, runs it under /bin/sh
-          with only the credentials that `credentials` names, and reads the
-          catalogue from its standard output.
+          Set the catalogue update command. It must be compatible with
+          scrape-providers. fyai adds --format yaml and selection options,
+          runs it under /bin/sh with only the credentials named by
+          `credentials`, and reads the catalogue from standard output.
       credentials:
         type: array
         maxItems: 32
@@ -218,114 +206,113 @@ properties:
           - OPENAI_API_KEY
           - OPENCODE_API_KEY
         description: >-
-          Names of the environment variables that hold the provider keys the
-          command reads to list the models of a provider. They are given to
-          the command in addition to the environment of a tool; every other
-          credential is removed.
+          List credential environment variables for catalogue updates. These
+          hold provider keys for the command. Other credentials are removed
+          from its environment.
       timeout_ms:
         type: integer
         minimum: 0
         default: 600000
-        description: Time limit of one run. 0 disables the limit.
+        description: Limit one catalogue update run. 0 disables the limit.
   shell:
     type: object
     additionalProperties: false
-    description: Limits applied to shell-tool sub-executions.
+    description: Configure shell-tool execution limits and defaults.
     properties:
       timeout_ms:
         type: integer
         minimum: 0
         default: 120000
         description: >-
-          Time limit applied when the model asks for none. The command is
-          stopped when it expires. 0 disables the default limit.
+          Set the default shell-tool time limit. It applies when the model
+          requests no limit. The command stops when it expires; 0 disables it.
       max_timeout_ms:
         type: integer
         minimum: 0
         default: 600000
         description: >-
-          Upper bound on a `timeout` the model asks for. 0 removes the
+          Limit a shell timeout requested by the model. 0 removes the
           bound.
       max_output_tokens:
         type: integer
         minimum: 0
         default: 16384
         description: >-
-          Token limit on the output one shell call returns, applied when the
-          model asks for none. The end of the output is kept, because a
-          command reports its conclusion last. 0 disables the default limit.
+          Limit tokens returned by one shell call. This applies when the
+          model asks for none. Truncated output retains its end.
+          0 disables the default limit.
       hard_max_output_tokens:
         type: integer
         minimum: 0
         default: 200000
         description: >-
-          Upper bound on a `max_output_tokens` the model asks for. 0 removes
+          Limit shell output tokens requested by the model. 0 removes
           the bound.
       session_timeout_ms:
         type: integer
         minimum: 0
         default: 900000
         description: >-
-          Idle limit of a named terminal session: the time with no read and no
-          write before it is ended. It is not a limit on the program, which can
+          Limit idle time for a named terminal session. The session ends after
+          this time with no read or write. It is not a limit on the program, which can
           work for as long as the model keeps using it. 0 removes the limit.
       tty_term:
         type: string
         default: xterm-256color
-        description: Terminal type exposed to a `tty` shell call.
+        description: Set the terminal type exposed to a `tty` shell call.
       input_poll_ms:
         type: integer
         minimum: 0
         default: 400
         description: >-
-          How often a session is asked whether its program is waiting to be
-          answered. A program stopped in a read of its input needs the model,
+          Set the interval for checking terminal-session input waits. A program
+          stopped in a read of its input needs the model,
           and the model is told so in a turn of its own. 0 does not ask.
       shell:
         type: string
         default: ""
         description: >-
-          The shell that a call runs under when the call names none. Empty
+          Set the default shell for a call. An empty value
           runs `/bin/sh`, as each other command of this program does.
       login:
         type: boolean
         default: false
         description: >-
-          Run a shell call under a login shell, which reads the profile of
-          the user, when the call asks for none. A profile is where the tools
+          Use a login shell by default. It reads the user's profile when the
+          call does not specify login behavior. A profile is where the tools
           and the environment of that user are set up.
       tty:
         type: boolean
         default: false
         description: >-
-          Run a shell call on a pseudo-terminal when the call asks for
-          none. The native `shell_call` of the Responses grammar cannot ask,
+          Use a pseudo-terminal for shell calls by default. The native
+          `shell_call` of the Responses grammar cannot ask,
           so this is the only way to give it a terminal.
       tty_rows:
         type: integer
         minimum: 0
         default: 0
         description: >-
-          Rows of the pseudo-terminal given to a `tty` shell call. 0 follows
+          Set pseudo-terminal rows for a `tty` shell call. 0 follows
           the real terminal, and gives 24 when there is none.
       tty_cols:
         type: integer
         minimum: 0
         default: 0
         description: >-
-          Columns of the pseudo-terminal given to a `tty` shell call. 0
+          Set pseudo-terminal columns for a `tty` shell call. 0
           follows the real terminal, and gives 80 when there is none.
   read:
     type: object
     additionalProperties: false
-    description: Limits applied to read_file results.
+    description: Configure read_file result limits.
     properties:
       max_bytes:
         type: integer
         minimum: 0
         default: 262144
         description: >-
-          Byte limit applied when the model asks for none. A larger file is
+          Limit default read_file result bytes. A larger file is
           truncated and the result reports the full size. 0 disables the
           default limit.
       hard_max_bytes:
@@ -333,19 +320,19 @@ properties:
         minimum: 0
         default: 4194304
         description: >-
-          Upper bound on a `max_bytes` the model asks for. 0 removes the
+          Limit read_file bytes requested by the model. 0 removes the
           bound.
   agent:
     type: object
     additionalProperties: false
-    description: Sub-agent settings.
+    description: Configure sub-agent execution.
     properties:
       timeout_ms:
         type: integer
         minimum: 0
         default: 0
         description: >-
-          Time limit for one sub-agent job, in milliseconds. It applies when
+          Set the default sub-agent job time limit in milliseconds. It applies when
           neither the call nor the persona asks for one. The job and every
           process below it are stopped when it expires. 0 removes the limit.
       max_timeout_ms:
@@ -353,67 +340,73 @@ properties:
         minimum: 0
         default: 3600000
         description: >-
-          Upper bound on a `timeout` the model asks for. 0 removes the
+          Limit a sub-agent timeout requested by the model. 0 removes the
           bound.
       personas:
         type: object
         description: >-
-          Named sub-agent personas. The `persona` parameter of the agent tool
+          Define named sub-agent personas. The `persona` parameter of the agent tool
           selects one by name. A key that a persona does not set keeps the
           value in force for the invocation.
         additionalProperties:
           type: object
           additionalProperties: false
+          description: Configure one named sub-agent persona.
           properties:
             description:
               type: string
               description: >-
-                What this persona is for. It is shown to the model with the
+                Describe the purpose of this persona. This text is shown to the model with the
                 list of names, thus it is what the model chooses on.
             system_prompt:
               type: string
-              description: Instructions that define the persona.
+              description: Set the instructions that define this persona.
             model:
               type: string
               description: >-
-                Model for this persona, resolved through the catalogue like
+                Select a model for this persona. It is resolved through the catalogue like
                 the top-level `model` key. It applies to fresh agents; forked
                 agents always inherit the parent's resolved provider/model.
             temperature:
               type: number
+              description: Set the sampling temperature for this persona.
             max_tokens:
               type: integer
               minimum: 1
+              description: Limit output tokens per model call for this persona.
             thinking:
               type: boolean
-              description: Display reasoning output of the sub-agent.
+              description: Display reasoning output of this sub-agent.
             timeout_ms:
               type: integer
               minimum: 0
               description: >-
-                Time limit for this persona, which overrides agent/timeout_ms.
+                Set the time limit for this persona. It overrides agent/timeout_ms.
             context:
               type: string
               enum: [fork, fresh]
               description: >-
-                How a conversation of this persona starts. The `context`
+                Select the starting context for this persona. The `context`
                 parameter of the call overrides it.
             reasoning:
               type: object
               additionalProperties: false
+              description: Configure reasoning for this persona.
               properties:
                 effort:
                   type: string
                   enum: [minimal, low, medium, high]
+                  description: Set the reasoning effort for this persona.
                 summary:
                   type: string
                   enum: [auto, concise, detailed]
+                  description: Set the reasoning summary verbosity for this persona.
       spawn:
         type: string
         enum: [exec, fork]
         default: exec
         description: >-
-          How a sub-agent child starts. `exec` runs fyai again, and the child
+          Select how a sub-agent child starts. `exec` runs fyai again, and the child
           receives the state of the parent on its control channel. `fork`
           continues the forked image of the parent. A transient run, a pinned
           root, and a platform without a supported executable-image path
@@ -423,23 +416,22 @@ properties:
         minimum: 1
         default: 8
         description: >-
-          Maximum nesting depth of sub-agent branches below a top-level
-          branch. This counts branch path components, including ordinary
+          Limit sub-agent branch nesting depth below the top-level branch. This counts branch path components, including ordinary
           branches, and protects the recursive branch allocator.
       max_live_agents:
         type: integer
         minimum: 1
         default: 16
         description: >-
-          Maximum number of admitted agents in this invocation's complete
+          Limit concurrent agents in this invocation's complete
           descendant tree. The root grants admission before provider work
           starts. Excess calls fail so the caller can wait or change its task.
   sandbox:
     x-fyai-scope: session
     default: false
     description: >-
-      Landlock-confine shell-tool sub-executions (Linux only; a no-op
-      elsewhere). `false` disables it; `true` or a mapping enables it -
+      Confine shell-tool executions with Landlock. This applies on Linux only;
+      it has no effect elsewhere. `false` disables it; `true` or a mapping enables it -
       read-only system paths, read/write the project and temp dirs,
       everything else denied by default. Best-effort: the allow-list/prompt
       remains the portable floor when Landlock is unavailable.
@@ -450,55 +442,57 @@ properties:
           enabled:
             type: boolean
             default: true
-            description: Turn the sandbox on/off (default true when this mapping is given).
+            description: Enable or disable the sandbox. A mapping defaults to enabled.
           deny:
             type: array
             description: >-
-              Paths carved out of the project grant (project-relative,
-              absolute, or ~-relative). The .fyai arena is always denied.
+              Deny access to the specified paths. Paths can be project-relative,
+              absolute, or home-relative. The .fyai arena is always denied.
             items:
               type: string
           allow:
             type: array
-            description: Extra grants outside the project.
+            description: Grant access to paths outside the project.
             items:
               anyOf:
                 - type: string
-                  description: A path, granted read/write (rw).
+                  description: Grant read and write access to this path.
                 - type: object
                   required: [path]
                   properties:
                     path:
                       type: string
+                      description: Name the path for this sandbox grant.
                     mode:
                       type: string
                       enum: [rw, ro, edit, append]
                       description: >-
-                        rw (default) | ro (read+execute only) | edit
-                        (modify existing, no create/delete) | append
-                        (write without truncating).
+                        Select the access mode for this path. rw is the default;
+                        ro allows read and execute; edit modifies existing files
+                        without create or delete; append writes without truncation.
           network:
             type: object
             description: >-
-              Present => restrict egress to the listed TCP ports; omit
-              entirely to leave egress open; empty ports denies all
-              egress.
+              Restrict network egress to listed TCP ports. Omit this mapping
+              to leave egress open; an empty ports list denies all egress.
             properties:
               ports:
                 type: array
+                description: List TCP ports allowed for network egress.
                 items:
                   type: integer
                   minimum: 1
                   maximum: 65535
+                  description: Set one allowed TCP port number.
   logprobs:
     type: boolean
     default: false
-    description: Request token log-probabilities.
+    description: Request token log-probabilities from the provider.
   top_logprobs:
     type: integer
     minimum: -1
     default: -1
-    description: Number of top log-probability candidates per token (-1 = unset).
+    description: Set the number of top log-probability candidates per token. -1 leaves it unset.
   token_extents:
     x-fyai-scope: session
     type: boolean
@@ -507,7 +501,7 @@ properties:
   no_obfuscation:
     type: boolean
     default: false
-    description: Disable provider-side response obfuscation, where supported.
+    description: Disable provider-side response obfuscation where supported.
   whitewash_api_keys:
     type: boolean
     default: true
@@ -516,24 +510,24 @@ properties:
     type: boolean
     default: false
     description: >-
-      Chain via previous_response_id (Responses API only). Off by default;
+      Chain Responses API requests with previous_response_id. This is off by default;
       a stale or evicted stored response automatically falls back to replaying
       the canonical local turn chain.
   no_auth:
     type: boolean
     default: false
     description: >-
-      Skip the api_key requirement and the Authorization/x-api-key header,
-      for local no-auth model servers (Ollama, llama.cpp's llama-server,
-      vLLM, ...) speaking the Chat Completions wire format.
+      Skip API-key authentication for local model servers. This omits the
+      Authorization and x-api-key headers for servers that use the Chat
+      Completions wire format.
   arena_dir:
     type: string
     description: >-
-      Pins a specific .fyai arena location. No default - computed at
-      runtime by walking up from cwd.
+      Set the .fyai arena location. By default, fyai finds it by walking up
+      from the current working directory.
   logging:
     type: object
-    description: Trace logging under .fyai/logs.
+    description: Configure trace logs under .fyai/logs.
     properties:
       wire:
         type: boolean
@@ -555,43 +549,43 @@ properties:
     x-fyai-scope: session
     type: object
     description: >-
-      Stylistic/output options; the only supported form is this nested
-      group (no top-level equivalents).
+      Configure output and terminal presentation. These options exist only
+      in this nested group.
     properties:
       markdown:
         type: boolean
         default: true
-        description: Render markdown output.
+        description: Render Markdown output.
       stream:
         type: boolean
         default: true
-        description: Stream the response as it arrives.
+        description: Stream model responses as they arrive.
       recap_exchanges:
         type: integer
         minimum: -1
         default: -1
         description: >-
-          Exchanges of conversation history replayed when an interactive
+          Set how many exchanges to replay when an interactive
           session starts. -1 replays as many recent exchanges as the screen
           holds, 0 replays none.
       tool_preview_lines:
         type: integer
         minimum: 0
         default: 5
-        description: Rendered rows of a tool result shown before it is bounded.
+        description: Set the number of tool-result preview rows.
       tool_update_interval_ms:
         type: integer
         minimum: 0
         maximum: 1000
         default: 33
         description: >-
-          Minimum interval between progressive tool-output redraws. Zero
+          Set the minimum interval between progressive tool-output redraws. Zero
           repaints every update.
       session_margin:
         type: string
         default: "  "
         description: >-
-          The gutter drawn at the left of every row of a terminal session. It
+          Set the left gutter of terminal-session rows. It
           is as wide as the indicator of the title row, so the screen starts
           under the name of the call that opened it. An empty string draws
           none, and the screen then starts at the left edge of its tile.
@@ -599,29 +593,20 @@ properties:
         type: string
         default: theme
         description: >-
-          The ground of what holds the keys: the prompt, a picker and a
-          focused tile. theme takes the focus wash of a palette theme
-          (pane.focus), on which the text of the theme reads on a light
-          terminal and a dark one, and reverse without one. reverse is the
-          ground the terminal draws text in, which asks for no colour the
-          terminal may not have, and #rrggbb is one of your own. It is drawn
-          under whatever the program draws: every cell that has no colour of
-          its own takes it, the margin and the head with them, and the first
-          column of the margin is an edge in a style of the theme, which is
-          seen on a black or a white ground; the prompt stands on the same ground,
-          because that is where the keys are when no tile holds them. An
-          empty string draws no ground and marks focus by reversing the
-          margin of the tile alone.
-          A #rrggbb asks for no detection, so a value the theme's text cannot
-          be read on is reported at startup.
+          Set the background of the focused input area. This applies to the
+          prompt, pickers, and focused tiles. theme uses the palette's
+          pane.focus role, or reverse video without a palette. reverse uses
+          the terminal's text ground; #rrggbb sets an explicit colour. An
+          empty value draws no ground and reverses the tile margin to mark
+          focus. fyai reports an explicit colour if the theme text is hard
+          to read on it.
       focus_bg_mix:
         type: integer
         minimum: 0
         maximum: 100
         default: 35
         description: >-
-          How much of focus_bg is mixed into a cell the program coloured
-          itself. 0 leaves the program's colours alone and 100 replaces them.
+          Set focus background mixing for program-coloured cells. 0 leaves the program's colours alone and 100 replaces them.
           Mixing needs a terminal that takes 24-bit colour and a colour to
           mix: a cell coloured from the terminal's own palette is left alone.
       work_layout:
@@ -629,12 +614,12 @@ properties:
         enum: [auto, columns, stack, main-top, main-left]
         default: auto
         description: >-
-          How live shell-session and sub-agent screens share the work pane.
-          No cell is left empty: the screens of a short last row share the
-          columns it leaves, so three of them are two and a wide one.
+          Select the work-pane tile layout. This controls how live shell-session
+          and sub-agent screens share the pane.
+          The tiles in a short final row share its full width.
           auto fits as many columns as keep every tile at work_min_tile_cols;
-          columns uses work_columns; stack puts one screen above another, as
-          separate bands did; main-top gives the oldest screen the whole top
+          columns uses work_columns; stack puts one screen above another;
+          main-top gives the oldest screen the whole top
           row with the rest sharing the row beneath it; main-left gives it a
           column of its own with the rest stacked beside it.
       work_position:
@@ -642,24 +627,24 @@ properties:
         enum: [above-prompt, below-prompt]
         default: above-prompt
         description: >-
-          Where the work pane stands. above-prompt makes it the last band above
+          Select the position of the work pane. above-prompt makes it the last band above
           the prompt, next to the transcript the work came from. below-prompt
-          takes the rows under the prompt instead, so the user types over the
-          work and a pane that grows moves nothing that is being read.
+          takes the rows under the prompt and does not move the transcript
+          when the pane grows.
       completion:
         type: string
         enum: [tab, auto]
         default: tab
         description: >-
-          When the completion popup opens. tab opens it on Tab. auto opens it
-          as the line is typed, when the line has candidates, such as after
-          a slash; a candidate is then never taken without a key.
+          Select when the completion popup opens. tab opens it on Tab; auto
+          opens it when the current input has candidates. A candidate still
+          requires an explicit selection.
       command_output:
         type: string
         enum: [pane, transcript]
         default: pane
         description: >-
-          Where a slash command goes. pane shows its output in a popup or a
+          Select where slash-command output appears. pane shows it in a popup or a
           tile, and the transcript keeps nothing of it. transcript draws the
           command and its output in the transcript, and stores both there.
       editor:
@@ -667,7 +652,7 @@ properties:
         enum: [pane, terminal]
         default: pane
         description: >-
-          Where an editor runs for /edit, config edit and a log view. pane
+          Select where editors run. This applies to /edit, config edit, and log views. pane
           runs it in a tile of the work pane that takes the pane and the keys,
           and the session goes on when the editor ends. terminal gives the
           whole terminal to the editor, as a program outside fyai. A command
@@ -677,21 +662,22 @@ properties:
         minimum: 0
         default: 0
         description: >-
-          Columns of tiles when work_layout is columns. 0 keeps the automatic
+          Set tile columns when work_layout is columns. 0 keeps the automatic
           grid.
       work_min_tile_cols:
         type: integer
         minimum: 0
         default: 40
         description: >-
-          The narrowest tile the automatic grid makes. A terminal that cannot
+          Set the minimum width of automatic-grid tiles. A terminal that cannot
           hold two of them shows one screen at a time.
       work_history_rows:
         type: integer
         minimum: 0
         default: 1000
         description: >-
-          Rows that left the top of the screen of a tile which it keeps for
+          Set the number of scrollback rows kept for each tile. These rows left
+          the top of the tile screen and remain available through
           its scroll bar and the wheel. 0 keeps none. A change applies to
           tiles that are open.
       work_max_rows:
@@ -699,7 +685,7 @@ properties:
         minimum: 0
         default: 0
         description: >-
-          Rows the whole work pane may take, its own chrome included. It is a
+          Limit the total height of the work pane. This includes its chrome and is a
           ceiling on work_zoom_rows, whichever of the two is smaller. 0 leaves
           the height to work_zoom_rows alone.
       work_zoom_rows:
@@ -710,7 +696,7 @@ properties:
             minimum: 1
         default: half
         description: >-
-          Height of the work pane. full uses the available terminal height,
+          Set the height of the work pane. full uses the available terminal height,
           half and quarter use that fraction of it, and an integer is a direct
           row limit. The first live tile opens at it, a fraction is recomputed
           after a terminal resize, and moving focus or zooming does not change
@@ -719,14 +705,13 @@ properties:
         type: string
         default: none
         description: >-
-          Chrome above and below the work pane. An empty string draws a rule;
-          the word none removes it, which is the default because every tile
-          already carries the title row of the call that opened it.
+          Set the chrome above and below the work pane. An empty string draws
+          a rule; none removes it. Each tile already has a title row.
       work_cap:
         type: boolean
         default: false
         description: >-
-          Draw the cap row of the work pane: the height of the pane, how many
+          Show the work-pane cap row. It reports the height of the pane, how many
           tiles it holds, how many are shown, how many the layout hid, and the
           keys that move between them. It takes the place of work_frame above
           the pane, and it needs UI Markdown to draw its rule to the edge.
@@ -734,44 +719,43 @@ properties:
         type: string
         default: none
         description: >-
-          Chrome below each tile, under the title row the call already draws.
-          An empty string draws a rule; the word none removes it, which is
-          the default because the pane already has a frame of its own.
+          Set the chrome below each tile. An empty string draws a rule; none
+          removes it. The title row identifies the call.
       tile_sep:
         type: string
         default: " \u2503 "
         description: >-
-          The rule between adjacent columns of tiles, with the space that
+          Set the rule between adjacent tile columns. It includes space that
           keeps the screens off it. It is what divides two programs; the
-          gutter session_margin draws runs down the inside of one. An empty
+          session_margin gutter runs down the inside of one. An empty
           string draws none.
       renderer:
         type: string
         enum: [stack, page]
         default: page
         description: >-
-          How the live screen is composed. stack draws the fixed chrome of the
+          Select how the live screen is composed. stack draws the fixed chrome of the
           terminal library: the header, the prompt between two rules and the
           status. page states the screen as one UI Markdown page whose slots
           hold the transcript tail, the work pane and the prompt. page needs a
           libfytimui and a libfymd4c that support pages; without them stack is
-          used and the session says so.
+          used and the session reports the fallback.
       page:
         type: string
         default: ""
         description: >-
-          The page document of the page renderer, as the path of a YAML file.
+          Set the YAML page document path. This configures the page renderer.
           An empty string uses the embedded data/page.yaml. When the page is
           made, the file is checked against the page schema and every case of
-          it is transcribed; a file that fails is not used, the session says
-          why, and the embedded document is used. /page shows the document in
+          it is transcribed. On validation failure, the session reports the
+          cause and uses the embedded document. /page shows the document in
           use and the state, source and regions of the last frame.
       screen:
         type: string
         enum: [inline, fullscreen]
         default: fullscreen
         description: >-
-          Where the page renderer stands. inline keeps the transcript in the
+          Select where the page renderer draws. inline keeps the transcript in the
           scrollback of the terminal. fullscreen takes the alternate screen: the
           transcript is a view of the page that the wheel, PageUp and PageDown
           scroll, and the terminal shows what it showed before when the session
@@ -782,7 +766,7 @@ properties:
         enum: [none, zoom, full]
         default: full
         description: >-
-          Mouse affordances on a tile. none draws none. zoom ends the head of
+          Select tile mouse controls. none draws none. zoom ends the head of
           a tile in buttons that minimize, maximize and close it. full adds a
           scroll bar and its arrows, which, with the wheel over the tile,
           move its view back through the history of its program. Anything
@@ -796,7 +780,7 @@ properties:
         enum: [none, brief, default, full]
         default: default
         description: >-
-          Tool presentation policy: none hides every body, brief bounds every
+          Select how much tool output to show. none hides every body; brief bounds every
           body, default hides read/write bodies, bounds shell output, and
           shows patches fully; full shows every body.
       transcript_system:
@@ -809,28 +793,29 @@ properties:
         enum: [line, stream, oneshot]
         default: line
         description: >-
-          How streamed markdown is rendered (only with markdown + stream):
-          line (per line) | stream (redraw per chunk) | oneshot (at end).
+          Select the streamed Markdown rendering mode. This applies only when
+          markdown and stream are enabled: line renders each line, stream
+          redraws each chunk, and oneshot renders at the end.
       markdown_update_interval_ms:
         type: integer
         minimum: 0
         maximum: 1000
         default: 50
         description: >-
-          Minimum interval between progressive Markdown redraws in stream
-          mode. Zero repaints every update.
+          Set the interval between streamed Markdown redraws. Zero repaints every update.
       color:
         type: string
         enum: [auto, off, on]
         default: auto
-        description: auto (colour iff a terminal) | off | on (force, even piped).
+        description: Select output colour mode. auto uses colour for terminals; on forces colour even through a pipe.
       theme:
         x-fyai-scope: stored
         x-fyai-complete: theme
         type: string
         default: "ember:auto"
         description: >-
-          libfymd4c embedded theme name with an optional background variant,
+          Select the Markdown and terminal theme. A libfymd4c embedded theme
+          can have an optional background variant,
           for example default:auto, catppuccin:dark, or solarized:light.
           The selected theme also controls fenced-code highlighting and
           terminal UI chrome. A libfypalette theme, such as ember:auto,
@@ -841,7 +826,7 @@ properties:
         enum: [theme, terminal]
         default: theme
         description: >-
-          The background a palette theme draws for. theme uses the ground of
+          Select the background used by a palette theme. theme uses the ground of
           the theme. terminal asks the terminal for its background and makes
           it the ground of the theme, so the neutral colours - the card,
           rules, faint, dim and ink text - keep their steps over the real
@@ -856,27 +841,28 @@ properties:
         enum: [theme, grid, none]
         default: theme
         description: >-
-          Override the theme's table border: theme (follow the selected
-          theme), grid (force borders), or none (borderless), independent of
+          Select the table border style. theme follows the selected
+          theme, grid forces borders, and none draws no border, independent of
           the selected Markdown theme.
       turn_separator:
         type: string
         default: ""
         description: >-
-          Separator rendered (as markdown, themed) between turns in the
+          Set the separator between transcript turns. It is rendered as themed
+          Markdown in the
           transcript view. Empty, the default, is a blank line; "---" is a
           themed rule.
       tool_separator:
         type: string
         default: ""
         description: >-
-          Separator rendered (as markdown, themed) before each tool result.
-          Empty (default) emits nothing.
+          Set the separator before each tool result. It is rendered as themed Markdown.
+          An empty value emits nothing.
       section_separator:
         type: string
         default: ""
         description: >-
-          Separator emitted between streamed reasoning and the answer. Empty
+          Set the separator between reasoning and the answer. Empty
           (default) is a blank line only.
       tool_group_fence:
         type: integer
@@ -884,7 +870,7 @@ properties:
         maximum: 8
         default: 1
         description: >-
-          Blank rows drawn above and below a tool exchange, in the live loop
+          Set blank rows around each tool exchange. They appear in the live loop
           and in the transcript. A tool exchange is one group. It is not
           fenced against itself. 0 draws no blank row.
       user_card_fence:
@@ -893,34 +879,33 @@ properties:
         maximum: 8
         default: 1
         description: >-
-          Blank rows drawn between the user card and the answer that follows
+          Set blank rows between a user card and its answer. The rows separate
           it. 0 puts the answer directly under the card.
       prompt:
         type: string
         default: "  > "
         description: >-
-          Interactive prompt marker. Empty uses the built-in ("  > " with
+          Set the interactive prompt marker. Empty uses the built-in ("  > " with
           markdown, "> " otherwise). May carry SGR colour escapes.
       branch_view:
         type: string
         enum: [tree, gitgraph]
         default: tree
-        description: Default branch browser view; tree uses libfymermaid. Press g to toggle the open browser.
+        description: Select the default branch browser view. tree uses libfymermaid; g toggles the open browser.
       branch_preview:
         type: string
         enum: [off, right, bottom, auto]
         default: auto
         description: >-
-          Where the branch and resume browsers render the end of the selected
-          session.
-          Auto takes the right of a wide pane and the foot of a tall one.
+          Select where branch and resume browsers show a session preview.
+          auto uses the right of a wide pane or the bottom of a tall one.
           Press p in either browser to cycle it for the session.
       branch_preview_size:
         type: integer
         minimum: 10
         maximum: 80
         default: 40
-        description: Share of the browser pane given to the session preview, percent.
+        description: Set the percentage of browser pane used for the session preview.
       branch_preview_width:
         oneOf:
           - type: string
@@ -931,33 +916,33 @@ properties:
             minimum: 28
             maximum: 1000
         description: >-
-          Width of a right-side session preview. Half, quarter, and a value
+          Set the width of a right-side session preview. half, quarter, and a value
           ending in % use a share of the browser pane; an integer is an exact
           column count. When unset, branch_preview_size supplies the percentage.
       diagram_theme:
         type: string
         default: ""
         description: >-
-          libfymermaid theme name. Empty selects its light or dark theme
+          Select the libfymermaid theme. Empty selects its light or dark theme
           from the active display variant.
       diagram_charset:
         type: string
         enum: [auto, ascii, unicode, rich]
         default: auto
-        description: Character repertoire for terminal diagrams. Auto follows the locale; rich is explicit.
+        description: Select the terminal diagram character set. auto follows the locale; rich is explicit.
       diagram_fit:
         type: string
         enum: [legend, shrink, clip]
         default: legend
         description: >-
-          Fit diagrams to their pane width. Legend moves long gitgraph labels
+          Select how diagrams fit their pane width. legend moves long gitgraph labels
           below the graph; other diagram types shrink their spacing where supported.
           The branch tree has fixed spacing and clips long rows.
       prompt_top:
         type: string
         default: " {location}"
         description: >-
-          Top row of the interactive prompt bubble, a {key} template over the
+          Set the top row of the interactive prompt. It is a {key} template over the
           session vars (model, provider, api, effort, summary, temp, ctx,
           tokens, cache, cost, branch, cwd, location).
           Empty uses the built-in branch and working-directory row.
@@ -966,7 +951,7 @@ properties:
         type: string
         default: " {model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}"
         description: >-
-          Bottom status row of the prompt bubble, a {key} template that
+          Set the bottom status row of the prompt. It is a {key} template that
           replaces the built-in banner. Empty reproduces
           "{model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}".
           {branch} is the invocation branch, {cwd} is its working directory,
@@ -979,169 +964,188 @@ properties:
       pretty:
         type: boolean
         default: false
-        description: Pretty (YAML) debug dumps.
+        description: Format debug dumps as YAML.
       thinking:
         type: boolean
         default: true
         description: >-
-          Display model reasoning/thinking output (streamed live to stderr
-          and in the transcript view). Set false to suppress it.
+          Display model reasoning output. Set false to suppress it in the
+          live stream and transcript view.
       cache_info:
         type: boolean
         default: false
-        description: Print provider cache info.
+        description: Show provider cache information.
       stats:
         type: boolean
         default: false
-        description: Print session token usage to stderr.
+        description: Show session token usage.
   model_info:
     type: object
     required: [name]
     description: >-
-      Read-only, re-derived from the catalogue on every commit
-      (catalog_sync_config_doc in src/fyai_config.c) - never hand-edit.
-      The full models[] entry for the configured model plus
-      canonical_provider.
+      Show catalogue metadata for the selected model. This read-only mapping
+      is derived again on every commit; do not edit it. It contains the full
+      models[] entry and canonical_provider.
     properties:
       name:
         type: string
-        description: Catalogue canonical model id.
+        description: Show the canonical model ID from the catalogue.
       display_name:
         type: string
-        description: Human-readable model name.
+        description: Show the human-readable model name.
       context_window:
         type: integer
-        description: Total context window in tokens.
+        description: Show the context window size in tokens.
       max_output_tokens:
         type: integer
-        description: Maximum output tokens the model supports.
+        description: Show the maximum output tokens supported by the model.
       modalities:
         type: array
-        description: Supported input/output modalities (e.g. text).
+        description: List supported input and output modalities, such as text.
         items:
           type: string
       capabilities:
         type: array
         description: >-
-          Capability flags in the catalogue controlled vocabulary (e.g.
-          tool_calling, json_mode, reasoning).
+          List model capabilities reported by the catalogue. Examples include
+          tool_calling, json_mode, and reasoning.
         items:
           type: string
       open_source:
         type: boolean
-        description: Whether the model is open-weight.
+        description: Show whether the model is open-weight.
       native_provider:
         type: string
-        description: The provider that originates the model, when relevant.
+        description: Show the originating provider when known.
       canonical_provider:
         type: string
-        description: The model's default, unprefixed provider.
+        description: Show the model's default provider without a prefix.
       arena:
         type: object
-        description: LMSYS/Chatbot Arena-style ranking metadata, when known.
+        description: Show model ranking metadata when known.
         properties:
           rank:
             type: integer
+            description: Show the model's rank.
           elo:
             type: number
+            description: Show the model's Elo score.
           votes:
             type: integer
+            description: Show the number of model ranking votes.
 
   mcp:
     type: object
     default: { enabled: false, startup_wait: true, endpoint: "", auth_token: { type: env, value: MCP_API_KEY }, protocol_version: "2024-11-05", servers: {}, timeout: 30 }
     description: >-
-      Model Context Protocol (MCP) server connection. Disabled by default;
+      Configure Model Context Protocol (MCP) connections. MCP is disabled by default;
       set enabled: true and configure endpoint (or servers) to connect.
     properties:
       enabled:
         type: boolean
         default: false
-        description: Turn MCP server connection on.
+        description: Enable MCP server connections.
       startup_wait:
         type: boolean
         default: true
         description: >-
-          Hold the first model step until every server has settled, so the
+          Wait for MCP servers before the first model step. This waits until every server has settled, so the
           initial turn sees the complete toolset. False submits optimistically
           with whatever tools are ready while servers keep connecting.
       endpoint:
         type: string
         default: ""
-        description: Default MCP server URL.
+        description: Set the default MCP server URL.
       auth_token:
         type: object
         required: [type]
         description: >-
-          Non-secret pointer to the MCP auth credential: never a raw value.
+          Reference an MCP credential without storing its value.
         properties:
           type:
             type: string
             enum: [auto, env, secret]
             default: env
+            description: Select the MCP credential reference type.
           value:
             type: string
             default: MCP_API_KEY
+            description: Name the MCP credential environment variable or secret.
       protocol_version:
         type: string
         default: "2024-11-05"
-        description: MCP protocol version.
+        description: Set the MCP protocol version.
       servers:
         type: object
         default: {}
         description: >-
-          Named server mappings. HTTP servers may select OAuth with
+          Configure named MCP servers. HTTP servers may select OAuth with
           auth: { type: oauth }; without it, auth_token bearer behavior is
           preserved.
         additionalProperties:
           type: object
+          description: Configure one named MCP server.
           properties:
             endpoint:
               type: string
+              description: Set this MCP server's endpoint URL.
             auth:
               type: object
+              description: Configure authentication for this MCP server.
               properties:
                 type:
                   type: string
                   enum: [bearer, oauth]
+                  description: Select bearer or OAuth authentication.
                 allow_browser:
                   type: boolean
+                  description: Permit browser-based OAuth authorization.
                 scopes:
                   type: array
                   minItems: 1
+                  description: List OAuth scopes to request.
                   items:
                     type: string
                     minLength: 1
+                    description: Name one OAuth scope.
                 authorization_params:
                   type: object
+                  description: Set additional OAuth authorization parameters.
                 client:
                   type: object
                   required: [id, redirect_uri]
+                  description: Configure the OAuth client registration.
                   properties:
                     id:
                       type: string
                       minLength: 1
+                      description: Set the OAuth client ID.
                     redirect_uri:
                       type: string
                       minLength: 1
+                      description: Set the OAuth redirect URI.
                     token_endpoint_auth_method:
                       type: string
                       enum:
                         - none
                         - client_secret_post
                         - client_secret_basic
+                      description: Select the OAuth token endpoint authentication method.
                     secret:
                       type: object
                       required: [type, value]
+                      description: Reference the OAuth client secret.
                       properties:
                         type:
                           type: string
                           enum: [env, secret]
+                          description: Select an environment or secret reference.
                         value:
                           type: string
                           minLength: 1
+                          description: Name the environment variable or secret.
       timeout:
         type: integer
         default: 30
         exclusiveMinimum: 0
-        description: Request timeout in seconds.
+        description: Set the MCP request timeout in seconds.
