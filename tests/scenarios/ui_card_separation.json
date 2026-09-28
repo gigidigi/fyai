@@ -1,0 +1,102 @@
+{
+  "steps": [
+    {
+      "sse": [
+        {
+          "id": "chatcmpl-card-separation",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "mock-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "banana\n"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-fullscreen-stream",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "mock-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": ""
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-fullscreen-stream",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "mock-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        }
+      ],
+      "done": true
+    },
+    {
+      "sse": [
+        {
+          "id": "chatcmpl-card-separation",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "mock-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "second\n"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-fullscreen-stream",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "mock-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": ""
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-fullscreen-stream",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "mock-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        }
+      ],
+      "done": true
+    }
+  ]
+}
