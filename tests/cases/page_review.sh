@@ -34,4 +34,35 @@ if popup["kind"] != "slot" or popup["row"] != 1 or popup["height"] != 11:
 if "\x1b" in sys.argv[1] or "transcript" in names:
     raise SystemExit("the picture or a covered area reached the list")
 PY
+# --page reviews a document of the user: here the pane goes under the status.
+DOCS=$(mktemp -d)
+trap 'rm -rf "$DOCS"' EXIT
+"$PYTHON" - "$TESTS_DIR/../data/page.yaml" "$DOCS" <<'PY' ||
+import sys
+
+s = open(sys.argv[1]).read()
+above = "    - if: pane.above\n      page: pane\n"
+below = "    - if: pane.below\n      page: pane"
+if s.count(above) != 1 or s.count(below) != 1:
+    raise SystemExit("the pane of data/page.yaml moved")
+s = s.replace(above, "").replace(below, "    - page: pane")
+open(sys.argv[2] + "/below.yaml", "w").write(s)
+open(sys.argv[2] + "/bad.yaml", "w").write("broken: [\n")
+PY
+    fail "cannot write the page documents"
+json=$("$FYAI_BIN" page review --page "$DOCS/below.yaml" --output json) ||
+    fail "page review --page did not review the document"
+"$PYTHON" - "$json" <<'PY' || fail "--page did not draw the document"
+import json
+import sys
+
+rows = {a["area"]: a["row"] for a in json.loads(sys.argv[1])}
+if not rows["pane"] > rows["status.row"]:
+    raise SystemExit("the pane is not under the status: %r" % rows)
+PY
+if "$FYAI_BIN" page review --page "$DOCS/bad.yaml" >"$TEST_DIR/bad.out" 2>&1; then
+    fail "page review drew a document that does not load"
+fi
+grep -q "bad.yaml is not used" "$TEST_DIR/bad.out" ||
+    fail "page review did not say why the document is not used"
 pass
