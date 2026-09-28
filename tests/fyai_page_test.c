@@ -34,6 +34,7 @@
 
 FYAI_TEST_ENTRY(page, source_orders_the_chrome, page_source_orders_the_chrome)
 FYAI_TEST_ENTRY(page, source_escapes_text, page_source_escapes_text)
+FYAI_TEST_ENTRY(page, review_marks_each_row, page_review_marks_each_row)
 FYAI_TEST_ENTRY(page, source_omits_empty_slots, page_source_omits_empty_slots)
 FYAI_TEST_ENTRY(page, rows_are_adjacent, page_rows_are_adjacent)
 FYAI_TEST_ENTRY(page, palette_margin_keeps_width, page_palette_margin_keeps_width)
@@ -772,6 +773,48 @@ int page_fit_gives_the_chrome_its_rows(void)
 int page_cap_stands_over_the_pane(void)
 {
 	return page_cap_stands_over_the_pane_run();
+}
+
+/* A review starts each row with the mark of its area: the flag that shows
+ * it, in its list and as a blank row where it is one. A frame marks
+ * nothing. */
+static int page_review_marks_each_row_run(void)
+{
+	static const char *const opts[] = { "Yes", "No" };
+	struct response_buffer out = {0};
+	struct fyai_page_state st = page_state();
+	int rc;
+
+	st.input_mode = "ask";
+	st.ask_question = "Proceed?";
+	st.ask_options = opts;
+	st.ask_noptions = 2;
+	st.pane_rows = 2;
+	st.actions = page_golden_actions;
+	st.nactions = sizeof(page_golden_actions) /
+		      sizeof(page_golden_actions[0]);
+	st.review = true;
+	rc = fyai_page_source(&st, &out);
+	FYAI_TCHECK(!rc && out.data);
+	FYAI_TCHECK(strstr(out.data, "<fy-mark id=\"review:status.row\"/>"));
+	FYAI_TCHECK(strstr(out.data,
+			   "<fy-mark id=\"review:ask.options/selected\"/>"));
+	FYAI_TCHECK(strstr(out.data, "<fy-mark id=\"review:pane/blank\"/>"));
+	FYAI_TCHECK(strstr(out.data, "<fy-mark id=\"review:question\"/>"));
+	free(out.data);
+
+	out = (struct response_buffer){0};
+	st.review = false;
+	rc = fyai_page_source(&st, &out);
+	FYAI_TCHECK(!rc && out.data && !strstr(out.data, "fy-mark"));
+	free(out.data);
+	return 0;
+}
+
+int page_review_marks_each_row(void);
+int page_review_marks_each_row(void)
+{
+	return page_review_marks_each_row_run();
 }
 
 int page_source_escapes_text(void)
