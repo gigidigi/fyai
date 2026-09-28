@@ -286,6 +286,10 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 				cfg->agent_timeout_ms);
 	cfg->agent_max_timeout_ms = fy_get(fy_get(root, "agent"),
 				"max_timeout_ms", cfg->agent_max_timeout_ms);
+	cfg->agent_hang_timeout_ms = fy_get(fy_get(root, "agent"),
+				"hang_timeout_ms", cfg->agent_hang_timeout_ms);
+	cfg->agent_timeout_kill = apply_bool(fy_get(root, "agent"),
+				"timeout_kill", cfg->agent_timeout_kill);
 	cfg->agent_max_live_agents = fy_get(fy_get(root, "agent"),
 				"max_live_agents", cfg->agent_max_live_agents);
 	cfg->agent_max_branch_depth = fy_get(fy_get(root, "agent"),
@@ -2349,6 +2353,8 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->agent_spawn = DEFAULT_AGENT_SPAWN;
 	cfg->agent_max_live_agents = 16;
 	cfg->agent_max_timeout_ms = DEFAULT_AGENT_MAX_TIMEOUT_MS;
+	cfg->agent_hang_timeout_ms = DEFAULT_AGENT_HANG_TIMEOUT_MS;
+	cfg->agent_timeout_kill = true;
 	cfg->retry_max_attempts = DEFAULT_RETRY_MAX_ATTEMPTS;
 	cfg->retry_initial_delay_ms = DEFAULT_RETRY_INITIAL_DELAY_MS;
 	cfg->retry_max_delay_ms = DEFAULT_RETRY_MAX_DELAY_MS;

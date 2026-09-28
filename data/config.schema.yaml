@@ -332,9 +332,9 @@ properties:
         minimum: 0
         default: 0
         description: >-
-          Set the default sub-agent job time limit in milliseconds. It applies when
-          neither the call nor the persona asks for one. The job and every
-          process below it are stopped when it expires. 0 removes the limit.
+          Set the default advisory sub-agent limit in milliseconds. It applies
+          when neither the call nor the persona supplies a limit. Exceeding it
+          does not stop the agent; 0 disables the advisory limit.
       max_timeout_ms:
         type: integer
         minimum: 0
@@ -342,6 +342,20 @@ properties:
         description: >-
           Limit a sub-agent timeout requested by the model. 0 removes the
           bound.
+      hang_timeout_ms:
+        type: integer
+        minimum: 0
+        default: 600000
+        description: >-
+          Set the sub-agent hang limit in milliseconds. It starts after the
+          advisory limit, or at submission if that limit is disabled.
+          0 disables termination.
+      timeout_kill:
+        type: boolean
+        default: true
+        description: >-
+          Terminate a sub-agent after hang_timeout_ms. Disable this to report
+          advisory overruns without terminating agents.
       personas:
         type: object
         description: >-

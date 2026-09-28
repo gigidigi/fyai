@@ -2238,10 +2238,15 @@ struct fyai_tool_job {
 	bool wants_input;
 	bool terminating;
 	bool timed_out;
+	bool overdue;
 	unsigned int timeout_ms;	/* 0 = no limit */
+	unsigned int hang_timeout_ms;
+	fyai_event_ms_t started_ms;
+	fyai_event_ms_t elapsed_ms;
 	struct response_buffer progress;	/* tail, for a timeout report */
 	char *branch;			/* sub-agent branch, allocated by us */
 	struct fyai_event_source *deadline;
+	struct fyai_event_source *hang_deadline;
 	int term_signal;
 	struct fyai_tool_job_group *group;
 	struct fyai_tool_job *next;	/* ctx->tool_jobs, for a resize */
@@ -3557,21 +3562,15 @@ static void fyai_agent_view_refresh(struct fyai_tool_job *job)
 
 /*
  * Build the title of a sub-agent tile: the call title, then the branch leaf,
- * the model, and the execution id from the agent registry. Add the running
- * time when @running is set. Leave out a field that the registry does not
- * have. The caller frees the result.
+ * the model, and the execution id from the agent registry. Leave out a field
+ * that the registry does not have. The caller frees the result.
  */
-/*
- * The title of a sub-agent tile. The elapsed time of a running agent goes into
- * @run when it is given, and after the title otherwise.
- */
-static char *fyai_agent_head_title(struct fyai_tool_job *job, bool running,
-				   char *run_out, size_t run_size)
+static char *fyai_agent_head_title(struct fyai_tool_job *job)
 {
-	const char *base, *end, *leaf, *model;
+	const char *base, *end, *leaf, *model, *id;
+	const char *leaf_part, *model_part, *text;
 	long long execution, started;
 	fy_generic call_args, call_name;
-	char id[32], run[24];
 	char *title;
 
 	base = job->title ? job->title : "**agent**";
@@ -3592,24 +3591,12 @@ static char *fyai_agent_head_title(struct fyai_tool_job *job, bool running,
 		if (fy_equal(call_name, leaf))
 			leaf = NULL;
 	}
-	id[0] = '\0';
-	if (execution > 0)
-		snprintf(id, sizeof(id), " #%lld", execution);
-	run[0] = '\0';
-	if (running)
-		fyai_event_elapsed_format(run, sizeof(run), started);
-	if (run_out && run_size) {
-		snprintf(run_out, run_size, "%s", run[0] == ' ' ? run + 1 : run);
-		run[0] = '\0';
-	}
-	title = strdup(fy_sprintfa("%.*s%s%s%s%s%s%s%s%s\n",
-				   (int)(end - base), base,
-				   fy_str_empty(leaf) ? "" : " `",
-				   fy_str_empty(leaf) ? "" : leaf,
-				   fy_str_empty(leaf) ? "" : "`",
-				   fy_str_empty(model) ? "" : " `",
-				   fy_str_empty(model) ? "" : model,
-				   fy_str_empty(model) ? "" : "`", id, run));
+	id = execution > 0 ? fy_sprintfa(" #%lld", execution) : "";
+	leaf_part = fy_str_empty(leaf) ? "" : fy_sprintfa(" `%s`", leaf);
+	model_part = fy_str_empty(model) ? "" : fy_sprintfa(" `%s`", model);
+	text = fy_sprintfa("%.*s%s%s%s\n", (int)(end - base), base,
+			   leaf_part, model_part, id);
+	title = strdup(text);
 	fyai_error_check(job->ctx, title, err_out,
 			 "cannot format the tile title of agent %s",
 			 job->branch ? job->branch : "");
@@ -3622,16 +3609,23 @@ err_out:
 /* Paint the title of a live sub-agent tile with the running mark. */
 static void fyai_agent_head_paint(struct fyai_tool_job *job)
 {
-	char run[24];
+	const char *right, *model;
+	char elapsed[24];
+	long long execution, started;
 	char *title;
 
 	/* The elapsed time of a running agent stands at the right edge. */
-	title = fyai_agent_head_title(job, true, run, sizeof(run));
+	(void)fyai_agents_branch_identity(job->ctx, job->branch, &model,
+					  &execution, &started);
+	fyai_event_elapsed_format(elapsed, sizeof(elapsed), started);
+	right = fy_sprintfa("%s%s", job->overdue ? "overdue " : "",
+			    elapsed[0] == ' ' ? elapsed + 1 : elapsed);
+	title = fyai_agent_head_title(job);
 	(void)fyai_ui_surface_set_head_right(job->ctx, job->surface,
 			title ? title :
 			job->title ? job->title : "**agent**",
-			*run ? run : NULL, NULL, NULL, FYAI_UI_MARK_RUNNING,
-			job->animation_frame, NULL);
+			*right ? right : NULL, NULL, NULL,
+			FYAI_UI_MARK_RUNNING, job->animation_frame, NULL);
 	free(title);
 	fyai_ui_wake(job->ctx);
 }
@@ -3645,7 +3639,7 @@ static void fyai_agent_head_repaint(void *owner)
 	if (job->surface && !job->done)
 		fyai_agent_head_paint(job);
 	else if (job->surface && job->btw_panel) {
-		title = fyai_agent_head_title(job, false, NULL, 0);
+		title = fyai_agent_head_title(job);
 		(void)fyai_ui_surface_set_head(job->ctx, job->surface,
 				title ? title : "**btw**", NULL, NULL,
 				job->result_ok && !job->failed ?
@@ -3932,7 +3926,7 @@ static void fyai_agent_view_close(struct fyai_tool_job *job, bool ok,
 	}
 	if (job->surface) {
 		fyai_agent_view_refresh(job);
-		title = fyai_agent_head_title(job, false, NULL, 0);
+		title = fyai_agent_head_title(job);
 		(void)fyai_ui_surface_set_head(job->ctx, job->surface,
 				title ? title :
 				job->title ? job->title : "**agent**",
@@ -3971,8 +3965,13 @@ static void fyai_tool_job_update_done(struct fyai_tool_job *job)
 	job->done = job->session ? !job->out_open :
 				   (job->reaped && !job->out_open);
 	if (!was_done && job->done) {
+		job->elapsed_ms = fyai_event_now_ms() - job->started_ms;
+		if (job->agent && job->timeout_ms &&
+		    job->elapsed_ms >= job->timeout_ms)
+			job->overdue = true;
 		/* Remove the deadline before the job waits for its group. */
 		fyai_tool_job_drop(&job->deadline);
+		fyai_tool_job_drop(&job->hang_deadline);
 	}
 	if (!was_done && job->done && job->agent && job->branch) {
 		/*
@@ -4458,6 +4457,7 @@ static void fyai_tool_job_discard(struct fyai_tool_job *job)
 		fyai_events_drop_agent(job->ctx, job->branch);
 	fyai_tool_job_close_channel(job);
 	fyai_tool_job_drop(&job->deadline);
+	fyai_tool_job_drop(&job->hang_deadline);
 	fyai_tool_job_drop(&job->csrc);
 	if (!job->reaped && job->pid > 0)
 		while (waitpid(job->pid, NULL, 0) < 0 && errno == EINTR)
@@ -4514,6 +4514,8 @@ bool fyai_tools_btw_surface(struct fyai_ctx *ctx, struct fytim_surface *sf)
 
 static enum fyai_event_action
 fyai_tool_job_deadline(const struct fyai_event *ev);
+static enum fyai_event_action
+fyai_tool_job_hang_deadline(const struct fyai_event *ev);
 static unsigned int fyai_tool_job_timeout_ms(struct fyai_ctx *ctx,
 					     const char *name, bool native_call,
 					     fy_generic args);
@@ -4840,6 +4842,7 @@ live_open_done:
 			 "could not attach tool job to event loop");
 
 	job->timeout_ms = fyai_tool_job_timeout_ms(ctx, name, native_call, args);
+	job->started_ms = fyai_event_now_ms();
 	if (job->timeout_ms) {
 		el = fyai_ctx_loop(ctx);
 		assert(el);
@@ -4848,6 +4851,19 @@ live_open_done:
 					  &job->deadline);
 		fyai_error_check(ctx, !rc, err,
 				 "could not arm the tool job time limit");
+	}
+	if (fy_equal(name, "agent") && ctx->cfg->agent_timeout_kill &&
+	    ctx->cfg->agent_hang_timeout_ms > 0) {
+		job->hang_timeout_ms = ctx->cfg->agent_hang_timeout_ms;
+		el = fyai_ctx_loop(ctx);
+		assert(el);
+		/* With no advisory limit, the hang limit starts at submission. */
+		rc = fyai_event_add_timer(el,
+			(fyai_event_ms_t)job->timeout_ms + job->hang_timeout_ms,
+			0, fyai_tool_job_hang_deadline, job,
+			&job->hang_deadline);
+		fyai_error_check(ctx, !rc, err,
+				 "could not arm the sub-agent hang limit");
 	}
 	return job;
 
@@ -5665,13 +5681,30 @@ void fyai_tool_job_cancel(struct fyai_tool_job *job)
 		(void)kill(job->pid, SIGTERM);
 }
 
-/* Stop the process group when the job limit expires. */
+/* Mark an overdue agent; shell limits still terminate immediately. */
 static enum fyai_event_action
 fyai_tool_job_deadline(const struct fyai_event *ev)
 {
 	struct fyai_tool_job *job = ev->userdata;
 
 	job->deadline = NULL;
+	if (job->agent) {
+		job->overdue = true;
+		if (job->surface)
+			fyai_agent_head_paint(job);
+		return FYAIEA_CONTINUE;
+	}
+	job->timed_out = true;
+	fyai_tool_job_cancel(job);
+	return FYAIEA_CONTINUE;
+}
+
+static enum fyai_event_action
+fyai_tool_job_hang_deadline(const struct fyai_event *ev)
+{
+	struct fyai_tool_job *job = ev->userdata;
+
+	job->hang_deadline = NULL;
 	job->timed_out = true;
 	fyai_tool_job_cancel(job);
 	return FYAIEA_CONTINUE;
@@ -5811,6 +5844,7 @@ fy_generic fyai_tool_job_collect(struct fyai_ctx *ctx,
 	if (job->session) {
 		fyai_tool_job_live_close(job, false);
 		fyai_tool_job_drop(&job->deadline);
+		fyai_tool_job_drop(&job->hang_deadline);
 		job->group = NULL;
 		if (fy_is_valid(job->diag))
 			fyai_diag_adopt(fyai_ctx_diag(ctx), job->diag,
@@ -5837,6 +5871,7 @@ fy_generic fyai_tool_job_collect(struct fyai_ctx *ctx,
 		fyai_tool_job_live_close(job, false);
 	fyai_tool_job_close_channel(job);
 	fyai_tool_job_drop(&job->deadline);
+	fyai_tool_job_drop(&job->hang_deadline);
 	fyai_tool_job_drop(&job->csrc);
 	if (!job->reaped && job->pid > 0) {
 		do {
@@ -5901,8 +5936,17 @@ fy_generic fyai_tool_job_collect(struct fyai_ctx *ctx,
 		 */
 		genuine = job->have_result && !job->term_signal;
 		captured = job->progress.len ? job->progress.data : "";
-		reason = fy_sprintfa("tool error: timed out after %u ms",
-				     job->timeout_ms);
+		if (job->agent && job->timeout_ms)
+			reason = fy_sprintfa("tool error: agent hang timeout "
+				"after %u ms (%u ms advisory limit and %u ms grace)",
+				job->timeout_ms + job->hang_timeout_ms,
+				job->timeout_ms, job->hang_timeout_ms);
+		else if (job->agent)
+			reason = fy_sprintfa("tool error: agent hang timeout "
+				"after %u ms", job->hang_timeout_ms);
+		else
+			reason = fy_sprintfa("tool error: timed out after %u ms",
+				job->timeout_ms);
 		if (ctx->cfg->shell_max_timeout_ms > 0)
 			note = fy_sprintfa(FYAI_SHELL_TIMEOUT_NOTE,
 					      job->timeout_ms,
@@ -5938,6 +5982,18 @@ fy_generic fyai_tool_job_collect(struct fyai_ctx *ctx,
 						(long long)job->timeout_ms))));
 		}
 		job->result_ok = false;
+	}
+	if (job->agent && job->overdue && !job->timed_out) {
+		fyai_notice(ctx, "[%s] exceeded the %u ms advisory limit; "
+			    "completed after %lld ms",
+			    job->origin ? job->origin : "agent", job->timeout_ms,
+			    (long long)job->elapsed_ms);
+		if (fy_is_string(result))
+			result = fy_stringf(ctx->transient_gb, "%s\n\n"
+				"[Agent exceeded its %u ms advisory limit; "
+				"completed after %lld ms.]",
+				fy_castp(&result, ""), job->timeout_ms,
+				(long long)job->elapsed_ms);
 	}
 	*okp = job->result_ok && !job->failed;
 	if (job->btw_panel) {

@@ -121,12 +121,17 @@ read:
   max_bytes: 262144
   hard_max_bytes: 4194304
 
-# Sub-agent time limits, in milliseconds. timeout_ms applies when neither
-# the call nor persona sets one. max_timeout_ms caps a model-supplied limit.
-# Zero disables either limit. Expiration stops the job and its descendants.
+# Sub-agent advisory limits, in milliseconds. timeout_ms applies when neither
+# the call nor persona sets one; max_timeout_ms caps a model-supplied limit.
+# A completed agent reports whether it exceeded the advisory limit.
+# timeout_kill stops an agent after hang_timeout_ms additional time, or after
+# hang_timeout_ms from submission when no advisory limit is set.
+# Set timeout_kill to false or hang_timeout_ms to 0 to disable termination.
 agent:
   timeout_ms: 0
   max_timeout_ms: 3600000
+  hang_timeout_ms: 600000
+  timeout_kill: true
   # exec starts another fyai process; fork continues the child process.
   # Transient runs and pinned roots use fork.
   spawn: exec

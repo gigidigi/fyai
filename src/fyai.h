@@ -160,6 +160,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define DEFAULT_AGENT_MAX_BRANCH_DEPTH 8
 #define DEFAULT_AGENT_SPAWN "exec"
 #define DEFAULT_AGENT_MAX_TIMEOUT_MS 3600000
+#define DEFAULT_AGENT_HANG_TIMEOUT_MS 600000
 
 /*
  * What to do when a concurrent invocation advanced the same branch while this
@@ -314,6 +315,8 @@ struct fyai_cfg {
 	int shell_tty_cols;		/* PTY columns (0 = follow the terminal) */
 	int agent_timeout_ms;		/* sub-agent time limit (0 = none) */
 	int agent_max_timeout_ms;	/* bound on a model-asked limit (0 = none) */
+	int agent_hang_timeout_ms;	/* extra time after the advisory limit */
+	bool agent_timeout_kill;	/* terminate an agent after the extra time */
 	int agent_max_branch_depth;	/* nesting cap for sub-agent branches */
 	const char *agent_spawn;	/* exec or fork: how a sub-agent child starts */
 	int agent_max_live_agents;
