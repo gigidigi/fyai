@@ -2086,6 +2086,15 @@ commands:
     handler: exit
     ends_session: true
 
+  - command: reload
+    title: restart the current session
+    description: >-
+      Commit the current branch and restart fyai on it. Live shells and
+      sub-agents must finish or close first. A transient session and a pinned
+      root cannot be reloaded.
+    surfaces: [session]
+    handler: reload
+
   - command: agent
     title: run one sub-agent on a task
     description: |

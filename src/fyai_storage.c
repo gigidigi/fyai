@@ -998,6 +998,9 @@ static bool storage_session_defer(struct fyai_ctx *ctx)
 {
 	fy_generic cur;
 
+	/* An explicit reload publishes even a session with no exchange. */
+	if (ctx->cfg->reload_branch)
+		return false;
 	if (!ctx->session_unstored ||
 	    strcmp(ctx->session_unstored, fyai_ctx_branch(ctx)))
 		return false;

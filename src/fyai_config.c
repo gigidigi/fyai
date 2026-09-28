@@ -21,6 +21,10 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <errno.h>
+#include <fcntl.h>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 
 #include <libfyaml/libfyaml-blake3.h>
 
@@ -39,6 +43,171 @@
 #include "commands.h"
 #include "fyai_cmd.h"
 #include "utils.h"
+
+#define FYAI_RELOAD_FD_ENV "FYAI_RELOAD_FD"
+
+/* The descriptor carries invocation state without putting credentials in argv. */
+static fy_generic config_reload_read(struct fyai_cfg *cfg)
+{
+	struct response_buffer buf = {0};
+	fy_generic state = fy_invalid;
+	const char *fd_text;
+	char chunk[4096];
+	char *end;
+	size_t size;
+	ssize_t n = -1;
+	long fd;
+	bool failed = false;
+	int rc;
+
+	fd_text = getenv(FYAI_RELOAD_FD_ENV);
+	if (!fd_text)
+		return fy_invalid;
+	fd = strtol(fd_text, &end, 10);
+	if (!*fd_text || *end || fd < 3 || fd > INT_MAX) {
+		fyai_cfg_error(cfg, "reload: invalid state descriptor");
+		unsetenv(FYAI_RELOAD_FD_ENV);
+		return fy_invalid;
+	}
+	unsetenv(FYAI_RELOAD_FD_ENV);
+	for (;;) {
+		n = read((int)fd, chunk, sizeof(chunk));
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		size = buf.len + (size_t)n;
+		if (size > (16U << 20)) {
+			fyai_cfg_error(cfg, "reload: saved state exceeds 16 MiB");
+			failed = true;
+			break;
+		}
+		rc = response_buffer_append_data(&buf, chunk, (size_t)n);
+		if (rc) {
+			fyai_cfg_error(cfg, "reload: cannot read saved state");
+			failed = true;
+			break;
+		}
+	}
+	close((int)fd);
+	if (n < 0)
+		fyai_cfg_error(cfg, "reload: cannot read saved state: %s",
+			       strerror(errno));
+	if (!failed && n == 0 && buf.data)
+		state = parse_json_string(cfg->gb, buf.data);
+	free(buf.data);
+	if (!fy_is_mapping(state))
+		fyai_cfg_error(cfg, "reload: invalid saved state");
+	return state;
+}
+
+/* The handoff must not put an explicit API key in a filesystem object. */
+static FILE *config_reload_file(struct fyai_cfg *cfg)
+{
+	FILE *fp;
+#ifdef __linux__
+	int fd;
+
+	(void)cfg;
+	fd = memfd_create("fyai-reload", MFD_CLOEXEC);
+	if (fd < 0)
+		return NULL;
+	fp = fdopen(fd, "w+");
+	if (!fp)
+		close(fd);
+#else
+	if (cfg->reload_key) {
+		errno = ENOTSUP;
+		return NULL;
+	}
+	fp = tmpfile();
+#endif
+	return fp;
+}
+
+int fyai_config_reload_exec(struct fyai_cfg *cfg)
+{
+	const char *argv[5];
+	const char *text;
+	fy_generic config, session, state;
+	FILE *fp;
+	char fd_text[32];
+	int fd, flags, rc;
+	size_t len;
+
+	if (!cfg->reload_branch || !cfg->reload_config ||
+	    !cfg->reload_session || !cfg->reload_arena) {
+		fyai_cfg_error(cfg, "reload: incomplete saved state");
+		return -1;
+	}
+	config = parse_json_string(cfg->gb, cfg->reload_config);
+	session = parse_json_string(cfg->gb, cfg->reload_session);
+	if (!fy_is_mapping(config) || !fy_is_valid(session)) {
+		fyai_cfg_error(cfg, "reload: cannot restore the saved configuration");
+		return -1;
+	}
+	state = fy_mapping(cfg->gb,
+		"config", config, "session", session,
+		"arena", cfg->reload_arena,
+		"key", cfg->reload_key ? fy_value(cfg->gb, cfg->reload_key) :
+			fy_null);
+	text = emit_json_string(cfg->gb, state);
+	if (!text) {
+		fyai_cfg_error(cfg, "reload: cannot build the saved state");
+		return -1;
+	}
+	len = strlen(text);
+	if (len > (16U << 20)) {
+		fyai_cfg_error(cfg, "reload: saved state exceeds 16 MiB");
+		return -1;
+	}
+	fp = config_reload_file(cfg);
+	if (!fp) {
+		fyai_cfg_error(cfg, "reload: cannot create a state file: %s",
+			       strerror(errno));
+		return -1;
+	}
+	fd = fileno(fp);
+	flags = fcntl(fd, F_GETFD);
+	if (flags < 0)
+		goto file_error;
+	rc = fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+	if (rc < 0)
+		goto file_error;
+	if (fwrite(text, 1, len, fp) != len)
+		goto file_error;
+	rc = fflush(fp);
+	if (rc)
+		goto file_error;
+	rc = fseek(fp, 0, SEEK_SET);
+	if (rc)
+		goto file_error;
+	snprintf(fd_text, sizeof(fd_text), "%d", fd);
+	rc = setenv(FYAI_RELOAD_FD_ENV, fd_text, 1);
+	if (rc) {
+		fyai_cfg_error(cfg, "reload: cannot pass the state file: %s",
+			       strerror(errno));
+		fclose(fp);
+		return -1;
+	}
+	argv[0] = "fyai";
+	argv[1] = "-b";
+	argv[2] = cfg->reload_branch;
+	argv[3] = "-i";
+	argv[4] = NULL;
+	fyai_exec_self(argv);
+	fyai_cfg_error(cfg, "reload: cannot execute this binary: %s",
+		       strerror(errno));
+	unsetenv(FYAI_RELOAD_FD_ENV);
+	fclose(fp);
+	return -1;
+
+file_error:
+	fyai_cfg_error(cfg, "reload: cannot prepare the state file: %s",
+		       strerror(errno));
+	fclose(fp);
+	return -1;
+}
 
 /* FYAI_EMBEDDED_CONFIG_SCHEMA[] / FYAI_EMBEDDED_CONFIG_SCHEMA_LEN - the
  * vendored data/config.schema.yaml, generated at configure time. */
@@ -1040,15 +1209,20 @@ int fyai_config_load(struct fyai_cfg *cfg,
 	gb = cfg->gb;
 
 	root_explicit = fy_invalid;
-	user_path = user_config_path();
-	rc = parse_config_file(gb, user_path, &root_user);
-	free(user_path);
-	if (rc)
-		return -1;
+	root_user = fy_invalid;
+	if (!fy_is_mapping(cfg->reload_state)) {
+		user_path = user_config_path();
+		rc = parse_config_file(gb, user_path, &root_user);
+		free(user_path);
+		if (rc)
+			return -1;
+	}
 
 	/* Load the catalogue and selected branch configuration. */
 	branch = NULL;
-	if (fyai_peek_arena_config(NULL, cfg->branch_explicit ? cfg->branch : NULL,
+	if (fyai_peek_arena_config(fy_is_mapping(cfg->reload_state) ?
+				   cfg->arena_dir : NULL,
+				   cfg->branch_explicit ? cfg->branch : NULL,
 				   cfg->root_spec, gb, &root_repo, &cfg->catalog,
 				   &branch, &cfg->root_ref))
 		return -1;
@@ -1097,10 +1271,18 @@ int fyai_config_load(struct fyai_cfg *cfg,
 	 * an explicit --config merged on top. One document, one apply pass;
 	 * `config effective` emits it verbatim.
 	 */
-	cfg->config_doc = config_merge(gb,
-				       fy_is_valid(root_repo) ?
-						root_repo : root_user,
-				       root_explicit);
+	cfg->config_doc = fy_is_mapping(cfg->reload_state) ?
+		fy_get(cfg->reload_state, "config", fy_invalid) :
+		config_merge(gb, fy_is_valid(root_repo) ? root_repo : root_user,
+			     root_explicit);
+	if (fy_is_mapping(cfg->reload_state) && !fy_is_mapping(cfg->config_doc)) {
+		fyai_cfg_error(cfg, "reload: invalid saved configuration");
+		return -1;
+	}
+	if (fy_is_mapping(cfg->reload_state) &&
+	    fyai_config_validate_document(cfg, cfg->config_doc,
+					  "reload config"))
+		return -1;
 	if (fyai_config_apply(cfg, cfg->config_doc))
 		return -1;
 
@@ -2323,7 +2505,7 @@ err_out:
 int fyai_config_adopt_arena(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
-	fy_generic doc;
+	fy_generic doc, key;
 
 	if (!cfg || !cfg->gb || !fy_is_valid(ctx->arena_config))
 		return -1;
@@ -2333,7 +2515,23 @@ int fyai_config_adopt_arena(struct fyai_ctx *ctx)
 	 * and the session layer is above them. */
 	doc = config_merge(cfg->gb, ctx->arena_config, cfg->config_doc);
 	doc = config_merge(cfg->gb, doc, cfg->config_session);
-	return config_rederive_doc(ctx, doc);
+	if (config_rederive_doc(ctx, doc))
+		return -1;
+	/* An explicit key is invocation state, not a member of the branch store. */
+	if (fy_is_mapping(cfg->reload_state)) {
+		key = fy_get(cfg->reload_state, "key", fy_invalid);
+		if (fy_is_string(key) && *fy_castp(&key, "")) {
+			cfg->api_key = fy_gb_intern_string(cfg->gb,
+							fy_castp(&key, ""));
+			if (!cfg->api_key) {
+				fyai_cfg_error(cfg, "reload: cannot retain API key");
+				return -1;
+			}
+			cfg->api_key_explicit = true;
+			cfg->api_key_auto = false;
+		}
+	}
+	return 0;
 }
 
 void fyai_config_set_defaults(struct fyai_cfg *cfg)
@@ -2443,6 +2641,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->catalog = fy_invalid;
 	cfg->catalog_src = fy_invalid_value;
 	cfg->config_doc = fy_invalid;
+	cfg->reload_state = fy_invalid;
 	cfg->sandbox = fy_invalid;
 	cfg->mcp_enabled = false;
 	cfg->mcp_startup_wait = true;
@@ -2463,6 +2662,11 @@ void fyai_config_cleanup(struct fyai_cfg *cfg)
 	/* Drains whatever no earlier boundary reported. */
 	fyai_diag_cleanup(&cfg->diag);
 	free(cfg->branch);
+	free(cfg->reload_branch);
+	free(cfg->reload_config);
+	free(cfg->reload_session);
+	free(cfg->reload_key);
+	free(cfg->reload_arena);
 	free(cfg->root_spec);
 	free(cfg->terminal_input);
 	markdown_palettes_destroy(cfg);
@@ -3088,6 +3292,7 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 {
 	struct fy_generic_builder_cfg gb_cfg;
 	struct config_cli_options cli;
+	fy_generic doc, session, key;
 	int rc, arg_index;
 	char *def_arena_dir = NULL;
 	const char *verb = NULL;
@@ -3115,6 +3320,16 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 
 	fyai_config_set_defaults(cfg);
 	cfg->config_session = fy_invalid;
+	if (getenv(FYAI_RELOAD_FD_ENV)) {
+		cfg->reload_state = config_reload_read(cfg);
+		if (!fy_is_mapping(cfg->reload_state))
+			goto err_out;
+		cfg->arena_dir = fy_get(cfg->reload_state, "arena", "");
+		if (!cfg->arena_dir || !*cfg->arena_dir) {
+			fyai_cfg_error(cfg, "reload: missing arena path");
+			goto err_out;
+		}
+	}
 
 	rc = config_parse_cli_options(cfg, argc, argv, &cli);
 	if (rc > 0) {
@@ -3163,6 +3378,38 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 	rc = fyai_config_load(cfg, cli.config, cli.env);
 	if (rc)
 		goto err_out;
+	if (fy_is_mapping(cfg->reload_state)) {
+		doc = fy_get(cfg->reload_state, "config", fy_invalid);
+		session = fy_get(cfg->reload_state, "session", fy_invalid);
+		key = fy_get(cfg->reload_state, "key", fy_invalid);
+		if (!fy_is_mapping(doc) ||
+		    (fy_is_valid(session) && !fy_is_null(session) &&
+		     !fy_is_mapping(session)) ||
+		    (fy_is_valid(key) && !fy_is_null(key) &&
+		     !fy_is_string(key))) {
+			fyai_cfg_error(cfg, "reload: invalid configuration handoff");
+			goto err_out;
+		}
+		if (fy_is_mapping(session)) {
+			cfg->config_session = session;
+			if (fyai_config_validate_document(cfg,
+				config_merge(cfg->gb, doc, session),
+				"reload session config"))
+				goto err_out;
+			if (fyai_config_apply(cfg, session))
+				goto err_out;
+		}
+		if (fy_is_string(key) && *fy_castp(&key, "")) {
+			cfg->api_key = fy_gb_intern_string(cfg->gb,
+							fy_castp(&key, ""));
+			if (!cfg->api_key) {
+				fyai_cfg_error(cfg, "reload: cannot retain API key");
+				goto err_out;
+			}
+			cfg->api_key_explicit = true;
+			cfg->api_key_auto = false;
+		}
+	}
 
 	/*
 	 * Fold pending --set edits into this run before model/theme resolution,

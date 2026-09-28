@@ -1683,6 +1683,11 @@ int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 	rc = fyai_cmd_session_run(ctx, name, &view);
 	if (own_transient)
 		fyai_cleanup_transient_builder(ctx);
+	if (!rc && ctx->cfg->reload_branch) {
+		fyai_diag_drain(&ctx->cfg->diag);
+		fyai_ui_pane_end(ctx, title, false, true);
+		return 1;
+	}
 
 	/*
 	 * A backend collects rather than prints, so report here - before the

@@ -154,6 +154,7 @@ int fyai_cmd_mcp_login(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_mcp_enable(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_mcp_import_client(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_exit(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_reload(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_btw(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_branches(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_resume(struct fyai_cmd_call *call, fy_generic *result);

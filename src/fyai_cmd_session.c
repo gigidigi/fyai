@@ -20,11 +20,15 @@
 #include "fyai.h"
 #include "fyai_cmd.h"
 #include "fyai_cmd_int.h"
+#include "fyai_agents.h"
+#include "fyai_branch.h"
 #include "fyai_browser.h"
 #include "fyai_sink.h"
 #include "fyai_session.h"
+#include "fyai_storage.h"
 #include "fyai_tools.h"
 #include "fyai_ui.h"
+#include "utils.h"
 
 #define FYAI_MODULE FYAIEM_SESSION
 
@@ -34,6 +38,48 @@ int fyai_cmd_exit(struct fyai_cmd_call *call, fy_generic *result)
 	(void)result;
 	fyai_ui_quit_request(call->ctx);
 	return 0;
+}
+
+int fyai_cmd_reload(struct fyai_cmd_call *call, fy_generic *result)
+{
+	struct fyai_ctx *ctx = call->ctx;
+	char *branch;
+	int rc;
+
+	(void)result;
+	fyai_error_check(ctx, !ctx->cfg->transient, err,
+			 "reload: transient state cannot survive a restart");
+	fyai_error_check(ctx, !ctx->cfg->root_pinned, err,
+			 "reload: a pinned root cannot be republished");
+	fyai_error_check(ctx, ctx->durable_allocator && ctx->durable_gb, err,
+			 "reload: no arena is open to retain the session");
+	fyai_error_check(ctx, !fyai_tools_active(ctx), err,
+			 "reload: close live shells and sub-agents before restarting");
+	fyai_error_check(ctx, !fyai_agents_attached(ctx), err,
+			 "reload: close attached agents before restarting");
+	fyai_error_check(ctx, !fyai_ui_has_line(ctx), err,
+			 "reload: process queued input before restarting");
+	fyai_error_check(ctx, fyai_exec_self_available(), err,
+			 "reload: executing this binary is not supported here");
+#ifndef __linux__
+	fyai_error_check(ctx,
+			 !ctx->cfg->api_key_explicit || !ctx->cfg->api_key, err,
+			 "reload: this platform cannot pass an explicit API key "
+			 "without storing it");
+#endif
+	branch = strdup(fyai_ctx_branch(ctx));
+	fyai_error_check(ctx, branch, err,
+			 "reload: cannot retain the active branch");
+	ctx->cfg->reload_branch = branch;
+	rc = fyai_publish_state(ctx);
+	if (rc) {
+		ctx->cfg->reload_branch = NULL;
+		free(branch);
+		return -1;
+	}
+	return 0;
+err:
+	return -1;
 }
 
 int fyai_cmd_btw(struct fyai_cmd_call *call, fy_generic *result)

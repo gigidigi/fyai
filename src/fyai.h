@@ -377,6 +377,13 @@ struct fyai_cfg {
 	 * the conversation the last one left.
 	 */
 	bool fresh_session;
+	/* Owned branch name for a restart after the session closes. */
+	char *reload_branch;
+	char *reload_config;
+	char *reload_session;
+	char *reload_key;
+	char *reload_arena;
+	fy_generic reload_state;	/* exec handoff, held by the config builder */
 	/* Read-only root selection, resolved when the arena opens. */
 	char *root_spec;
 	fy_generic_value root_ref;

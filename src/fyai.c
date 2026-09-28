@@ -3562,6 +3562,7 @@ const struct fyai_verb *fyai_cfg_verb(struct fyai_cfg *cfg)
 int fyai_run(struct fyai_cfg *cfg)
 {
 	struct fyai_ctx ctx;
+	const char *config, *session;
 	int rc;
 
 	/*
@@ -3579,6 +3580,24 @@ int fyai_run(struct fyai_cfg *cfg)
 
 	rc = fyai_execute(&ctx);
 	fyai_cfg_error_check(cfg, !rc, err_out, "fyai execution failed");
+	if (cfg->reload_branch) {
+		config = emit_json_string(cfg->gb, cfg->config_doc);
+		session = emit_json_string(cfg->gb,
+			fy_is_valid(cfg->config_session) ?
+			cfg->config_session : fy_null);
+		fyai_error_check(&ctx, config && session, err_out,
+				 "reload: cannot serialize configuration");
+		cfg->reload_config = strdup(config);
+		cfg->reload_session = strdup(session);
+		cfg->reload_arena = strdup(cfg->arena_dir);
+		if (cfg->api_key_explicit && cfg->api_key)
+			cfg->reload_key = strdup(cfg->api_key);
+		fyai_error_check(&ctx, cfg->reload_config && cfg->reload_session &&
+			cfg->reload_arena &&
+			(!cfg->api_key_explicit || !cfg->api_key ||
+			 cfg->reload_key), err_out,
+				 "reload: cannot retain configuration");
+	}
 
 out:
 	/*

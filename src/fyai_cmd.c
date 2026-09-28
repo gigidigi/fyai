@@ -92,6 +92,7 @@ static const struct {
 	{ "mcp_enable",		fyai_cmd_mcp_enable },
 	{ "mcp_import_client",	fyai_cmd_mcp_import_client },
 	{ "exit",		fyai_cmd_exit },
+	{ "reload",		fyai_cmd_reload },
 	{ "btw",		fyai_cmd_btw },
 	{ "branches",		fyai_cmd_branches },
 	{ "resume",		fyai_cmd_resume },

@@ -183,6 +183,8 @@ int fyai_config_resolve_model(struct fyai_cfg *cfg);
 int fyai_config_messages_gate(struct fyai_cfg *cfg);
 
 int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[]);
+/* Replace this invocation after its context has closed. Return on error. */
+int fyai_config_reload_exec(struct fyai_cfg *cfg);
 void fyai_config_cleanup(struct fyai_cfg *cfg);
 
 /*
