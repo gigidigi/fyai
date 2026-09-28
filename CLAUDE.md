@@ -746,10 +746,22 @@ draws its slots.
   `<fy-mark id="review:AREA"/>`, which takes no column: AREA is the flag
   that shows the row, else its page, with the list of an `each` before it
   and `/blank` after a blank row. `fyai_page_review_paint()` gives each
-  mark and each slot the next colour of the palette series and its name,
-  at the right edge of a row and the top left of a slot. `/page review`
+  mark and each slot the next colour of the palette series and its name
+  at the top right, where it covers no text. `/page review`
   paints the live page; `fyai page review SAMPLE` draws a sample state
   and lists the areas. A mark is not a region of the terminal library.
+- A page document states its layouts in `layouts`: the first that the
+  terminal is large enough for (`min_cols`, `min_rows`) is used, and a node
+  can switch on `layout.name`. The thresholds are the document's; C only
+  evaluates them, in `fyai_page_layout()`, once per frame before the fit,
+  because the layout decides where the pane stands before any tile is
+  granted rows. A `side` pane is a column of `cols` beside the transcript,
+  each tile a panel of `tile_rows`: the pane takes no rows of the page, and
+  `fyai_page_side_place()` and `fyai_page_grid_lead()` write one fy-grid of
+  the transcript and the tiles, because grids do not nest. A side column
+  needs the fullscreen page. While it stands, the UI sets
+  `cfg->render_width` to the column the transcript has, and only it puts it
+  back.
 - `display/screen: fullscreen`, the default, puts the page on the alternate
   screen when the session starts (`FYTIM_SCREEN_ALT`). There is no scrollback
   there, so the transcript is a view of the page, `src/fyai_transcript_view.c`, drawn into
