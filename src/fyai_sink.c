@@ -544,6 +544,12 @@ static FILE *sink_term_out(const struct sink_term *t)
 }
 
 static int sink_term_write_failed(struct fyai_sink *s, FILE *fp);
+static int sink_term_put(struct fyai_sink *s, enum fyai_sink_stream stream,
+			 const char *buf, size_t len);
+static bool sink_term_via_ui(const struct fyai_sink *s,
+			     enum fyai_sink_stream stream);
+static int sink_term_markdown_ui(struct fyai_sink *s,
+				 enum fyai_sink_stream stream, const char *md);
 
 /* Tool children reserve standard output for JSON-RPC frames. */
 /* Present only when descriptor 1 is not a JSON-RPC channel. */
@@ -740,10 +746,7 @@ static int sink_term_doc_append(struct fyai_sink *s, const char *text,
 		return 0;
 	if (t->passthrough) {
 		t->wrote = true;
-		if (fwrite(text, 1, len, sink_term_out(t)) != len ||
-		    fflush(sink_term_out(t)))
-			return sink_term_write_failed(s, sink_term_out(t));
-		return 0;
+		return sink_term_put(s, FYAI_SINK_TRANSCRIPT, text, len);
 	}
 	if (t->oneshot) {
 		rc = response_buffer_append_data(&t->source, text, len);
@@ -782,8 +785,7 @@ static void sink_term_present_oneshot(struct fyai_sink *s)
 	if (t->passthrough) {
 		/* Close the row the passthrough text was written on. */
 		if (t->wrote)
-			fputc('\n', sink_term_out(t));
-		fflush(sink_term_out(t));
+			(void)sink_term_put(s, FYAI_SINK_TRANSCRIPT, "\n", 1);
 		return;
 	}
 	if (!t->oneshot || !t->source.len)
@@ -791,6 +793,11 @@ static void sink_term_present_oneshot(struct fyai_sink *s)
 	/* Only an assistant document is presented here, unless this sink is
 	 * the whole presentation. */
 	(void)fyai_sink_unit(s, FYAI_SINK_TRANSCRIPT, FYAI_FLOW_PROSE);
+	if (sink_term_via_ui(s, FYAI_SINK_TRANSCRIPT)) {
+		(void)sink_term_markdown_ui(s, FYAI_SINK_TRANSCRIPT,
+					    t->source.data);
+		return;
+	}
 	if (fyai_fprint_markdown(sink_term_out(t), t->source.data, cfg, 0))
 		fwrite(t->source.data, 1, t->source.len, sink_term_out(t));
 	fflush(sink_term_out(t));
@@ -1154,6 +1161,31 @@ static FILE *sink_term_stream_file(const struct fyai_sink *s,
 	return sink_may_present(s) ? sink_term_out(t) : NULL;
 }
 
+/* Render @md and present the rows through the terminal UI. */
+static int sink_term_markdown_ui(struct fyai_sink *s,
+				 enum fyai_sink_stream stream, const char *md)
+{
+	char *text = NULL;
+	size_t len = 0;
+	FILE *mf;
+	int rc;
+
+	mf = open_memstream(&text, &len);
+	fyai_error_check(s->ctx, mf, err,
+			 "could not open the display render buffer");
+	if (fyai_fprint_markdown(mf, md, s->ctx->cfg, 0))
+		fputs(md, mf);
+	rc = fclose(mf);
+	fyai_error_check(s->ctx, !rc, err,
+			 "could not render output for the display");
+	rc = sink_term_put(s, stream, text, len);
+	free(text);
+	return rc;
+err:
+	free(text);
+	return -1;
+}
+
 static int sink_term_markdown(struct fyai_sink *s, enum fyai_sink_stream stream,
 			      const char *md)
 {
@@ -1162,6 +1194,8 @@ static int sink_term_markdown(struct fyai_sink *s, enum fyai_sink_stream stream,
 
 	if (!md || !*md || !fp)
 		return 0;
+	if (sink_term_via_ui(s, stream))
+		return sink_term_markdown_ui(s, stream, md);
 	/*
 	 * Machine data is parsed by another program: never decorate it.
 	 * Everything else is rendered, and falls back to its own source when
@@ -1191,21 +1225,46 @@ static int sink_term_write_failed(struct fyai_sink *s, FILE *fp)
 	return -1;
 }
 
-static int sink_term_write(struct fyai_sink *s, enum fyai_sink_stream stream,
-			   const char *buf, size_t len)
+/*
+ * Test if the terminal UI presents @stream. The UI owns the screen while it
+ * is active: the scrollback streams go through it, never through standard
+ * output.
+ */
+static bool sink_term_via_ui(const struct fyai_sink *s,
+			     enum fyai_sink_stream stream)
+{
+	const struct sink_term *t = s->state;
+
+	return !t->out && sink_may_present(s) && fyai_ui_active(s->ctx) &&
+	       (stream == FYAI_SINK_TRANSCRIPT || stream == FYAI_SINK_NOTICE);
+}
+
+/* Present bytes that are in their final form. */
+static int sink_term_put(struct fyai_sink *s, enum fyai_sink_stream stream,
+			 const char *buf, size_t len)
 {
 	FILE *fp;
 	size_t written;
 	int rc;
 
+	if (!buf || !len)
+		return 0;
+	if (sink_term_via_ui(s, stream))
+		return fyai_ui_present(s->ctx, buf, len);
 	fp = sink_term_stream_file(s, stream);
-	if (!buf || !len || !fp)
+	if (!fp)
 		return 0;
 	written = fwrite(buf, 1, len, fp);
 	rc = fflush(fp);
 	if (written != len || rc)
 		return sink_term_write_failed(s, fp);
 	return 0;
+}
+
+static int sink_term_write(struct fyai_sink *s, enum fyai_sink_stream stream,
+			   const char *buf, size_t len)
+{
+	return sink_term_put(s, stream, buf, len);
 }
 
 static void sink_term_flush(struct fyai_sink *s)

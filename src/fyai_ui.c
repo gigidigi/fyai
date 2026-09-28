@@ -102,6 +102,8 @@ struct fyai_ui {
 	unsigned int activity_interval_ms;
 	off_t capture_out;
 	off_t capture_err;
+	struct response_buffer pane_out;	/* what a pane captured */
+	struct response_buffer open_row;	/* a row not ended yet */
 	bool capture;
 	bool recalled;
 	bool frame_pending;
@@ -610,12 +612,54 @@ static void ui_popup_append(struct fyai_ui *ui, const char *title,
 	ui->frame_pending = true;
 }
 
+/*
+ * Commit the rows of @buf that end. The scrollback takes whole rows: a commit
+ * makes a row of what it ends with, so the start of a row waits in
+ * ui->open_row for the rest of it.
+ */
+static int ui_commit_rows(struct fyai_ui *ui, const char *buf, size_t len)
+{
+	struct response_buffer *o = &ui->open_row;
+	size_t whole;
+	int rc = 0;
+
+	/* The rows end at the last newline. memrchr() is not portable. */
+	for (whole = len; whole && buf[whole - 1] != '\n'; whole--)
+		;
+	if (!whole)
+		return response_buffer_append_data(o, buf, len);
+	if (o->len) {
+		if (response_buffer_append_data(o, buf, whole))
+			return -1;
+		rc = fytim_commit(ui->ft, o->data, o->len) == FYTIM_OK ? 0 : -1;
+		o->len = 0;
+	} else {
+		rc = fytim_commit(ui->ft, buf, whole) == FYTIM_OK ? 0 : -1;
+	}
+	if (!rc && whole < len)
+		rc = response_buffer_append_data(o, buf + whole, len - whole);
+	return rc;
+}
+
+/* Commit the row that did not end: nothing more is written to it. */
+static int ui_commit_open_row(struct fyai_ui *ui)
+{
+	int rc;
+
+	if (ui->fullscreen || !ui->open_row.len)
+		return 0;
+	rc = fytim_commit(ui->ft, ui->open_row.data, ui->open_row.len) ==
+	     FYTIM_OK ? 0 : -1;
+	ui->open_row.len = 0;
+	return rc;
+}
+
 /* Present rendered rows: to the scrollback, or to the transcript view of a
  * fullscreen page, which has none. */
 static int ui_present(struct fyai_ui *ui, const char *buf, size_t len)
 {
 	if (!ui->fullscreen)
-		return fytim_commit(ui->ft, buf, len) == FYTIM_OK ? 0 : -1;
+		return ui_commit_rows(ui, buf, len);
 	if (fyai_transcript_view_append_live(ui->view, buf, len))
 		return -1;
 	ui->frame_pending = true;
@@ -723,6 +767,37 @@ void fyai_ui_drain_output(struct fyai_ctx *ctx)
 	fflush(stdout); fflush(stderr);
 	spool_drain(ui, &ui->out);
 	spool_drain(ui, &ui->err);
+	if (ui_commit_open_row(ui))
+		fyai_warning(ctx, "could not commit transcript output");
+}
+
+int fyai_ui_present(struct fyai_ctx *ctx, const char *buf, size_t len)
+{
+	struct fyai_ui *ui;
+	int rc;
+
+	if (!fyai_ui_active(ctx))
+		return -1;
+	if (!len)
+		return 0;
+	ui = ctx->ui;
+	if (ui->capture) {
+		rc = response_buffer_append_data(&ui->pane_out, buf, len);
+		fyai_error_check(ctx, !rc, err_out,
+				 "could not keep the output of a command");
+		return 0;
+	}
+	/* A stray writer spooled its bytes before these. */
+	fflush(stdout);
+	fflush(stderr);
+	spool_drain(ui, &ui->out);
+	spool_drain(ui, &ui->err);
+	rc = ui_present(ui, buf, len);
+	fyai_error_check(ctx, !rc, err_out, "could not present output");
+	return 0;
+
+err_out:
+	return -1;
 }
 
 static void ui_queue(struct fyai_ui *ui, const char *text)
@@ -2081,6 +2156,8 @@ void fyai_ui_close(struct fyai_ctx *ctx)
 	ui_note_clear(ui);
 	free(ui->pane_grid.data);
 	free(ui->stream_rows.data);
+	free(ui->pane_out.data);
+	free(ui->open_row.data);
 	/* Nobody can answer a question now. */
 	while (ui->questions) {
 		q = ui->questions;
@@ -2129,6 +2206,7 @@ void fyai_ui_pane_begin(struct fyai_ctx *ctx)
 		return;
 	fyai_ui_drain_output(ctx);
 	ui_band_close(ui, &ui->message_band);
+	ui->pane_out.len = 0;
 	ui->capture_out = ui->out.off;
 	ui->capture_err = ui->err.off;
 	ui->capture = true;
@@ -2145,6 +2223,16 @@ void fyai_ui_pane_end(struct fyai_ctx *ctx, const char *title, bool error,
 
 	if (!ui || !ui->capture)
 		return;
+	/* What the sink presented, then what a stray writer spooled. */
+	if (ui->pane_out.len &&
+	    response_buffer_append_data(&out, ui->pane_out.data,
+					ui->pane_out.len)) {
+		fyai_error(ctx, "could not keep the output of %s",
+			   title ? title : "the command");
+		ui->capture = false;
+		return;
+	}
+	ui->pane_out.len = 0;
 	fflush(stdout);
 	fflush(stderr);
 	spool_capture(&ui->out, ui->capture_out, &out);
@@ -2585,15 +2673,16 @@ int fyai_ui_commit(struct fyai_ctx *ctx, const char *buf, size_t len)
 {
 	struct fyai_flow *flow;
 	struct fyai_ui *ui;
-	size_t written;
 	int rc;
 
 	if (!fyai_ui_active(ctx))
 		return -1;
 	ui = ctx->ui;
 	if (ui->capture) {
-		written = fwrite(buf, 1, len, stdout);
-		return written == len ? 0 : -1;
+		rc = response_buffer_append_data(&ui->pane_out, buf, len);
+		fyai_error_check(ctx, !rc, err_out,
+				 "could not keep the output of a command");
+		return 0;
 	}
 	if (len) {
 		/* Blank rows the render supplies count toward the separation. */
@@ -2614,14 +2703,6 @@ int fyai_ui_commit(struct fyai_ctx *ctx, const char *buf, size_t len)
 
 err_out:
 	return -1;
-}
-
-int fyai_ui_unit(struct fyai_ctx *ctx, enum fyai_flow_unit unit)
-{
-	if (!fyai_ui_active(ctx))
-		return -1;
-	fyai_ui_drain_output(ctx);
-	return ui_flow_fence(ctx, unit);
 }
 
 /* Keep frozen renderer rows in the fullscreen viewport. */

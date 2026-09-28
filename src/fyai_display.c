@@ -4817,11 +4817,8 @@ static void fyai_print_user_turn(struct fyai_ctx *ctx, const char *line,
 	/* The card is one unit. Its rows continue it. */
 	flow = fyai_sink_flow(ctx->sink);
 	fenced = markdown_reverse_pair(cfg, &on, &off);
-	if (live && fyai_ui_active(ctx))
-		(void)fyai_ui_unit(ctx, FYAI_FLOW_USER_CARD);
-	else
-		(void)fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT,
-				     FYAI_FLOW_USER_CARD);
+	(void)fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT,
+			     FYAI_FLOW_USER_CARD);
 	fyai_flow_emitted(flow, FYAI_FLOW_PROSE, true);
 
 	/* Drop renderer padding rows, including ANSI-only SGR/EL rows. */

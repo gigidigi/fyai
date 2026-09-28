@@ -10,7 +10,6 @@ struct markdown_update;
 struct fytim_workband;
 struct fytim_surface;
 struct fyai_terminal_view;
-enum fyai_flow_unit;
 
 /* Bytes the user typed for the surface holding the keys. */
 typedef void (*fyai_ui_keys_fn)(void *user, const char *data, size_t len);
@@ -55,10 +54,11 @@ void fyai_ui_resized(struct fyai_ctx *ctx);
 void fyai_ui_clear_screen(struct fyai_ctx *ctx);
 int fyai_ui_commit(struct fyai_ctx *ctx, const char *buf, size_t len);
 /*
- * State that @unit is presented next through fyai_ui_commit(). The
- * separation goes on the path of the unit, after the spooled output.
+ * Present @buf as the continuation of the current unit, or keep it for the
+ * pane that captures. It adds no separation and records no flow: the sink
+ * does both.
  */
-int fyai_ui_unit(struct fyai_ctx *ctx, enum fyai_flow_unit unit);
+int fyai_ui_present(struct fyai_ctx *ctx, const char *buf, size_t len);
 int fyai_ui_tail_apply(struct fyai_ctx *ctx, const struct markdown_update *upd);
 /* Discard rendered stream rows before a full-width rerender. */
 void fyai_ui_tail_reflow_reset(struct fyai_ctx *ctx);
