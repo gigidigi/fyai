@@ -65,6 +65,9 @@ void fyai_terminal_reply_write(int fd, const char *data, size_t len);
 
 bool fyai_terminal_view_screen_mode(const struct fyai_terminal_view *view);
 bool fyai_terminal_view_binary(const struct fyai_terminal_view *view);
+/* Whether the program ever entered the alternate screen: a full-screen
+ * program, which leaves nothing on the primary screen. */
+bool fyai_terminal_view_used_alt_screen(const struct fyai_terminal_view *view);
 size_t fyai_terminal_view_raw_bytes(const struct fyai_terminal_view *view);
 void fyai_terminal_view_size(const struct fyai_terminal_view *view, int *rowsp,
 			     int *colsp);

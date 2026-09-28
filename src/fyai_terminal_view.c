@@ -76,6 +76,7 @@ struct fyai_terminal_view {
 	bool screen_mode;
 	bool alt_screen;
 	bool alt_screen_seen;
+	bool alt_screen_used;	/* the program entered the alternate buffer */
 	bool binary;
 };
 
@@ -405,6 +406,8 @@ static void tty_csi_alt_screen(struct fyai_terminal_view *view,
 		if (param == 47 || param == 1047 || param == 1049) {
 			view->alt_screen = final == 'h';
 			view->alt_screen_seen = true;
+			if (final == 'h')
+				view->alt_screen_used = true;
 			/* Switching screens resets scrollback. */
 			if (view->scroll) {
 				view->scroll = 0;
@@ -1077,4 +1080,9 @@ void fyai_terminal_view_damage_all(struct fyai_terminal_view *view)
 	view->damage_first = 0;
 	view->damage_last = view->rows - 1;
 	view->cursor_moved = true;
+}
+
+bool fyai_terminal_view_used_alt_screen(const struct fyai_terminal_view *view)
+{
+	return view && view->alt_screen_used;
 }

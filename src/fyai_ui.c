@@ -1179,6 +1179,20 @@ int fyai_ui_page_report(struct fyai_ctx *ctx)
 	return rc;
 }
 
+static void ui_page_update(struct fyai_ui *ui);
+
+bool fyai_ui_layout_now(struct fyai_ctx *ctx)
+{
+	struct fyai_ui *ui = ctx ? ctx->ui : NULL;
+
+	if (!ui || !ui->page)
+		return false;
+	/* The layout of a frame, without its paint. */
+	fyai_workpane_reconcile(ctx->workpane);
+	ui_page_update(ui);
+	return ui->page != NULL;
+}
+
 int fyai_ui_page_review(struct fyai_ctx *ctx, const char *how, bool *on)
 {
 	struct fyai_ui *ui = ctx ? ctx->ui : NULL;

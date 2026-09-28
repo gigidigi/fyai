@@ -1915,6 +1915,8 @@ struct fyai_tool_child {
 	bool done;
 	bool session_started;	/* the session this child was asked for opened */
 	bool spawn_failed;	/* the parent state could not be adopted */
+	/* The size of the tile the session starts at, or 0. */
+	int size_rows, size_cols;
 };
 
 static fy_generic fyai_tool_child_serve(struct jsonrpc_conn *conn,
@@ -1938,6 +1940,10 @@ static fy_generic fyai_tool_child_serve(struct jsonrpc_conn *conn,
 		}
 		tc->args = fy_get(params, "call", fy_invalid);
 		tc->branch = fy_get(params, "branch", fy_invalid);
+		tc->size_rows = (int)fy_get(fy_get(params, "size", fy_invalid),
+					   "rows", 0LL);
+		tc->size_cols = (int)fy_get(fy_get(params, "size", fy_invalid),
+					   "cols", 0LL);
 		/* The result carries the diagnostics of a refused state. */
 		if (tc->ctx->cfg->tool_exec)
 			tc->spawn_failed = fyai_tool_child_spawn_take(tc->ctx,
@@ -2046,6 +2052,11 @@ static void fyai_tool_child_session(struct fyai_ctx *ctx,
 		opts.workdir = fy_castp(&workdir, (const char *)NULL);
 		opts.term = ctx->cfg->shell_tty_term;
 		fyai_shell_tty_size(ctx, args, &opts.rows, &opts.cols);
+		/* The parent laid out the tile before the start. */
+		if (tc->size_rows > 0 && tc->size_cols > 0) {
+			opts.rows = tc->size_rows;
+			opts.cols = tc->size_cols;
+		}
 		/* Use pipes unless the call explicitly requests a terminal. */
 		opts.pipes = !fyai_shell_tty_requested(ctx, args);
 		opts.shell = fyai_shell_shell_requested(ctx, args);
@@ -2053,6 +2064,9 @@ static void fyai_tool_child_session(struct fyai_ctx *ctx,
 		tc->relay = fyai_terminal_relay_start(ctx, conn,
 						fy_castp(&command, ""),
 						sandbox, &opts);
+		if (tc->relay && !opts.pipes)
+			fyai_diag_tracef("shell", "terminal %dx%d", opts.rows,
+					 opts.cols);
 		/* The spec is only needed by the fork inside the start. */
 		fyai_shell_sandbox_end(&sb);
 	}
@@ -2227,6 +2241,9 @@ struct fyai_tool_job {
 	bool band_progress;
 	int pty;			/* terminal of a sub-agent, -1 if none */
 	int pty_rows, pty_cols;
+	/* The size of the tile of a terminal session, which its program
+	 * starts at, or 0. */
+	int start_rows, start_cols;
 	/* What the tile draws: the work pane decides it from the grant. */
 	enum fyai_workpane_present present;
 	struct fyai_terminal_view *view;	/* what it drew there */
@@ -2701,6 +2718,31 @@ local:
 				   cols);
 }
 
+/*
+ * A program that prints once and ends, such as ls, reads the size of its
+ * terminal when it starts. The tile of the session is registered already, so
+ * the layout solved now gives it the size it will have, and the program starts
+ * at that size. A size the call asks for wins.
+ */
+static void fyai_shell_session_start_size(struct fyai_tool_job *job,
+					  fy_generic args)
+{
+	struct fyai_shell_session *sess = job->session;
+	int rows, cols;
+
+	if (!sess || !sess->surface || fy_get(args, "rows", 0LL) > 0 ||
+	    fy_get(args, "cols", 0LL) > 0 || !fyai_ui_layout_now(sess->ctx))
+		return;
+	rows = fyai_ui_surface_granted_rows(sess->ctx, sess->surface);
+	cols = fyai_ui_surface_granted_cols(sess->ctx, sess->surface);
+	if (rows < 1 || cols < 1)
+		return;
+	job->start_rows = rows;
+	job->start_cols = cols;
+	/* The grid and the view take the size before the program writes. */
+	fyai_shell_session_apply_grant(sess, rows, cols);
+}
+
 /* Chrome only: focus changes nothing about the size of this session. */
 static void fyai_shell_session_focus_changed(void *owner, bool focused)
 {
@@ -2896,7 +2938,8 @@ static void fyai_surface_retire_zoom(struct fyai_ctx *ctx,
  * Commit the completed session to the transcript and terminal scrollback. A
  * bang command is not a part of the conversation: it records nothing and
  * commits nothing, and its tile stays with the outcome until the user
- * dismisses it, with the keys at the prompt.
+ * dismisses it, with the keys at the prompt. A full-screen program leaves
+ * nothing to read, and its tile goes at once.
  */
 static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
 {
@@ -2936,6 +2979,15 @@ static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
 				       ok ? FYAI_UI_MARK_OK :
 					    FYAI_UI_MARK_FAILED);
 	free(cause);
+	/* A full-screen program leaves nothing to read: its tile goes. */
+	if (sess->keep_tile &&
+	    fyai_terminal_view_used_alt_screen(sess->view)) {
+		fyai_surface_retire_zoom(sess->ctx, sess->surface);
+		fyai_ui_surface_close(sess->ctx, sess->surface);
+		sess->surface = NULL;
+		fyai_ui_wake(sess->ctx);
+		return;
+	}
 	if (sess->keep_tile) {
 		if (fyai_workpane_focused(sess->ctx->workpane) == sess->surface)
 			fyai_workpane_clear_focus(sess->ctx->workpane);
@@ -4758,6 +4810,7 @@ struct fyai_tool_job *fyai_tool_job_submit(struct fyai_ctx *ctx,
 		fyai_error_check(ctx, job->session, err,
 				 "could not open the terminal session");
 		job->session->job = job;
+		fyai_shell_session_start_size(job, args);
 		/* The session copied the name it was reserved under. */
 		free(session_name);
 		session_name = NULL;
@@ -5075,6 +5128,11 @@ static int fyai_tool_job_attach(struct fyai_ctx *ctx,
 	if (job->exec)
 		params = fy_assoc(gb, params, fy_value(gb, "spawn"),
 				     fyai_agent_spawn_state(job->ctx, gb));
+	if (job->start_cols > 0)
+		params = fy_assoc(gb, params, fy_value(gb, "size"),
+				  fy_gb_mapping(gb,
+					"rows", (long long)job->start_rows,
+					"cols", (long long)job->start_cols));
 	fyai_error_check(ctx, fy_is_mapping(params), err,
 			 "could not build the tool call request");
 	job->run = jsonrpc_request_submit(job->conn, "tool/run", params,
