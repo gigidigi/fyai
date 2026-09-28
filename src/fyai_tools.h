@@ -76,6 +76,10 @@ void fyai_tools_btw_panels_close(struct fyai_ctx *ctx);
 bool fyai_tools_btw_dismiss_focused(struct fyai_ctx *ctx);
 /* True when @sf is a completed side-question panel. */
 bool fyai_tools_btw_surface(struct fyai_ctx *ctx, struct fytim_surface *sf);
+/* True for the tile of a bang command whose program ended and that stays
+ * until the user dismisses it. */
+bool fyai_tools_kept_surface(struct fyai_ctx *ctx,
+			     const struct fytim_surface *sf);
 
 /* True when a terminal session owns this call's display. */
 bool fyai_shell_session_display(struct fyai_ctx *ctx, fy_generic tool_call);

@@ -3864,9 +3864,11 @@ int fyai_ui_surface_set_head_right(struct fyai_ctx *ctx,
 			tlen--;
 		/* fyai writes @right and the buttons, so they take the right
 		 * edge as they are. A tile that ended is committed to the
-		 * transcript, where a button acts on nothing. */
-		buttons = mark == FYAI_UI_MARK_RUNNING ? ui_tile_buttons(ctx) :
-			  NULL;
+		 * transcript, where a button acts on nothing, unless it stays
+		 * in the pane. */
+		buttons = mark == FYAI_UI_MARK_RUNNING ||
+			  fyai_tools_kept_surface(ctx, sf) ?
+			  ui_tile_buttons(ctx) : NULL;
 		if (asprintf(&head,
 			     "<fy-act id=\"tile:focus\">%.*s</fy-act>%s%s%s\n",
 			     (int)tlen, escaped,
@@ -4128,6 +4130,8 @@ void fyai_ui_surface_focus(struct fyai_ctx *ctx, struct fytim_surface *sf,
 	ui->status_hint = !focused ? NULL :
 		fyai_tools_btw_surface(ctx, sf) ?
 		"Esc closes · PgUp/PgDn scroll · Ctrl-] returns to the prompt" :
+		fyai_tools_kept_surface(ctx, sf) ?
+		"Esc closes · Ctrl-] returns to the prompt · Ctrl-Tab/Ctrl-T moves focus" :
 		"Ctrl-] returns to the prompt · Ctrl-Tab/Ctrl-T moves focus";
 	(void)fytim_set_status_row(ui->ft, 0, ui->status_hint);
 }

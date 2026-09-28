@@ -2290,6 +2290,8 @@ struct fyai_shell_session {
 	/* A bang shell: its tile stays after the program until the user
 	 * dismisses it. */
 	bool keep_tile;
+	/* The user closed the tile: it goes when the program ends. */
+	bool close_on_exit;
 	pid_t pid;			/* the program, watched for a read */
 	bool pipes;			/* it was given no terminal */
 	struct fyai_event_source *waiter;
@@ -2938,7 +2940,7 @@ static void fyai_surface_retire_zoom(struct fyai_ctx *ctx,
  * Commit the completed session to the transcript and terminal scrollback. A
  * bang command is not a part of the conversation: it records nothing and
  * commits nothing, and its tile stays with the outcome until the user
- * dismisses it, with the keys at the prompt. A full-screen program leaves
+ * dismisses it, and keeps the keys if it held them. A full-screen program leaves
  * nothing to read, and its tile goes at once.
  */
 static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
@@ -2979,20 +2981,22 @@ static void fyai_shell_session_display_finish(struct fyai_shell_session *sess)
 				       ok ? FYAI_UI_MARK_OK :
 					    FYAI_UI_MARK_FAILED);
 	free(cause);
-	/* A full-screen program leaves nothing to read: its tile goes. */
+	/* A full-screen program leaves nothing to read, and a tile the user
+	 * closed is not wanted: its tile goes. */
 	if (sess->keep_tile &&
-	    fyai_terminal_view_used_alt_screen(sess->view)) {
+	    (sess->close_on_exit ||
+	     fyai_terminal_view_used_alt_screen(sess->view))) {
 		fyai_surface_retire_zoom(sess->ctx, sess->surface);
 		fyai_ui_surface_close(sess->ctx, sess->surface);
 		sess->surface = NULL;
 		fyai_ui_wake(sess->ctx);
 		return;
 	}
+	/* The tile keeps the focus it had: Escape closes it there, which the
+	 * hint of the status row says. */
 	if (sess->keep_tile) {
 		if (fyai_workpane_focused(sess->ctx->workpane) == sess->surface)
-			fyai_workpane_clear_focus(sess->ctx->workpane);
-		if (fyai_workpane_zoomed(sess->ctx->workpane) == sess->surface)
-			fyai_workpane_clear_zoom(sess->ctx->workpane);
+			fyai_ui_surface_focus(sess->ctx, sess->surface, true);
 		fyai_ui_wake(sess->ctx);
 		return;
 	}
@@ -4594,6 +4598,19 @@ bool fyai_tools_btw_dismiss_focused(struct fyai_ctx *ctx)
 	return false;
 }
 
+bool fyai_tools_kept_surface(struct fyai_ctx *ctx,
+			     const struct fytim_surface *sf)
+{
+	struct fyai_shell_session *sess;
+
+	if (!ctx || !sf)
+		return false;
+	for (sess = ctx->shell_sessions; sess; sess = sess->next)
+		if (sess->surface == sf)
+			return sess->exited && sess->keep_tile;
+	return false;
+}
+
 bool fyai_tools_btw_surface(struct fyai_ctx *ctx, struct fytim_surface *sf)
 {
 	struct fyai_tool_job *job;
@@ -5341,8 +5358,11 @@ void fyai_tools_surface_request(struct fyai_ctx *ctx, struct fytim_surface *sf,
 	/* Request graceful termination so the result remains available. */
 	if (sess && sess->exited && sess->keep_tile)
 		fyai_shell_session_dismiss(sess);
-	else if (sess)
+	else if (sess) {
+		/* A closed tile goes when its program ends. */
+		sess->close_on_exit = true;
 		fyai_shell_session_close(sess, false);
+	}
 	else if (job) {
 		if (job->btw_panel)
 			fyai_tool_job_discard(job);
