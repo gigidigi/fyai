@@ -32,6 +32,7 @@
 #include "fyai_curl.h"
 #include "fyai_event.h"
 #include "fyai_display.h"
+#include "fyai_desktop.h"
 #include "fyai_log.h"
 #include "fyai_markdown.h"
 #include "fyai_model.h"
@@ -1646,6 +1647,7 @@ static int fyai_turn_run_collect_tools(struct fyai_turn_run *run)
 						 result, ok, false);
 		fyai_error_check(ctx, fy_is_valid(run->turn), err,
 				 "could not append tool job result");
+		fyai_desktop_emit_tool(ctx, tool_call, "completed", ok);
 		/* Present the completed exchange before opening the next band. */
 		fyai_ui_drain_output(ctx);
 	}
@@ -1781,10 +1783,13 @@ static int
 fyai_turn_run_start_tools(struct fyai_turn_run *run, fy_generic response)
 {
 	size_t parallel_total;
+	fy_generic tool_call;
 
 	if (run->ctx->cfg->response_chain)
 		run->previous = run->turn;
 	run->tool_calls = fyai_response_tool_calls(run->ctx, response);
+	fy_foreach(tool_call, run->tool_calls)
+		fyai_desktop_emit_tool(run->ctx, tool_call, "started", true);
 	parallel_total = fyai_turn_run_parallel_count(run);
 	if (parallel_total)
 		return fyai_turn_run_submit_parallel(run, parallel_total);
@@ -1930,6 +1935,8 @@ fy_generic fyai_run_turn(struct fyai_ctx *ctx, fy_generic turn)
 	el = fyai_ctx_loop(ctx);
 	assert(el);
 	while (!fyai_turn_run_done(run)) {
+		if (ctx->desktop_cancel_requested)
+			fyai_turn_run_cancel(run);
 		if (ctx->interrupt_pending) {
 			fyai_event_interrupt_ack(ctx);
 			fyai_turn_run_cancel(run);

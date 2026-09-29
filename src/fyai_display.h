@@ -115,5 +115,7 @@ int fyai_tool_preview_lines(const struct fyai_cfg *cfg, const char *name);
 int fyai_display_foreach_turn(struct fyai_ctx *ctx,
 			      const struct fyai_turn_selector_args *sel,
 			      int (*fn)(void *arg, fy_generic turn), void *arg);
+/* True when the full branch can replay its stored transcript documents. */
+bool fyai_display_stored_complete(struct fyai_ctx *ctx);
 
 #endif

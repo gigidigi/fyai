@@ -67,6 +67,7 @@ static const struct {
 	{ "sandbox_show",	fyai_cmd_sandbox_show },
 	{ "sandbox_set",	fyai_cmd_sandbox_set },
 	{ "history",		fyai_cmd_history },
+	{ "desktop",		fyai_cmd_desktop },
 	{ "reset",		fyai_cmd_reset },
 	{ "clear",		fyai_cmd_clear },
 	{ "api",		fyai_cmd_api },
@@ -138,6 +139,7 @@ static const struct {
 	{ "term",		fyai_cmd_term_prepare },
 	{ "init",		fyai_cmd_init_prepare },
 	{ "agent",		fyai_cmd_agent_prepare },
+	{ "desktop",		fyai_cmd_desktop_prepare },
 	{ "resume",		fyai_cmd_resume_prepare },
 };
 

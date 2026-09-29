@@ -557,7 +557,8 @@ static bool sink_may_present(const struct fyai_sink *s)
 {
 	if (s->ctx->cfg->agent_pty)
 		return true;
-	return !s->ctx->cfg->tool_child && !fyai_agent_delegated(s->ctx);
+	return !s->ctx->cfg->tool_child && !s->ctx->cfg->desktop_rpc &&
+	       !fyai_agent_delegated(s->ctx);
 }
 
 static struct sink_term *sink_term_state(const struct fyai_sink *s)

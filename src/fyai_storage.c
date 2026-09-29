@@ -2026,7 +2026,11 @@ int fyai_init_storage(struct fyai_ctx *ctx)
 	config = fy_invalid;
 	catalog = fy_invalid;
 
-	if (asprintf(&arena_dir, "%s/.fyai/arena", args->dir) < 0) {
+	if (cfg->arena_dir_selected)
+		rc = asprintf(&arena_dir, "%s", cfg->arena_dir);
+	else
+		rc = asprintf(&arena_dir, "%s/.fyai/arena", args->dir);
+	if (rc < 0) {
 		fyai_error(ctx, "init: OOM");
 		return -1;
 	}

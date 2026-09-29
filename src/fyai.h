@@ -414,6 +414,8 @@ struct fyai_cfg {
 	bool tool_child;
 	/* Serve the agent protocol on standard input and output. */
 	bool agent_rpc;
+	/* Serve a normal arena-backed session over standard I/O. */
+	bool desktop_rpc;
 	/* An executed tool child: serve the tool channel on fds 3 and 4. */
 	bool tool_exec;
 	/* MCP (Model Context Protocol) server settings. */
@@ -428,6 +430,7 @@ struct fyai_cfg {
 	int mcp_timeout;			/* seconds (default 30) */
 
 	const char *arena_dir;
+	bool arena_dir_selected;
 	/*
 	 * Catalogue of the selected branch, internalized into gb (fy_invalid
 	 * when the branch carries none - the embedded snapshot is the
@@ -658,6 +661,9 @@ struct fyai_ctx {
 	struct fyai_display_output *display_output;
 	/* The one rendering component. Every byte the user sees goes here. */
 	struct fyai_sink *sink;
+	/* Invocation-local desktop control channel; never stored in the arena. */
+	struct jsonrpc_conn *desktop_rpc;
+	bool desktop_cancel_requested;
 	struct fyai_fenced_stream *shell_stream; /* live progressive shell output */
 	/* Resolved patch display data, indexed by tool-call ID. */
 	struct fyai_patch_display *patch_views;

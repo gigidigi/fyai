@@ -411,6 +411,7 @@ set(FYAI_SOURCES
     src/fyai_output.c
     src/fyai.c
     src/fyai_agent.c
+    src/fyai_desktop.c
     src/fyai_agents.c
     src/fyai_branch.c
     src/fyai_merge.c

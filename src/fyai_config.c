@@ -1210,6 +1210,7 @@ int fyai_config_load(struct fyai_cfg *cfg,
 	fy_generic names;
 	char *user_path;
 	char *branch;
+	const char *arena_dir_opt;
 	size_t i;
 	int rc;
 
@@ -1228,21 +1229,6 @@ int fyai_config_load(struct fyai_cfg *cfg,
 			return -1;
 	}
 
-	/* Load the catalogue and selected branch configuration. */
-	branch = NULL;
-	if (fyai_peek_arena_config(fy_is_mapping(cfg->reload_state) ?
-				   cfg->arena_dir : NULL,
-				   cfg->branch_explicit ? cfg->branch : NULL,
-				   cfg->root_spec, gb, &root_repo, &cfg->catalog,
-				   &branch, &cfg->root_ref))
-		return -1;
-	if (branch && !cfg->branch_explicit) {
-		free(cfg->branch);
-		cfg->branch = branch;
-	} else {
-		free(branch);
-	}
-
 	/* An explicitly named config file must exist and parse. */
 	if (cli_config) {
 		if (access(cli_config, R_OK)) {
@@ -1255,6 +1241,26 @@ int fyai_config_load(struct fyai_cfg *cfg,
 		if (fy_is_valid(root_explicit) &&
 		    fyai_config_validate_schema(cfg, root_explicit, cli_config))
 			return -1;
+	}
+
+	/* Select the arena before peeking at its branch configuration. */
+	arena_dir_opt = fy_is_mapping(cfg->reload_state) ? cfg->arena_dir :
+		fy_get(root_explicit, "arena_dir", (const char *)NULL);
+	if (!arena_dir_opt)
+		arena_dir_opt = fy_get(root_user, "arena_dir",
+					    (const char *)NULL);
+	cfg->arena_dir_selected = arena_dir_opt != NULL;
+	branch = NULL;
+	if (fyai_peek_arena_config(arena_dir_opt,
+				   cfg->branch_explicit ? cfg->branch : NULL,
+				   cfg->root_spec, gb, &root_repo, &cfg->catalog,
+				   &branch, &cfg->root_ref))
+		return -1;
+	if (branch && !cfg->branch_explicit) {
+		free(cfg->branch);
+		cfg->branch = branch;
+	} else {
+		free(branch);
 	}
 
 	/*

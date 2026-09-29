@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "fyai_output.h"
+#include "fyai_desktop.h"
 #include "fyai_agents.h"
 #include "fyai_session.h"
 #include "fyai_sink.h"
@@ -115,6 +116,9 @@ int fyai_output_append(struct fyai_ctx *ctx, const char *text, size_t len)
 	rc = fyai_output_record_source(ctx, text, len);
 	fyai_error_check(ctx, !rc, err,
 			 "could not grow display output");
+	if (ctx->display_output->tag == FYAI_OUTPUT_ASSISTANT &&
+	    !ctx->display_output->reasoning)
+		fyai_desktop_emit_text(ctx, "text", text, len);
 	rc = fyai_sink_doc_append(ctx->sink, text, len);
 	fyai_error_check(ctx, !rc, err,
 			 "could not render display output");
@@ -137,6 +141,8 @@ int fyai_output_append_recorded(struct fyai_ctx *ctx, const char *text,
 		return -1;
 	if (!len)
 		return 0;
+	if (ctx->display_output->tag == FYAI_OUTPUT_ASSISTANT)
+		fyai_desktop_emit_text(ctx, "tool_output", text, len);
 	return fyai_output_record_source(ctx, text, len);
 }
 
@@ -199,6 +205,7 @@ int fyai_output_reasoning_append(struct fyai_ctx *ctx, const char *text)
 
 	if (!ctx || !ctx->display_output || !text || !*text)
 		return 0;
+	fyai_desktop_emit_text(ctx, "reasoning", text, strlen(text));
 	output = ctx->display_output;
 	if (!output->reasoning) {
 		if (fyai_output_start_block(ctx))

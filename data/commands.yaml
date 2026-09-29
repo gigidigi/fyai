@@ -2167,6 +2167,21 @@ commands:
     surfaces: [session]
     handler: reload
 
+  - command: desktop
+    title: serve a local desktop session
+    description: |
+      Serve the selected branch through newline-framed JSON-RPC 2.0 on
+      standard input and output. The normal FYAI arena owns the conversation.
+      See doc/desktop-protocol.md.
+    surfaces: [cli]
+    handler: desktop
+    prepare: desktop
+    flags: [model]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties: {}
+
   - command: agent
     title: run one sub-agent on a task
     description: |

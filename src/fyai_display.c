@@ -3909,6 +3909,18 @@ out:
 	return rc ? -1 : 0;
 }
 
+bool fyai_display_stored_complete(struct fyai_ctx *ctx)
+{
+	struct fyai_turn_stack stack = { 0 };
+	bool complete;
+
+	if (fyai_turn_stack_init(&stack, ctx->last_message, fy_invalid))
+		return false;
+	complete = fyai_display_outputs_complete(ctx, &stack, 0, stack.count);
+	fyai_turn_stack_cleanup(&stack);
+	return complete;
+}
+
 int fyai_display_view(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;

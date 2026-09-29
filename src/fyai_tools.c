@@ -37,6 +37,7 @@
 #include "fyai_browser.h"
 #include "fyai_agents.h"
 #include "fyai_jsonrpc.h"
+#include "fyai_desktop.h"
 #include "fyai_config.h"
 #include "fyai_display.h"
 #include "fyai_event.h"
@@ -1388,6 +1389,8 @@ static fy_generic fyai_ask_user(struct fyai_ctx *ctx, fy_generic args)
 
 	if (fyai_agent_delegated(ctx) && ctx->tool_rpc)
 		return fyai_ask_user_upward(ctx, args);
+	if (ctx->desktop_rpc)
+		return fyai_desktop_ask_user(ctx, args);
 
 	/* The page renderer puts the question in its input area. */
 	if (ctx->answer_next >= cfg->answer_count && fyai_ui_ask_available(ctx))
