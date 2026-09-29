@@ -1936,6 +1936,24 @@ load as display/page does.
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
+## fyai desktop
+
+serve a local desktop session
+
+**Usage:** `fyai desktop`
+
+Serve the selected branch through newline-framed JSON-RPC 2.0 on
+standard input and output. The normal FYAI arena owns the conversation.
+See doc/desktop-protocol.md.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
 ## fyai agent
 
 run one sub-agent on a task
