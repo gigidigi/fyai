@@ -729,6 +729,14 @@ properties:
           the top of the tile screen and remain available through
           its scroll bar and the wheel. 0 keeps none. A change applies to
           tiles that are open.
+      work_open_delay_ms:
+        type: integer
+        minimum: 0
+        default: 500
+        description: >-
+          Wait this many milliseconds before opening the work band for a shell
+          call. A call that finishes sooner does not open a band. Zero opens it
+          immediately.
       work_max_rows:
         type: integer
         minimum: 0

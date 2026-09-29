@@ -2233,6 +2233,8 @@ struct fyai_tool_job {
 	int pfd;
 	struct fyai_fenced_stream stream;
 	struct fyai_sink_band *band;
+	struct fyai_event_source *band_delay;
+	struct response_buffer pending_output;
 	char *title;
 	char *command;
 	struct fyai_event_source *csrc;
@@ -4072,6 +4074,7 @@ static void fyai_tool_job_update_done(struct fyai_tool_job *job)
 	job->done = job->session ? !job->out_open :
 				   (job->reaped && !job->out_open);
 	if (!was_done && job->done) {
+		fyai_tool_job_drop(&job->band_delay);
 		job->elapsed_ms = fyai_event_now_ms() - job->started_ms;
 		if (job->agent && job->timeout_ms &&
 		    job->elapsed_ms >= job->timeout_ms)
@@ -4509,6 +4512,10 @@ err:
 static void fyai_tool_job_live_close(struct fyai_tool_job *job,
 				     bool commit_band)
 {
+	fyai_event_source_remove(job->band_delay);
+	job->band_delay = NULL;
+	free(job->pending_output.data);
+	memset(&job->pending_output, 0, sizeof(job->pending_output));
 	/* A sub-agent's screen is committed with its outcome, not discarded. */
 	if (job->agent)
 		fyai_agent_view_close(job, job->result_ok && !job->failed,
@@ -4681,6 +4688,42 @@ static void fyai_tool_submit_error_set(struct fyai_ctx *ctx,
 			goto _label;					\
 		}							\
 	} while (0)
+
+static void fyai_tool_job_band_open(struct fyai_tool_job *job)
+{
+	struct fyai_ctx *ctx = job->ctx;
+
+	job->band = fyai_sink_band_open(ctx->sink, false, NULL, NULL);
+	if (!job->band ||
+	    fyai_fenced_stream_start(&job->stream, ctx, ctx->cfg, NULL,
+		ctx->cfg->tool_preview_lines > 0 ?
+		(size_t)ctx->cfg->tool_preview_lines : 0,
+		markdown_tool_output_indent(ctx->cfg), NULL, true)) {
+		fyai_tool_job_live_close(job, false);
+		return;
+	}
+	fyai_fenced_stream_bind_band(&job->stream, job->band);
+	job->stream.title = job->title;
+	job->stream.command = job->command;
+	fyai_sink_band_paint(job->band, job->title, job->command, NULL, 0,
+			     NULL);
+	if (job->pending_output.len)
+		(void)fyai_fenced_stream_push(&job->stream,
+			job->pending_output.data, job->pending_output.len);
+	free(job->pending_output.data);
+	memset(&job->pending_output, 0, sizeof(job->pending_output));
+}
+
+static enum fyai_event_action
+fyai_tool_job_band_delay(const struct fyai_event *ev)
+{
+	struct fyai_tool_job *job = ev->userdata;
+
+	job->band_delay = NULL;
+	if (!job->done)
+		fyai_tool_job_band_open(job);
+	return FYAIEA_CONTINUE;
+}
 
 struct fyai_tool_job *fyai_tool_job_submit(struct fyai_ctx *ctx,
 					    fy_generic tool_call)
@@ -4941,21 +4984,13 @@ struct fyai_tool_job *fyai_tool_job_submit(struct fyai_ctx *ctx,
 		/* A terminal session displays output on its own surface. */
 		if (have_session)
 			goto live_open_done;
-		job->band = fyai_sink_band_open(ctx->sink, false, NULL, NULL);
-		if (job->band &&
-		    !fyai_fenced_stream_start(&job->stream, ctx, ctx->cfg,
-				NULL, ctx->cfg->tool_preview_lines > 0 ?
-				(size_t)ctx->cfg->tool_preview_lines : 0,
-				markdown_tool_output_indent(ctx->cfg),
-				stderr, true)) {
-			fyai_fenced_stream_bind_band(&job->stream, job->band);
-			job->stream.title = job->title;
-			job->stream.command = job->command;
-			fyai_sink_band_paint(job->band, job->title,
-					     job->command, NULL, 0, NULL);
-		} else {
-			fyai_tool_job_live_close(job, false);
-		}
+		el = fyai_ctx_loop(ctx);
+		if (ctx->cfg->work_open_delay_ms > 0 && el &&
+		    !fyai_event_add_timer(el, ctx->cfg->work_open_delay_ms, 0,
+					 fyai_tool_job_band_delay, job,
+					 &job->band_delay))
+			goto live_open_done;
+		fyai_tool_job_band_open(job);
 	}
 live_open_done:
 	rc = fyai_tool_job_attach(ctx, job);
@@ -5094,6 +5129,13 @@ static fy_generic fyai_tool_job_serve(struct jsonrpc_conn *conn,
 		fyai_tool_job_progress_retain(job, p, len);
 	if (job->band_progress && job->stream.active)
 		(void)fyai_fenced_stream_push(&job->stream, p, len);
+	else if (job->band_delay &&
+		 !response_buffer_reserve(&job->pending_output,
+					  job->pending_output.len + len + 1)) {
+		memcpy(job->pending_output.data + job->pending_output.len, p, len);
+		job->pending_output.len += len;
+		job->pending_output.data[job->pending_output.len] = '\0';
+	}
 	else if (!job->agent && job->ctx->shell_stream &&
 		 job->ctx->shell_stream->active)
 		/* Stream command output into the sub-agent's live shell region. */

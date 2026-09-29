@@ -105,6 +105,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define DEFAULT_WORK_ZOOM_ROWS "half"
 #define DEFAULT_WORK_MIN_TILE_COLS 40
 #define DEFAULT_WORK_HISTORY_ROWS 1000
+#define DEFAULT_WORK_OPEN_DELAY_MS 500
 #define DEFAULT_WORK_FRAME "none"
 #define DEFAULT_WORK_CAP false
 #define DEFAULT_TILE_FRAME "none"
@@ -303,6 +304,7 @@ struct fyai_cfg {
 	int work_panel_rows;
 	int work_min_tile_cols;		/* narrowest tile the auto grid makes */
 	int work_history_rows;		/* rows a tile keeps to scroll back to */
+	int work_open_delay_ms;		/* delay before a shell work band opens */
 	int work_max_rows;		/* rows the pane may take (0 = uncapped) */
 	const char *work_zoom_rows;	/* full | half | quarter */
 	int work_zoom_fixed_rows;	/* direct row count, 0 for named policy */

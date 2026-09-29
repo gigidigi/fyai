@@ -697,6 +697,8 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 						 cfg->work_min_tile_cols);
 		cfg->work_history_rows = fy_get(v, "work_history_rows",
 						cfg->work_history_rows);
+		cfg->work_open_delay_ms = fy_get(v, "work_open_delay_ms",
+						cfg->work_open_delay_ms);
 		cfg->work_max_rows = fy_get(v, "work_max_rows",
 					    cfg->work_max_rows);
 		zoom_rows = fy_get(v, "work_zoom_rows", fy_invalid);
@@ -2595,6 +2597,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->work_panel_rows = 0;
 	cfg->work_min_tile_cols = DEFAULT_WORK_MIN_TILE_COLS;
 	cfg->work_history_rows = DEFAULT_WORK_HISTORY_ROWS;
+	cfg->work_open_delay_ms = DEFAULT_WORK_OPEN_DELAY_MS;
 	cfg->work_max_rows = 0;
 	cfg->work_zoom_rows = DEFAULT_WORK_ZOOM_ROWS;
 	cfg->work_zoom_fixed_rows = 0;

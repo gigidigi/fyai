@@ -294,6 +294,7 @@ display:
   work_panel_rows: 0
   # Scrollback rows retained per tile; 0 retains none.
   work_history_rows: 1000
+  work_open_delay_ms: 500
   # Work-pane placement relative to the prompt.
   work_position: above-prompt
   # Completion popup: tab opens on Tab; auto opens when typing finds matches.
