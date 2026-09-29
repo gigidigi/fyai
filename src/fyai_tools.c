@@ -1956,6 +1956,15 @@ static fy_generic fyai_tool_child_serve(struct jsonrpc_conn *conn,
 	if (!strcmp(method, "tty/resize")) {
 		tc->ctx->tty_rows = (int)fy_get(params, "rows", 0LL);
 		tc->ctx->tty_cols = (int)fy_get(params, "cols", 0LL);
+		/*
+		 * A resize before the session starts replaces the size of
+		 * the run: the parent sends each grant one time.
+		 */
+		if (!tc->relay && tc->ctx->tty_rows > 0 &&
+		    tc->ctx->tty_cols > 0) {
+			tc->size_rows = tc->ctx->tty_rows;
+			tc->size_cols = tc->ctx->tty_cols;
+		}
 		fyai_terminal_session_resize(tc->ctx, tc->ctx->tty_rows,
 					     tc->ctx->tty_cols);
 		if (tc->relay)
