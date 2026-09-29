@@ -3,6 +3,9 @@
 set -eu
 . "$(dirname "$0")/../harness.sh"
 
+# The header row shows the working directory, then the elapsed time. A long
+# $TMPDIR, as on macOS, cuts the elapsed time off the row.
+FYAI_TMPDIR_BASE=/tmp
 fyai_test_setup
 mock_start chat_fullscreen_stream.json
 # Hold the stream across a PageUp event and observe two later status ticks.

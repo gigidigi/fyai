@@ -5,6 +5,7 @@ set -eu
 . "$(dirname "$0")/../harness.sh"
 
 fyai_test_setup
+export OPENAI_API_KEY=test-key
 mock_start chat_basic_twice.json
 
 FYAI_TRACE="$TEST_DIR/trace.log" \
@@ -14,7 +15,7 @@ FYAI_PTY_AFTER="wait-screen:Hello from the mock provider.|"\
 "send:/reload|wait-screen:↳ Hello from the mock provider.|"\
 "send:second question|wait-screen:Hello again from the mock provider." \
 "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/pty.out" \
-    "$FYAI_BIN" -k test-key --theme dark -b main --set api=chat-completions \
+    "$FYAI_BIN" --theme dark -b main --set api=chat-completions \
     --set "api_url=$MOCK_URL/v1/chat/completions" \
     --set display/stream=false -m mock-model -i
 
@@ -37,6 +38,7 @@ mock_stop 2
 
 # A branch selected by /resume differs from stored HEAD.
 fyai_test_setup
+export OPENAI_API_KEY=test-key
 run_fyai branch create newer
 assert_status 0
 mock_start chat_basic_twice.json
@@ -56,7 +58,7 @@ FYAI_PTY_AFTER="send:first question|"\
 "wait-screen:↳ Hello from the mock provider.|send:second question|"\
 "wait-screen:Hello again from the mock provider." \
 "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/branch.out" \
-    "$FYAI_BIN" -k test-key --theme dark -b main \
+    "$FYAI_BIN" --theme dark -b main \
     --set api=chat-completions \
     --set "api_url=$MOCK_URL/v1/chat/completions" \
     --set display/stream=false -m mock-model -i
@@ -73,11 +75,12 @@ mock_stop 2
 
 # The first reload gives an unstored session a durable branch name.
 fyai_test_setup
+export OPENAI_API_KEY=test-key
 FYAI_TRACE="$TEST_DIR/empty-trace.log" \
 FYAI_PTY_INPUT="/reload" FYAI_PTY_NEEDLE="fyai" \
 FYAI_PTY_NEEDLE_COUNT=2 \
 "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/empty.out" \
-    "$FYAI_BIN" -k test-key --theme dark -i
+    "$FYAI_BIN" --theme dark -i
 [ "$(grep -c 'start:' "$TEST_DIR/empty-trace.log")" -ge 2 ] || \
     fail "reload did not restart the fresh session"
 pass
