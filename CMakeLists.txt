@@ -203,7 +203,7 @@ if(NOT TARGET libfyaml::libfyaml)
     set(BUILD_TESTING OFF)
     FetchContent_Declare(libfyaml
         GIT_REPOSITORY https://github.com/pantoniou/libfyaml
-        GIT_TAG 1a850a82b3b4ce1e21e4dedb15c7fa677ba2a6c5
+        GIT_TAG d1fb28dfae3fa159c0633bd772d91262fa43bf62
     )
     FetchContent_MakeAvailable(libfyaml)
     set(BUILD_TESTING "${_FYAI_BUILD_TESTING}")
@@ -225,7 +225,7 @@ endif()
 # libfymermaid consume it.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FyDeps.cmake)
 fyai_fy_dep(libfypalette 3cc484148aeb10d7c7f3a3772173c42c51dad567)
-fyai_fy_dep(libfymd4c f373ff2d049a3b6c096ae4ec6f4d10f794dbf2dd)
+fyai_fy_dep(libfymd4c df8293f6502a897a2931d1fb0aa792d74986f574)
 
 if(FYAI_STATIC_DEPS AND TARGET libfyaml::fyaml_static)
     set_target_properties(libfyaml::fyaml_static PROPERTIES
@@ -233,10 +233,10 @@ if(FYAI_STATIC_DEPS AND TARGET libfyaml::fyaml_static)
 endif()
 
 fyai_fy_dep(libfymermaid b3b72b5ee5caceea5ff890fa57e1689537b2f5c0)
-fyai_fy_dep(libfytimui 67b5f3d8f268cb26ccb67077941818cf18834f1c)
+fyai_fy_dep(libfytimui 0aa28cd2d61c18bf5490722024db20039842c521)
 # libfyvterm: the terminal emulator behind the terminal view and the terminal
 # rendering tests.
-fyai_fy_dep(libfyvterm aa41f77cd5e4fc2e51819c844f89c18a5252fb82)
+fyai_fy_dep(libfyvterm b71ae17bd756d95291f352648f5adbc3633ee266)
 
 # Fetch and build a minimal libcurl from source as a static archive linked
 # straight into fyai: OpenSSL TLS + zlib only, with the curl CLI and the heavy
