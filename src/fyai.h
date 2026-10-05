@@ -389,6 +389,8 @@ struct fyai_cfg {
 	bool agent_child;
 	/* The parent limits a forked tool job. */
 	bool tool_child;
+	/* ACP owns the arena exclusively; CLI writers retain CAS concurrency. */
+	bool acp_mode;
 	/* Serve the agent protocol on standard input and output. */
 	bool agent_rpc;
 	/* An executed tool child: serve the tool channel on fds 3 and 4. */
@@ -577,6 +579,7 @@ struct fyai_ctx {
 	 * its configuration stays in this context.
 	 */
 	char *session_unstored;
+	bool session_persist_empty;	/* ACP makes session/new durable. */
 	/* Durable branch for a sub-agent conversation. */
 	char *agent_branch;
 	/* The spawn state an executed sub-agent child received, as JSON. */
@@ -599,6 +602,7 @@ struct fyai_ctx {
 	 */
 	fy_generic branch_store;
 	uint64_t refs_head;
+	unsigned int test_publish_attempts;
 	struct curl_slist *headers;
 	char *auth_header;
 	char *user_agent;
@@ -635,6 +639,22 @@ struct fyai_ctx {
 	struct fyai_display_output *display_output;
 	/* The one rendering component. Every byte the user sees goes here. */
 	struct fyai_sink *sink;
+	/* Held by this process family for the lifetime of the arena context. */
+	int arena_lock_fd_plus_one;
+	/* Receive source text before the sink renders it. */
+	void (*output_observer)(void *userdata, int tag, const char *text, size_t len);
+	void *output_observer_userdata;
+	/* Optional protocol adapters observe tools without changing CLI rendering. */
+	void (*tool_observer)(void *userdata, fy_generic call,
+			      fy_generic result, const char *status);
+	void *tool_observer_userdata;
+	/* Return false before any tool child or parent-side tool runs. */
+	bool (*tool_permission)(void *userdata, fy_generic call);
+	void *tool_permission_userdata;
+	fy_generic (*question_handler)(void *userdata, fy_generic args,
+					 const char *tool_call_id);
+	void *question_handler_userdata;
+	const char *active_tool_call_id;
 	struct fyai_fenced_stream *shell_stream; /* live progressive shell output */
 	/* Resolved patch display data, indexed by tool-call ID. */
 	struct fyai_patch_display *patch_views;
@@ -659,11 +679,28 @@ struct fyai_ctx {
 	long long usage_reasoning;
 	long long usage_total;
 	double usage_cost;
+	/* Last automatic decision, owned by cfg->gb. */
+	const char *route_explanation;
+	double route_turn_start_cost;
+	const char *route_turn_cost_source;
+	bool route_usage_unknown;
+	/* A routed turn borrows these derived settings until it ends. */
+	struct {
+		bool active;
+		const char *model, *provider, *api_url, *api_key;
+		const char *reasoning_effort, *reasoning_summary;
+		enum fyai_api_mode api_mode;
+		int max_tokens;
+		bool shell_tool_supported, web_search_supported;
+		bool response_compaction_supported, chatgpt_auth;
+		bool enable_builtin_shell, enable_tools, web_search;
+	} route_saved;
 	int usage_calls;
 	/* Last model call's usage (ground truth for context fill). */
 	long long last_call_input;
 	long long last_call_output;
 	long long last_call_total;
+	long long last_call_latency_ms;
 	/* Token extents collected by the last streamed call (fy_invalid when
 	 * none); consumed when the assistant response is appended to a turn. */
 	fy_generic last_token_extents;
@@ -719,6 +756,20 @@ int fyai_setup_transient_builder(struct fyai_ctx *ctx);
  * when no active turn owns it.
  */
 struct fy_generic_builder *fyai_ctx_transient_gb(struct fyai_ctx *ctx);
+
+struct fyai_turn_run;
+
+/*
+ * A submitted turn belongs to one invocation. The caller drives the event
+ * loop until done, then borrows its result until destroy. Cancel stops active
+ * model and tool work; the caller still drives the loop to completion.
+ */
+struct fyai_turn_run *fyai_turn_run_submit(struct fyai_ctx *ctx,
+				   fy_generic turn);
+bool fyai_turn_run_done(const struct fyai_turn_run *run);
+void fyai_turn_run_cancel(struct fyai_turn_run *run);
+fy_generic fyai_turn_run_collect(const struct fyai_turn_run *run);
+void fyai_turn_run_destroy(struct fyai_turn_run *run);
 
 /*
  * Run one complete tool-use loop on @turn; returns the final turn (or

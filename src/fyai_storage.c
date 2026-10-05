@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -567,10 +568,40 @@ static int fyai_open_arena(struct fyai_ctx *ctx, const char *arena_dir)
 	struct fy_generic_builder_cfg gb_cfg;
 	struct fy_auto_allocator_cfg ov_cfg;
 	struct fy_generic_builder_cfg ov_gb_cfg;
+	char *lock_path;
+	int lock_fd;
+	struct stat inherited, target;
 
 
 	if (fyai_mkdir_p(arena_dir))
 		return -1;
+	if (!ctx->arena_lock_fd_plus_one) {
+		if (asprintf(&lock_path, "%s/.fyai-writer.lock", arena_dir) < 0)
+			return -1;
+		/* Internal tool children carry the same open file description on fd 5. */
+		if (ctx->cfg && ctx->cfg->tool_child &&
+		    !fstat(5, &inherited) && !stat(lock_path, &target) &&
+		    inherited.st_dev == target.st_dev &&
+		    inherited.st_ino == target.st_ino) {
+			ctx->arena_lock_fd_plus_one = 6;
+			(void)fcntl(5, F_SETFD, FD_CLOEXEC);
+			free(lock_path);
+			goto lock_held;
+		}
+		lock_fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+		free(lock_path);
+		if (lock_fd < 0)
+			return -1;
+		if (flock(lock_fd, (ctx->cfg && ctx->cfg->acp_mode ?
+					 LOCK_EX : LOCK_SH) | LOCK_NB)) {
+			fyai_error(ctx, "arena is busy in another process: %s",
+				   arena_dir);
+			close(lock_fd);
+			return -1;
+		}
+		ctx->arena_lock_fd_plus_one = lock_fd + 1;
+	}
+lock_held:
 
 	memset(&dur_cfg, 0, sizeof(dur_cfg));
 	dur_cfg.dir = arena_dir;
@@ -998,6 +1029,9 @@ static bool storage_session_defer(struct fyai_ctx *ctx)
 {
 	fy_generic cur;
 
+	if (ctx->session_persist_empty)
+		return false;
+
 	if (!ctx->session_unstored ||
 	    strcmp(ctx->session_unstored, fyai_ctx_branch(ctx)))
 		return false;
@@ -1127,6 +1161,17 @@ static int fyai_root_publish_try(struct fyai_ctx *ctx)
 		return -1;
 	}
 	desired = (uint64_t)root.v;
+	/* Test the caller's response when publication fails. */
+	{
+		const char *fail_at = getenv("FYAI_TEST_PUBLISH_FAIL_AT");
+
+		ctx->test_publish_attempts++;
+		if (fail_at && *fail_at &&
+		    strtoul(fail_at, NULL, 10) == ctx->test_publish_attempts) {
+			fyai_error(ctx, "injected publication failure");
+			return -1;
+		}
+	}
 	branch_publish_test_gate();
 	fyai_prof_stamp(&t_cas);
 	rc = fy_allocator_refs_publish(ctx->durable_allocator, ctx->refs_head,

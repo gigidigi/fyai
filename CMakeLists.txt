@@ -357,6 +357,27 @@ fyai_embed(FYAI_EMBEDDED_COMMANDS embedded_commands.inc data/commands.yaml)
 fyai_embed(FYAI_EMBEDDED_COMMAND_SCHEMA embedded_command_schema.inc
     data/command.schema.yaml)
 
+# Identify the source used by protocol clients for version gating.
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE FYAI_SOURCE_REVISION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT FYAI_SOURCE_REVISION)
+    set(FYAI_SOURCE_REVISION "unknown")
+endif()
+execute_process(
+    COMMAND git status --porcelain
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE FYAI_SOURCE_CHANGES
+    ERROR_QUIET
+)
+if(FYAI_SOURCE_CHANGES)
+    string(APPEND FYAI_SOURCE_REVISION "-dirty")
+endif()
+
 # Generate config.h
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/config.h.in"
@@ -411,6 +432,7 @@ set(FYAI_SOURCES
     src/fyai_output.c
     src/fyai.c
     src/fyai_agent.c
+    src/fyai_acp.c
     src/fyai_agents.c
     src/fyai_branch.c
     src/fyai_merge.c
@@ -446,6 +468,7 @@ set(FYAI_SOURCES
     src/fyai_turn.c
     src/utils.c
     src/fyai_catalog.c
+    src/fyai_route.c
     src/fyai_config.c
     src/fyai_curl.c
     src/fyai_auth.c

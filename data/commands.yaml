@@ -2086,6 +2086,18 @@ commands:
     handler: exit
     ends_session: true
 
+  - command: acp
+    title: serve an Agent Client Protocol session
+    description: Serve ACP v1 over standard input and output.
+    surfaces: [cli]
+    handler: acp
+    prepare: acp
+    flags: [model]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties: {}
+
   - command: agent
     title: run one sub-agent on a task
     description: |

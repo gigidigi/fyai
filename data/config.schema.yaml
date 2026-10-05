@@ -130,6 +130,35 @@ properties:
           turns have no recorded time while committed ones already happened.
           Invocations on *different* branches never conflict.
 
+  routing:
+    type: object
+    description: Optional engine-side model selection. Manual is the default.
+    properties:
+      mode:
+        type: string
+        enum: [manual, auto]
+      max_turn_usd:
+        type: number
+        exclusiveMinimum: 0
+      output_tokens:
+        type: integer
+        minimum: 1
+        maximum: 65536
+      candidates:
+        type: array
+        items:
+          type: object
+          required: [model, quality]
+          properties:
+            model:
+              type: string
+            effort:
+              type: string
+              enum: [minimal, low, medium, high]
+            quality:
+              type: integer
+              minimum: 1
+              maximum: 3
   reasoning:
     type: object
     description: >-

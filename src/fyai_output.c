@@ -115,6 +115,9 @@ int fyai_output_append(struct fyai_ctx *ctx, const char *text, size_t len)
 	rc = fyai_output_record_source(ctx, text, len);
 	fyai_error_check(ctx, !rc, err,
 			 "could not grow display output");
+	if (ctx->output_observer)
+		ctx->output_observer(ctx->output_observer_userdata, ctx->display_output->tag,
+				     text, len);
 	rc = fyai_sink_doc_append(ctx->sink, text, len);
 	fyai_error_check(ctx, !rc, err,
 			 "could not render display output");

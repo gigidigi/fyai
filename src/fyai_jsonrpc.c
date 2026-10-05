@@ -50,6 +50,7 @@ struct jsonrpc_conn {
 	struct response_buffer rx;
 	struct response_buffer tx;
 	size_t tx_off;
+	size_t tx_max;		/* zero means unlimited */
 	struct jsonrpc_request *pending;
 	struct jsonrpc_request *flush_wait;	/* notifications awaiting write */
 	bool protocol_failed;			/* peer sent an invalid frame */
@@ -215,6 +216,20 @@ static int jsonrpc_conn_send(struct jsonrpc_conn *conn, const char *json)
 	size_t len = strlen(json);
 	int rc;
 
+	if (conn->tx_off) {
+		memmove(conn->tx.data, conn->tx.data + conn->tx_off,
+			conn->tx.len - conn->tx_off);
+		conn->tx.len -= conn->tx_off;
+		conn->tx_off = 0;
+	}
+	if (conn->tx_max &&
+	    (len + 1 > conn->tx_max ||
+	     conn->tx.len > conn->tx_max - (len + 1))) {
+		fyai_error(conn->ctx, "%s output queue exceeded its limit",
+			   conn->name);
+		conn->closed = true;
+		return -1;
+	}
 	rc = response_buffer_reserve(&conn->tx, conn->tx.len + len + 2);
 	if (rc)
 		return -1;
@@ -502,6 +517,12 @@ static int jsonrpc_conn_arm_read(struct jsonrpc_conn *conn)
 		(void)fcntl(conn->stdout_fd, F_SETFL, flags | O_NONBLOCK);
 	return fyai_event_add_fd(el, conn->stdout_fd, FYAIEV_READ,
 				 jsonrpc_conn_readable, conn, &conn->read_src);
+}
+
+void jsonrpc_conn_set_output_limit(struct jsonrpc_conn *conn, size_t bytes)
+{
+	if (conn)
+		conn->tx_max = bytes;
 }
 
 bool jsonrpc_conn_closed(const struct jsonrpc_conn *conn)

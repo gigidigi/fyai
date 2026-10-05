@@ -516,6 +516,9 @@ static void session_persist_model(struct fyai_ctx *ctx)
 	session_persist(ctx, "model", pin ?
 			fy_sprintfa("'%s/%s'", cfg->provider, cfg->model) :
 			fy_sprintfa("'%s'", cfg->model));
+	if (fy_equal(fy_get(fy_get(cfg->config_doc, "routing"),
+				    "mode"), "auto"))
+		session_persist(ctx, "routing/mode", "manual");
 }
 
 /*

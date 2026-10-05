@@ -171,6 +171,8 @@ int fyai_cmd_term_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_init_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_agent_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_agent(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_acp_prepare(struct fyai_cfg *cfg, fy_generic args);
+int fyai_cmd_acp(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_setting(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_show(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_list(struct fyai_cmd_call *call, fy_generic *result);

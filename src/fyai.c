@@ -27,6 +27,7 @@
 #include "fyai_cmd.h"
 #include "fyai_agent.h"
 #include "fyai_catalog.h"
+#include "fyai_route.h"
 #include "fyai_config.h"
 #include "fyai_crash.h"
 #include "fyai_curl.h"
@@ -142,6 +143,9 @@ static void fyai_print_cache_info(struct fyai_ctx *ctx, fy_generic doc)
 /* Add a normalized usage mapping to the running in-memory session totals. */
 static void fyai_accumulate_usage(struct fyai_ctx *ctx, fy_generic usage)
 {
+	fy_generic source;
+	const char *name;
+
 	if (fy_is_invalid(usage))
 		return;
 
@@ -151,7 +155,18 @@ static void fyai_accumulate_usage(struct fyai_ctx *ctx, fy_generic usage)
 	ctx->usage_output += fy_get(usage, "output", 0LL);
 	ctx->usage_reasoning += fy_get(usage, "reasoning", 0LL);
 	ctx->usage_total += fy_get(usage, "total", 0LL);
-	ctx->usage_cost += fy_get(usage, "cost", 0.0);
+	ctx->usage_cost += fy_number(fy_get(usage, "cost", fy_invalid),
+				       0.0);
+	if (ctx->route_saved.active) {
+		source = fy_get(usage, "cost_source", fy_invalid);
+		name = fy_equal(source, "provider") ? "provider" :
+			fy_equal(source, "catalogue_estimate") ?
+			"catalogue estimate" : "unknown";
+		if (!ctx->route_turn_cost_source)
+			ctx->route_turn_cost_source = name;
+		else if (strcmp(ctx->route_turn_cost_source, name))
+			ctx->route_turn_cost_source = "mixed";
+	}
 	ctx->usage_calls++;
 
 	/* Last-call snapshot: ground truth for the /context fill report. */
@@ -731,7 +746,9 @@ static int fyai_model_step_submit_request(struct fyai_model_step *step,
 
 	/* Everything before the wire transfer, relative to process start. */
 	fyai_prof_once_from_base("start_to_first_send");
-	fyai_prof_stamp(&step->send_started);
+	rc = clock_gettime(CLOCK_MONOTONIC, &step->send_started);
+	fyai_error_check(ctx, !rc, out,
+			 "cannot record model request start time");
 
 	ctx->auth_retry_done = false;
 	ctx->response_chain_linked = response_linked;
@@ -1114,21 +1131,35 @@ static void fyai_model_step_request_complete(struct fyai_model_step *step,
 {
 	struct fyai_ctx *ctx;
 	struct fyai_cfg *cfg;
-	fy_generic diag;
+	fy_generic diag, usage;
 	long status;
 	int rc;
+	struct timespec finished;
 
 	ctx = step->ctx;
 	cfg = ctx->cfg;
 	fyai_prof_since("request_roundtrip", &step->send_started);
+	ctx->last_call_latency_ms = 0;
+	rc = clock_gettime(CLOCK_MONOTONIC, &finished);
+	if (rc)
+		fyai_warning(ctx, "cannot measure model request latency");
+	else
+		ctx->last_call_latency_ms =
+			(finished.tv_sec - step->send_started.tv_sec) * 1000LL +
+			(finished.tv_nsec - step->send_started.tv_nsec) / 1000000LL;
 
 	/* Failed/empty responses can end the transfer with it still shown. */
 	fyai_spinner_erase(&step->spinner);
 	curl_easy_setopt(ctx->curl, CURLOPT_NOPROGRESS, 1L);
 
-	if (fy_is_valid(response_doc))
-		fyai_accumulate_usage(ctx,
-				      fyai_extract_usage(ctx, response_doc));
+	if (fy_is_valid(response_doc)) {
+		usage = fyai_extract_usage(ctx, response_doc);
+		if (ctx->route_saved.active && fy_is_invalid(usage)) {
+			ctx->route_usage_unknown = true;
+			fyai_warning(ctx, "provider omitted usage; automatic routing cannot price another request in this turn");
+		}
+		fyai_accumulate_usage(ctx, usage);
+	}
 
 	if (cfg->debug && fy_is_valid(response_doc))
 		emit_generic_to_stdout(ctx, "response", response_doc, cfg->pretty);
@@ -1323,7 +1354,7 @@ struct fyai_turn_run {
 	const char *histfile;
 };
 
-static bool fyai_turn_run_done(const struct fyai_turn_run *run)
+bool fyai_turn_run_done(const struct fyai_turn_run *run)
 {
 	return run && (run->state == FYAITRS_DONE ||
 		       run->state == FYAITRS_FAILED);
@@ -1531,6 +1562,10 @@ static int fyai_turn_run_submit_model(struct fyai_turn_run *run)
 
 	ctx = run->ctx;
 	cfg = ctx->cfg;
+	if (fyai_route_budget_check(ctx, run->turn)) {
+		fyai_turn_run_stop(run, "the run budget cannot cover the next model request");
+		return -1;
+	}
 	if (run->iteration >= cfg->max_tool_iterations) {
 		/* tool loop limit reached */
 		fyai_turn_run_stop(run,
@@ -1829,12 +1864,14 @@ static int fyai_turn_run_process_model(struct fyai_turn_run *run)
 	return fyai_turn_run_submit_model(run);
 }
 
-static struct fyai_turn_run *
+struct fyai_turn_run *
 fyai_turn_run_submit(struct fyai_ctx *ctx, fy_generic turn)
 {
 	struct fyai_turn_run *run;
 	int rc;
 
+	if (fyai_route_select(ctx, &turn))
+		return NULL;
 	run = calloc(1, sizeof(*run));
 	fyai_error_check(ctx, run, err, "out of memory");
 	run->ctx = ctx;
@@ -1857,6 +1894,7 @@ fyai_turn_run_submit(struct fyai_ctx *ctx, fy_generic turn)
 err_free:
 	free(run);
 err:
+	fyai_route_restore(ctx);
 	return NULL;
 }
 
@@ -1885,7 +1923,7 @@ static void fyai_turn_run_service(void *userdata)
 	} while (progress && !fyai_turn_run_done(run));
 }
 
-static void fyai_turn_run_cancel(struct fyai_turn_run *run)
+void fyai_turn_run_cancel(struct fyai_turn_run *run)
 {
 	if (!run || fyai_turn_run_done(run) || run->cancel_requested)
 		return;
@@ -1898,12 +1936,12 @@ static void fyai_turn_run_cancel(struct fyai_turn_run *run)
 	fyai_shell_sessions_release_turn(run->ctx);
 }
 
-static fy_generic fyai_turn_run_collect(const struct fyai_turn_run *run)
+fy_generic fyai_turn_run_collect(const struct fyai_turn_run *run)
 {
 	return fyai_turn_run_done(run) ? run->result : fy_invalid;
 }
 
-static void fyai_turn_run_destroy(struct fyai_turn_run *run)
+void fyai_turn_run_destroy(struct fyai_turn_run *run)
 {
 	if (!run)
 		return;
@@ -1912,6 +1950,7 @@ static void fyai_turn_run_destroy(struct fyai_turn_run *run)
 				run);
 	fyai_model_step_destroy(run->model_step);
 	fyai_turn_run_drop_tool_group(run);
+	fyai_route_restore(run->ctx);
 	free(run);
 }
 
@@ -2077,6 +2116,10 @@ void fyai_cleanup(struct fyai_ctx *ctx)
 
 	if (!fyai_cfg_no_storage(cfg))
 		fyai_close_storage(ctx);
+	if (ctx->arena_lock_fd_plus_one) {
+		close(ctx->arena_lock_fd_plus_one - 1);
+		ctx->arena_lock_fd_plus_one = 0;
+	}
 
 	if (ctx->dump_fd >= 0) {
 		close(ctx->dump_fd);

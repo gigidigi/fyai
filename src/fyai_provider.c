@@ -16,6 +16,7 @@
 #include <strings.h>
 
 #include "fyai_provider.h"
+#include "fyai_route.h"
 #include "fyai_tool_spec.h"
 #include "fyai_tools.h"
 
@@ -325,7 +326,7 @@ fy_generic fyai_extract_usage(struct fyai_ctx *ctx, fy_generic doc)
 	if (!total)
 		total = input + output;
 	/* Some providers (e.g. OpenRouter) report a per-call dollar cost. */
-	cost = fy_get(usage, "cost", 0.0);
+	cost = fy_number(fy_get(usage, "cost", fy_invalid), 0.0);
 
 	out = fy_mapping(
 		"input", input,
@@ -334,9 +335,13 @@ fy_generic fyai_extract_usage(struct fyai_ctx *ctx, fy_generic doc)
 		"output", output,
 		"reasoning", reasoning,
 		"total", total,
-		"cost", cost);
+		"latency_ms", ctx->last_call_latency_ms,
+		"cost", cost,
+		"cost_source", fy_is_valid(fy_get(usage, "cost")) ?
+			"provider" : "unknown");
 
 	out = fy_gb_internalize(ctx->transient_gb, out);
+	out = fyai_route_price_usage(ctx, out);
 	return provider_result(ctx, out, "could not extract the response usage");
 }
 

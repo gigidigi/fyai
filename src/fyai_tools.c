@@ -55,6 +55,9 @@
 #include "fyai_sink.h"
 #include "fyai_ui.h"
 #include "fyai_workpane.h"
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 const char *fyai_tool_name_canonical(const char *name)
 {
@@ -1309,6 +1312,35 @@ static fy_generic fyai_ask_user_upward(struct fyai_ctx *ctx, fy_generic args)
 	return result;
 }
 
+/* A tool child has no desktop connection. Its parent owns the decision. */
+static bool fyai_tool_permission_upward(void *userdata, fy_generic call)
+{
+	struct fyai_ctx *ctx = userdata;
+	struct jsonrpc_request *req;
+	fy_generic reply;
+	bool allowed = false;
+
+	if (!ctx->tool_rpc || jsonrpc_conn_closed(ctx->tool_rpc))
+		return false;
+	req = jsonrpc_request_submit(ctx->tool_rpc, "tool/permission",
+		fy_gb_mapping(fyai_ctx_transient_gb(ctx), "call", call),
+		jsonrpc_conn_next_id(ctx->tool_rpc), false, NULL, NULL);
+	if (!req)
+		return false;
+	while (!jsonrpc_request_done(req) &&
+	       !jsonrpc_conn_closed(ctx->tool_rpc))
+		if (fyai_event_loop_step(fyai_ctx_loop(ctx), -1) < 0)
+			break;
+	if (jsonrpc_request_done(req) && jsonrpc_request_ok(req)) {
+		reply = jsonrpc_request_result(req);
+		allowed = fy_get(reply, "allowed", false);
+	}
+	if (!jsonrpc_request_done(req))
+		jsonrpc_request_cancel(req);
+	jsonrpc_request_destroy(req);
+	return allowed;
+}
+
 /* A question put through the input area of the page, and its answer. */
 struct fyai_ask_wait {
 	bool done;
@@ -1385,6 +1417,10 @@ static fy_generic fyai_ask_user(struct fyai_ctx *ctx, fy_generic args)
 	const char *a;
 	size_t i;
 	long sel;
+
+	if (ctx->question_handler)
+		return ctx->question_handler(ctx->question_handler_userdata,
+					     args, ctx->active_tool_call_id);
 
 	if (fyai_agent_delegated(ctx) && ctx->tool_rpc)
 		return fyai_ask_user_upward(ctx, args);
@@ -1815,17 +1851,23 @@ static int fyai_tool_child_tty(int slave)
 	return 0;
 }
 
-static int fyai_tool_child_fds(int req_fd, int rsp_fd)
+static int fyai_tool_child_fds(struct fyai_ctx *ctx, int req_fd, int rsp_fd)
 {
-	int req_dup = -1, rsp_dup = -1;
+	int req_dup = -1, rsp_dup = -1, lock_dup = -1;
 	int devnull;
 	int rc;
 
 	/* Move both clear of the target numbers before dup2 can clobber one. */
-	req_dup = fcntl(req_fd, F_DUPFD_CLOEXEC, 5);
+	if (ctx->arena_lock_fd_plus_one) {
+		lock_dup = fcntl(ctx->arena_lock_fd_plus_one - 1,
+				 F_DUPFD_CLOEXEC, 6);
+		if (lock_dup < 0)
+			goto err;
+	}
+	req_dup = fcntl(req_fd, F_DUPFD_CLOEXEC, 6);
 	if (req_dup < 0)
 		goto err;
-	rsp_dup = fcntl(rsp_fd, F_DUPFD_CLOEXEC, 5);
+	rsp_dup = fcntl(rsp_fd, F_DUPFD_CLOEXEC, 6);
 	if (rsp_dup < 0)
 		goto err;
 
@@ -1835,6 +1877,12 @@ static int fyai_tool_child_fds(int req_fd, int rsp_fd)
 	rc = dup2(rsp_dup, FYAI_TOOL_CHILD_RSP_FD);
 	if (rc < 0)
 		goto err;
+	if (lock_dup >= 0) {
+		rc = dup2(lock_dup, 5);
+		if (rc < 0 || fcntl(5, F_SETFD, 0) < 0)
+			goto err;
+		ctx->arena_lock_fd_plus_one = 6;
+	}
 	/* Do not pass the control channel to a shell command. */
 	rc = fcntl(FYAI_TOOL_CHILD_REQ_FD, F_SETFD, FD_CLOEXEC);
 	if (rc < 0)
@@ -1846,7 +1894,7 @@ static int fyai_tool_child_fds(int req_fd, int rsp_fd)
 	/* Detach unused input unless the child owns this terminal. */
 	if (isatty(STDIN_FILENO) && ttyname(STDIN_FILENO) &&
 	    getsid(0) == tcgetsid(STDIN_FILENO)) {
-		fyai_close_fds_from(FYAI_TOOL_CHILD_RSP_FD + 1);
+		fyai_close_fds_from(lock_dup >= 0 ? 6 : 5);
 		return 0;
 	}
 	devnull = open("/dev/null", O_RDONLY);
@@ -1858,7 +1906,7 @@ static int fyai_tool_child_fds(int req_fd, int rsp_fd)
 	if (rc < 0)
 		goto err;
 
-	fyai_close_fds_from(FYAI_TOOL_CHILD_RSP_FD + 1);
+	fyai_close_fds_from(lock_dup >= 0 ? 6 : 5);
 	return 0;
 
 err:
@@ -1866,6 +1914,8 @@ err:
 		close(req_dup);
 	if (rsp_dup >= 0)
 		close(rsp_dup);
+	if (lock_dup >= 0)
+		close(lock_dup);
 	return -1;
 }
 
@@ -1938,6 +1988,10 @@ static fy_generic fyai_tool_child_serve(struct jsonrpc_conn *conn,
 		}
 		tc->args = fy_get(params, "call", fy_invalid);
 		tc->branch = fy_get(params, "branch", fy_invalid);
+		if (fy_get(params, "permission_required", false)) {
+			tc->ctx->tool_permission = fyai_tool_permission_upward;
+			tc->ctx->tool_permission_userdata = tc->ctx;
+		}
 		/* The result carries the diagnostics of a refused state. */
 		if (tc->ctx->cfg->tool_exec)
 			tc->spawn_failed = fyai_tool_child_spawn_take(tc->ctx,
@@ -4116,6 +4170,7 @@ static fy_generic fyai_ask_user_for_child(struct fyai_tool_job *job,
 	struct fy_generic_builder *gb;
 	fy_generic question;
 	fy_generic answer;
+	fy_generic call_id;
 	const char *who, *origin;
 	int rc;
 
@@ -4125,10 +4180,14 @@ static fy_generic fyai_ask_user_for_child(struct fyai_tool_job *job,
 	if (*origin && (!job->branch || strcmp(origin, job->branch)))
 		who = origin;
 	question = fy_get(params, "question", fy_invalid);
+	call_id = patch_call_id(job->call);
+	if (job->ctx->question_handler)
+		job->ctx->active_tool_call_id = fy_castp(&call_id, "");
 	answer = fyai_ask_user(job->ctx, fy_gb_mapping(gb, "question", question,
 					"from", fy_value(gb, who),
 					"options", fy_get(params, "options",
 							  fy_invalid)));
+	job->ctx->active_tool_call_id = NULL;
 	rc = jsonrpc_conn_respond(conn, id,
 				  fy_gb_mapping(gb, "answer", answer),
 				  fy_invalid);
@@ -4191,6 +4250,8 @@ static void fyai_ctx_fork_disown(struct fyai_ctx *ctx)
 	ctx->config_edit = NULL;
 	ctx->mcp = NULL;			/* its connections to the servers */
 	ctx->mcp_tools = fy_invalid;
+	ctx->tool_permission = NULL;	/* the parent's client channel */
+	ctx->tool_permission_userdata = NULL;
 	/*
 	 * What the parent spent is the accounting of its run, and the extents
 	 * of its last call point into storage this child does not use.
@@ -4332,6 +4393,10 @@ static int fyai_tool_job_spawn(struct fyai_ctx *ctx,
 			 "could not fork tool process: %s", strerror(errno));
 
 	if (!pid) {			/* child */
+#ifdef __linux__
+		if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() == 1)
+			_exit(126);
+#endif
 		close(req[1]);
 		close(rsp[0]);
 		if (setsid() < 0)
@@ -4347,7 +4412,7 @@ static int fyai_tool_job_spawn(struct fyai_ctx *ctx,
 			_exit(126);
 		/* Record whether this child presents through its own terminal. */
 		ctx->cfg->agent_pty = slave >= 0;
-		if (fyai_tool_child_fds(req[0], rsp[1]))
+		if (fyai_tool_child_fds(ctx, req[0], rsp[1]))
 			_exit(126);
 		if (exec)
 			fyai_tool_child_exec(ctx, slave >= 0);
@@ -4892,14 +4957,26 @@ static fy_generic fyai_tool_job_serve(struct jsonrpc_conn *conn,
 {
 	struct fyai_tool_job *job = userdata;
 	fy_generic text;
+	fy_generic call;
 	const char *p;
 	char *bytes;
+	bool allowed;
 	size_t len, n;
 
 	if (fyai_agents_serve(job->ctx, conn, method, params, id, &text, errorp))
 		return text;
 	/* Handle the question request a delegated child sends to its parent. */
 	if (fy_is_valid(id)) {
+		if (!strcmp(method, "tool/permission")) {
+			call = fy_get(params, "call", fy_invalid);
+			allowed = fy_is_valid(call) &&
+				job->ctx->tool_permission &&
+				job->ctx->tool_permission(
+					job->ctx->tool_permission_userdata, call);
+
+			return fy_gb_mapping(fyai_ctx_transient_gb(job->ctx),
+					     "allowed", allowed);
+		}
 		if (strcmp(method, "user/ask"))
 			return fy_invalid;
 		return fyai_ask_user_for_child(job, conn, id, params);
@@ -5015,6 +5092,9 @@ static int fyai_tool_job_attach(struct fyai_ctx *ctx,
 	params = !fy_str_empty(job->branch) ?
 		fy_gb_mapping(gb, "call", job->call, "branch", job->branch) :
 		fy_gb_mapping(gb, "call", job->call);
+	if (ctx->tool_permission)
+		params = fy_assoc(gb, params, "permission_required",
+				  fy_value(true));
 	if (job->exec)
 		params = fy_assoc(gb, params, fy_value(gb, "spawn"),
 				     fyai_agent_spawn_state(job->ctx, gb));
@@ -6145,6 +6225,9 @@ int fyai_tool_job_group_add(struct fyai_tool_job_group *group,
 		}
 	}
 	group->entries[group->count].call_text = copy;
+	if (group->ctx->tool_observer)
+		group->ctx->tool_observer(group->ctx->tool_observer_userdata,
+					   tool_call, fy_invalid, "pending");
 	group->entries[group->count].parallel = parallel;
 	group->entries[group->count].state = FYAITGS_QUEUED;
 	if (!parallel) {
@@ -6163,8 +6246,10 @@ static void fyai_tool_job_group_dispatch(struct fyai_tool_job_group *group)
 	fy_generic call;
 	fy_generic args;
 	fy_generic result;
+	fy_generic call_id;
 	const char *name;
 	const char *text;
+	bool permitted;
 
 	while (!group->cancelled && group->next < group->count &&
 	       group->active < group->max_parallel) {
@@ -6173,6 +6258,27 @@ static void fyai_tool_job_group_dispatch(struct fyai_tool_job_group *group)
 					 entry->call_text);
 		name = fy_is_valid(call) ?
 			fyai_tool_call_name(group->ctx, call) : NULL;
+		permitted = !fy_is_valid(call) || !group->ctx->tool_permission ||
+			group->ctx->tool_permission(
+				group->ctx->tool_permission_userdata, call);
+		/* A cancellation can park this entry during the permission wait. */
+		if (group->cancelled)
+			break;
+		if (!permitted) {
+			result = fy_value(group->ctx->transient_gb,
+					  "tool error: permission denied");
+			text = emit_json_string(group->ctx->transient_gb, result);
+			entry->result_text = text ? strdup(text) : NULL;
+			entry->result_ok = false;
+			entry->state = entry->result_text ?
+				FYAITGS_PARKED : FYAITGS_SUBMIT_FAILED;
+			group->parked++;
+			continue;
+		}
+		if (group->ctx->tool_observer && fy_is_valid(call))
+			group->ctx->tool_observer(
+				group->ctx->tool_observer_userdata,
+				call, fy_invalid, "in_progress");
 		if (name && fyai_mcp_tool_name(name)) {
 			args = fyai_tool_call_args(group->ctx, call);
 			entry->mcp_request =
@@ -6196,8 +6302,11 @@ static void fyai_tool_job_group_dispatch(struct fyai_tool_job_group *group)
 			continue;
 		}
 		if (!entry->parallel) {
+			call_id = patch_call_id(call);
+			group->ctx->active_tool_call_id = fy_castp(&call_id, "");
 			result = fyai_execute_tool_call(group->ctx, call,
 							&entry->result_ok);
+			group->ctx->active_tool_call_id = NULL;
 			text = fy_is_valid(result) ?
 				emit_json_string(group->ctx->transient_gb,
 						 result) : NULL;
@@ -6385,6 +6494,17 @@ int fyai_tool_job_group_collect(struct fyai_tool_job_group *group,
 		return -1;
 	}
 	entry->state = FYAITGS_COLLECTED;
+	if (group->ctx->tool_observer) {
+		fy_generic call;
+
+		call = parse_json_string(group->ctx->transient_gb,
+					 entry->call_text);
+		if (fy_is_valid(call))
+			group->ctx->tool_observer(
+				group->ctx->tool_observer_userdata,
+				call, *result,
+				*okp ? "completed" : "failed");
+	}
 	return 0;
 }
 

@@ -5,6 +5,7 @@
 
 /* Version string */
 #define VERSION "@PROJECT_VERSION@"
+#define FYAI_SOURCE_REVISION "@FYAI_SOURCE_REVISION@"
 
 /* set maximum builder size on stack to 128 MB */
 #define FY_GENERIC_BUILDER_IN_PLACE_MAX_SIZE	(128LU << 20)

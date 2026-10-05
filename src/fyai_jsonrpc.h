@@ -21,6 +21,7 @@
 #define FYAI_JSONRPC_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include <curl/curl.h>
 
@@ -66,6 +67,8 @@ int jsonrpc_conn_serve(struct jsonrpc_conn *conn, jsonrpc_serve_fn fn,
 /* Return true while the connection has queued output. */
 bool jsonrpc_conn_has_output(const struct jsonrpc_conn *conn);
 bool jsonrpc_conn_closed(const struct jsonrpc_conn *conn);
+/* Zero keeps the default unlimited outbound queue. */
+void jsonrpc_conn_set_output_limit(struct jsonrpc_conn *conn, size_t bytes);
 
 void jsonrpc_conn_defer(struct jsonrpc_conn *conn);
 

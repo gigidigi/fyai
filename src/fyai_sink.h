@@ -174,6 +174,8 @@ struct fyai_sink *fyai_sink_create(struct fyai_ctx *ctx);
  * back exactly what a run would have shown.
  */
 struct fyai_sink *fyai_sink_create_capture(struct fyai_ctx *ctx);
+/* Discard presentation when source events use a structured protocol. */
+struct fyai_sink *fyai_sink_create_discard(struct fyai_ctx *ctx);
 
 /*
  * A terminal backend that renders into @out instead of the terminal. It

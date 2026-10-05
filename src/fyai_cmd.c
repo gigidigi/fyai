@@ -101,6 +101,7 @@ static const struct {
 	{ "kill",		fyai_cmd_kill },
 	{ "status",		fyai_cmd_status },
 	{ "agent",		fyai_cmd_agent },
+	{ "acp",		fyai_cmd_acp },
 	{ "setting",		fyai_cmd_setting },
 	{ "catalog_show",	fyai_cmd_catalog_show },
 	{ "catalog_list",	fyai_cmd_catalog_list },
@@ -135,6 +136,7 @@ static const struct {
 	{ "term",		fyai_cmd_term_prepare },
 	{ "init",		fyai_cmd_init_prepare },
 	{ "agent",		fyai_cmd_agent_prepare },
+	{ "acp",		fyai_cmd_acp_prepare },
 	{ "resume",		fyai_cmd_resume_prepare },
 };
 

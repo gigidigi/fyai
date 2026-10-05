@@ -1444,6 +1444,25 @@ void fyai_sink_capture_reset(struct fyai_sink *s)
 		c->text.data[0] = '\0';
 }
 
+static const struct fyai_sink_ops sink_discard_ops = {
+	.name = "discard",
+};
+
+struct fyai_sink *fyai_sink_create_discard(struct fyai_ctx *ctx)
+{
+	struct fyai_sink *s;
+
+	if (!ctx)
+		return NULL;
+	s = calloc(1, sizeof(*s));
+	if (!s)
+		return NULL;
+	s->ctx = ctx;
+	s->ops = &sink_discard_ops;
+	fyai_flow_reset(&s->flow, ctx->cfg);
+	return s;
+}
+
 struct fyai_sink *fyai_sink_create(struct fyai_ctx *ctx)
 {
 	struct fyai_sink *s;

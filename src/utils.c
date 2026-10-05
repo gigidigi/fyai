@@ -25,6 +25,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #ifdef __APPLE__
 #include <limits.h>
@@ -950,6 +953,12 @@ int fyai_child_exec_prepare(struct fyai_ctx *ctx,
 	int status_fd = spec->status_fd;
 	enum fyai_child_stage stage;
 	char num[16];
+
+#ifdef __linux__
+	/* The parent normally stops the whole group. This covers abrupt exit. */
+	if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() == 1)
+		return FYAI_SHELL_EXIT_EXEC;
+#endif
 
 	/*
 	 * A cancellation can race this setup. Install the handler before
