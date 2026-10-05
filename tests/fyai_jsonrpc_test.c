@@ -41,6 +41,7 @@ FYAI_TEST_ENTRY(jsonrpc, read_yields, jsonrpc_read_yields)
 FYAI_TEST_ENTRY(jsonrpc, malformed_frame_fails_pending, jsonrpc_malformed_frame_fails_pending)
 FYAI_TEST_ENTRY(jsonrpc, destroy_settles_pending, jsonrpc_destroy_settles_pending)
 FYAI_TEST_ENTRY(jsonrpc, closed_peer_is_no_error, jsonrpc_closed_peer_is_no_error)
+FYAI_TEST_ENTRY(jsonrpc, output_limit, jsonrpc_output_limit)
 
 #define TEST_BOUND_MS 5000
 
@@ -539,6 +540,22 @@ static void test_closed_peer_is_no_error(void)
 	printf("ok - a write to a closed peer is no error\n");
 }
 
+static void test_output_limit(void)
+{
+	struct peer p;
+	int rc;
+
+	peer_open(&p);
+	jsonrpc_conn_set_output_limit(p.conn, 32);
+	rc = jsonrpc_notify(p.conn, "a_notification_larger_than_the_limit",
+			    fy_map_empty);
+	FYAI_TCHECK(rc < 0);
+	FYAI_TCHECK(jsonrpc_conn_closed(p.conn));
+	FYAI_TCHECK(!jsonrpc_conn_has_output(p.conn));
+	peer_close(&p);
+	printf("ok - oversized output closes the bounded transport\n");
+}
+
 /* Run one test with an isolated diagnostic context. */
 static int jsonrpc_run(void (*testfn)(void))
 {
@@ -629,4 +646,9 @@ int jsonrpc_destroy_settles_pending(void)
 int jsonrpc_closed_peer_is_no_error(void)
 {
 	return jsonrpc_run(test_closed_peer_is_no_error);
+}
+
+int jsonrpc_output_limit(void)
+{
+	return jsonrpc_run(test_output_limit);
 }
