@@ -1891,6 +1891,21 @@ offered; `--all` offers every one.
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
+## fyai acp
+
+serve an Agent Client Protocol session
+
+**Usage:** `fyai acp`
+
+Serve ACP v1 over standard input and output.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
 ## fyai agent
 
 run one sub-agent on a task

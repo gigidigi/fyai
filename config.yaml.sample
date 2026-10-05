@@ -38,6 +38,18 @@
 # Override on the command line with `--model`/`-m`.
 model: gpt-5.4-mini
 
+# Optional automatic selection. Prices come from the current catalogue.
+# The quality tiers are your preference, not a measured model score.
+# A turn budget is an estimated preflight guard; a provider may bill
+# more than the estimate for one response. Actual usage stops later calls.
+# routing:
+#   mode: auto
+#   max_turn_usd: 0.25
+#   output_tokens: 2048
+#   candidates:
+#     - { model: gpt-5.4-mini, quality: 1, effort: low }
+#     - { model: gpt-5.4, quality: 3, effort: medium }
+
 # `provider` is never a config key - it is derived read-only from `model` at
 # resolve time and shown by `/model`, `/status`, `fyai list providers`, etc.
 
