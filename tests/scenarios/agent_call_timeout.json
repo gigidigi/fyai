@@ -1,6 +1,10 @@
 {
   "steps": [
     {
+      "match": {
+        "path": "/v1/responses",
+        "body_contains": "delegate a task that does not end"
+      },
       "response": {
         "id": "resp-agent-parent-1",
         "object": "response",
@@ -19,6 +23,10 @@
       }
     },
     {
+      "match": {
+        "path": "/v1/responses",
+        "body_contains": "\"content\": \"x\""
+      },
       "response": {
         "id": "resp-agent-child-1",
         "object": "response",
@@ -41,6 +49,10 @@
       }
     },
     {
+      "match": {
+        "path": "/v1/responses",
+        "body_contains": "timed out after"
+      },
       "response": {
         "id": "resp-agent-parent-2",
         "object": "response",
