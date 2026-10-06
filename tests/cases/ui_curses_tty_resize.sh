@@ -6,14 +6,13 @@ set -eu
 
 fyai_test_setup
 
-# Wait for the last row of the resized generation on the screen: the program
-# paints its rows in order, so that row stands once the differential repaint
-# is whole.
+# The work pane can resize the child before its first paint. Wait for the
+# first width marker, then for the last row at the requested width.
 FYAI_PTY_ROWS=30 FYAI_PTY_COLS=100 \
 FYAI_PTY_INPUT="!env LINES=30 COLUMNS=98 $PYTHON $TESTS_DIR/resize_curses.py" \
-FYAI_PTY_NEEDLE="E29G1:" FYAI_PTY_TIMEOUT=40 \
+FYAI_PTY_NEEDLE="bang-1" FYAI_PTY_TIMEOUT=40 \
 FYAI_PTY_AFTER_TIMEOUT=20 \
-FYAI_PTY_AFTER="resize:52|wait-screen:E19G2:|snapshot|raw:1d" \
+FYAI_PTY_AFTER="wait-screen:W98G|resize:52|wait-screen:E19W50G|snapshot|raw:1d" \
 FYAI_PTY_SNAPSHOT="$TEST_DIR/curses.out" \
 "$PYTHON" "$TESTS_DIR/pty_driver.py" "$TEST_DIR/pty.out" \
     "$FYAI_BIN" -k test-key --theme dark \
