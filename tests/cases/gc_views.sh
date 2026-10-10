@@ -40,6 +40,15 @@ assert_stdout_contains 'removed 0 manifests, 0 objects and 0 view trees'
 run_fyai view remove drop
 assert_status 0
 
+# A clock step must not impose an age limit when grace is zero.
+"$PYTHON" - <<'PY'
+import os, pathlib, time
+future = time.time() + 60
+for path in pathlib.Path('.fyai/objects/blake3').glob('*/*'):
+    if path.is_file():
+        os.utime(path, (future, future))
+PY
+
 # The files of the removed view are young: the grace keeps them.
 run_fyai gc
 assert_status 0

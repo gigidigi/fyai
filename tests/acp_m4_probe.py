@@ -308,25 +308,18 @@ try:
     sid = p.init(form=True)
     p.send('session/prompt', 3, {'sessionId': sid,
                                 'prompt': [{'type': 'text', 'text': 'ask a sub-agent'}]})
-    while True:
-        frame = p.next()
-        if frame.get('method') == 'elicitation/create':
-            break
-        if frame.get('id') == 3:
-            p.stop()
-            print('delegated stderr:', p.proc.stderr.read().decode(errors='replace'))
-            raise AssertionError(frame)
-    assert "sub-agent 'asker'" in frame['params']['message'], frame
-    assert frame['params']['toolCallId'] == 'c1', frame
-    p.reply(frame['id'], {'action': 'accept', 'content': {'answer': 'green'}})
     result = p.until(3)
     assert result.get('result', {}).get('stopReason') == 'end_turn', result
+    assert not any(f.get('method') == 'elicitation/create' for f in p.frames), p.frames
     requests = [json.loads(line)['body'] for line in
                 (project / 'requests.jsonl').read_text().splitlines()]
     child = [r for r in requests if 'fyai sub-agent' in json.dumps(r)]
-    assert len(child) >= 2 and 'green' in json.dumps(child[-1]['input']), child
+    assert len(child) >= 2, child
+    tools = {t.get('name') for t in child[0].get('tools', [])}
+    assert 'ask_user' not in tools and 'ask_parent' in tools, tools
+    assert 'ask_user is available only in the root session' in json.dumps(child[-1]['input']), child
     p.stop()
-    print('delegated form question and answer passed')
+    print('delegated ask_user refused without a user form passed')
 finally:
     server.terminate()
     server.wait(timeout=5)
@@ -380,3 +373,5 @@ for ending in ('cancel', 'disconnect'):
     finally:
         server.terminate()
         server.wait(timeout=5)
+
+subprocess.run([sys.executable, str(root / 'tests/acp_agent_replay_probe.py'), str(binary)], check=True)

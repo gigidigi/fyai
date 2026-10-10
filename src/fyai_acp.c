@@ -700,7 +700,8 @@ static void acp_output(void *userdata, int tag, const char *text, size_t len)
 	struct acp_session *acp = userdata;
 	char *copy;
 
-	if (!acp->run || tag != FYAI_OUTPUT_ASSISTANT || !len)
+	if (!acp->run ||
+	    (tag != FYAI_OUTPUT_ASSISTANT && tag != FYAI_OUTPUT_AGENT) || !len)
 		return;
 	copy = strndup(text, len);
 	if (!copy)
@@ -713,7 +714,8 @@ static int acp_replay_turn(void *userdata, fy_generic turn)
 {
 	struct acp_session *acp = userdata;
 	struct acp_replay_call *saved;
-	fy_generic message, role, content, calls, call, id_value, type;
+	fy_generic message, role, content, calls, call, id_value, type, origin;
+	const char *reply_to;
 	const char *r, *text, *kind, *id;
 	char msg_id[64];
 	static unsigned long long sequence;
@@ -724,7 +726,16 @@ static int acp_replay_turn(void *userdata, fy_generic turn)
 		r = fy_castp(&role, "");
 		text = fy_castp(&content, "");
 		kind = !strcmp(r, "user") ? "user_message_chunk" :
-		       !strcmp(r, "assistant") ? "agent_message_chunk" : NULL;
+		       fy_any_equal(role, "assistant", "agent") ?
+			"agent_message_chunk" : NULL;
+		if (fy_equal(role, "agent") && fy_is_string(content)) {
+			origin = fy_get(message, "origin", fy_invalid);
+			reply_to = fy_get(origin, "reply_to", "");
+			text = fy_sprintfa("**Agent %s** (message %s%s%s)\n\n%s",
+				fy_get(origin, "branch", "?"),
+				fy_get(origin, "id", "?"),
+				*reply_to ? ", reply to " : "", reply_to, text);
+		}
 		if (kind && fy_is_string(content)) {
 			snprintf(msg_id, sizeof(msg_id), "fyai-msg-%llu", ++sequence);
 			if (acp_update(acp, kind, text, msg_id))

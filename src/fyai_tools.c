@@ -125,7 +125,7 @@ fyai_tool_call_args(struct fyai_ctx *ctx, fy_generic tool_call)
 		assert(0);
 		__builtin_unreachable();
 	}
-	return parse_json_string(ctx->transient_gb, args_text);
+	return parse_json_string(fyai_ctx_transient_gb(ctx), args_text);
 }
 
 static bool fyai_shell_tty_requested(struct fyai_ctx *ctx, fy_generic call);
@@ -1592,6 +1592,9 @@ static fy_generic fyai_ask_user_from(struct fyai_ctx *ctx, fy_generic args,
 
 static fy_generic fyai_ask_user(struct fyai_ctx *ctx, fy_generic args)
 {
+	if (fyai_agent_delegated(ctx))
+		return fy_value(ctx->transient_gb,
+			"tool error: ask_user is available only in the root session; use ask_parent");
 	return fyai_ask_user_from(ctx, args, NULL);
 }
 
@@ -1880,6 +1883,112 @@ static fy_generic tool_list(struct fyai_ctx *ctx, fy_generic args, bool *okp)
 	return fyai_tool_result_text(ctx, fyai_list_tool(ctx, args, okp));
 }
 
+static char *tool_list_format(struct fyai_ctx *ctx,
+			      struct fy_generic_builder *gb, fy_generic args,
+			      const char *result)
+{
+	static const char *const kinds[] = {
+		"agents", "views", "shells", "waits", "monitors",
+		"questions", "messages",
+	};
+	fy_generic data, rows, shown, row, opts;
+	char *out = NULL, *table;
+	const char *kind = fy_get(args, "kind", "");
+	size_t len = 0, i, n, j;
+	FILE *mf;
+	bool any = false;
+
+	(void)ctx;
+	data = parse_json_string(gb, result);
+	if (!fy_is_mapping(data))
+		return NULL;
+	mf = open_memstream(&out, &len);
+	if (!mf)
+		return NULL;
+	for (i = 0; i < ARRAY_SIZE(kinds); i++) {
+		rows = fy_get(data, kinds[i], fy_invalid);
+		if (!fy_is_sequence(rows))
+			continue;
+		n = fy_len(rows);
+		if (!n && (!*kind || strcmp(kind, kinds[i])))
+			continue;
+		if (any)
+			fputc('\n', mf);
+		fprintf(mf, "**%c%s**\n\n", toupper((unsigned char)kinds[i][0]),
+			kinds[i] + 1);
+		shown = fy_sequence(gb);
+		j = 0;
+		fy_foreach(row, rows) {
+			if (j++ == 30)
+				break;
+			shown = fy_append(gb, shown, row);
+		}
+		opts = fy_mapping(gb, "empty", "none");
+		table = fyai_generic_markdown_source(opts, shown);
+		if (table) {
+			fputs(table, mf);
+			free(table);
+		}
+		if (n > 30)
+			fprintf(mf, "\n_%zu more._\n", n - 30);
+		any = true;
+	}
+	if (!any)
+		fputs("_Nothing to list._\n", mf);
+	if (fclose(mf)) {
+		free(out);
+		return NULL;
+	}
+	return out;
+}
+
+static char *tool_project_view_format(struct fyai_ctx *ctx,
+				      struct fy_generic_builder *gb,
+				      fy_generic args, const char *result)
+{
+	fy_generic data, rows, shown, row, opts, keys;
+	const char *action = fy_get(args, "action", "");
+	char *out = NULL, *table;
+	size_t len = 0, n = 0, total;
+	FILE *mf;
+
+	(void)ctx;
+	data = parse_json_string(gb, result);
+	rows = fy_get(data, "changes", fy_invalid);
+	if (!fy_is_mapping(data) || !fy_is_sequence(rows))
+		return NULL;
+	total = fy_len(rows);
+	mf = open_memstream(&out, &len);
+	if (!mf)
+		return NULL;
+	if (!strcmp(action, "apply"))
+		fprintf(mf, "%lld applied · %lld satisfied · %lld conflicts · %lld skipped\n\n",
+			fy_get(data, "applied", 0LL), fy_get(data, "satisfied", 0LL),
+			fy_get(data, "conflicts", 0LL), fy_get(data, "skipped", 0LL));
+	shown = fy_sequence(gb);
+	fy_foreach(row, rows) {
+		if (n++ == 30)
+			break;
+		shown = fy_append(gb, shown, row);
+	}
+	keys = !strcmp(action, "apply") ?
+		fy_sequence(gb, "path", "status", "action", "reason") :
+		fy_sequence(gb, "path", "status");
+	opts = fy_mapping(gb, "keys", keys, "empty", "no changes");
+	table = fyai_generic_markdown_source(opts, shown);
+	if (table) {
+		fputs(table, mf);
+		free(table);
+	}
+	if (total > 30)
+		fprintf(mf, "\n_%zu more._\n", total - 30);
+	if (fclose(mf)) {
+		free(out);
+		return NULL;
+	}
+	return out;
+}
+
 static fy_generic tool_ask_user(struct fyai_ctx *ctx, fy_generic args,
 				bool *okp)
 {
@@ -2071,15 +2180,18 @@ const struct fyai_tool_def fyai_tools_defs[] = {
 	{ .name = "ask_user", .run = tool_ask_user, .head = tool_head_ask_user,
 	  .format_result = fyai_ask_format,
 	  .in_parent = fyai_asks_background,
-	  .flags = FYAI_TOOL_PARENT | FYAI_TOOL_INSTANT },
+	  .flags = FYAI_TOOL_PARENT | FYAI_TOOL_INSTANT |
+		   FYAI_TOOL_ROOT_ONLY },
 	{ .name = "project_view", .run = tool_project_view,
 	  .head = tool_head_project_view,
+	  .format_result = tool_project_view_format,
 	  .flags = FYAI_TOOL_PARENT | FYAI_TOOL_NOT_FOR_CHILD,
 	  .effect = FYAI_TOOL_EFFECT_PROCESS },
 	{ .name = "todo_write", .run = tool_todo_write,
 	  .head = tool_head_todo_write, .format_result = fyai_todo_format_result,
 	  .flags = FYAI_TOOL_PARENT },
 	{ .name = "list", .run = tool_list, .head = tool_head_list,
+	  .format_result = tool_list_format,
 	  .flags = FYAI_TOOL_PARENT },
 };
 const size_t fyai_tools_defs_count = ARRAY_SIZE(fyai_tools_defs);
@@ -4219,7 +4331,7 @@ static char *fyai_cancel_tool(struct fyai_ctx *ctx, fy_generic args, bool *okp)
 	struct fyai_tool_job *job;
 	fy_generic name_v, kind_v;
 	const char *name, *kind;
-	bool is_wait, is_agent, is_shell, is_monitor, is_question;
+	bool is_wait, is_agent, is_shell, is_monitor, is_question, is_message;
 	char *result;
 
 	*okp = false;
@@ -4239,8 +4351,12 @@ static char *fyai_cancel_tool(struct fyai_ctx *ctx, fy_generic args, bool *okp)
 	is_monitor = (!*kind || !strcmp(kind, "monitor")) &&
 		     fyai_monitor_running(ctx, name);
 	is_question = (!*kind || !strcmp(kind, "question")) &&
-		      fyai_asks_exists(ctx, name);
-	if (is_wait + is_agent + is_shell + is_monitor + is_question > 1)
+		      (fyai_asks_exists(ctx, name) ||
+		       fyai_agents_parent_ask_pending(ctx, name));
+	is_message = (!*kind || !strcmp(kind, "message")) &&
+		     fyai_agents_message_pending(ctx, name);
+	if (is_wait + is_agent + is_shell + is_monitor + is_question +
+	    is_message > 1)
 		return strdup(fy_sprintfa("tool error: '%s' names more than "
 					  "one thing; say its kind", name));
 	if (is_monitor && fyai_monitor_cancel(ctx, name)) {
@@ -4262,6 +4378,15 @@ static char *fyai_cancel_tool(struct fyai_ctx *ctx, fy_generic args, bool *okp)
 	if (is_question && fyai_asks_cancel(ctx, name)) {
 		*okp = true;
 		return strdup(fy_sprintfa("[question '%s' cancelled]", name));
+	}
+	if (is_question && fyai_agents_parent_ask_cancel(ctx, name)) {
+		*okp = true;
+		return strdup(fy_sprintfa("[ask_parent '%s' cancelled]", name));
+	}
+	if (is_message && fyai_agents_message_cancel(ctx, name)) {
+		*okp = true;
+		return strdup(fy_sprintfa("[agent_message '%s' receipt cancelled; "
+			"the message may still be queued]", name));
 	}
 	if (is_wait && fyai_wait_cancel(ctx, name)) {
 		*okp = true;
@@ -5035,17 +5160,43 @@ static struct fyai_tool_job *fyai_agent_job_named(struct fyai_ctx *ctx,
 {
 	struct fyai_tool_job *job;
 	const char *who;
+	char slug[FYAI_BRANCH_COMPONENT_MAX + 1];
 
 	if (fy_str_empty(name))
 		return NULL;
+	fyai_branch_sanitize(name, "agent", slug, sizeof(slug));
 	for (job = ctx->tool_jobs; job; job = job->next) {
 		if (!job->agent || job->done || !job->branch)
 			continue;
 		who = fyai_agent_job_name(job);
-		if (!strcmp(job->branch, name) || !strcmp(who, name))
+		if (!strcmp(job->branch, name) || !strcmp(who, name) ||
+		    !strcmp(who, slug))
 			return job;
 	}
 	return NULL;
+}
+
+const char *fyai_tool_agent_live_branch(struct fyai_ctx *ctx, const char *name)
+{
+	struct fyai_tool_job *job = fyai_agent_job_named(ctx, name);
+
+	return job ? job->branch : NULL;
+}
+
+bool fyai_tool_agent_foreground_wait(struct fyai_ctx *ctx,
+				     struct jsonrpc_conn *conn)
+{
+	struct fyai_tool_job *job;
+	fy_generic args;
+
+	for (job = ctx->tool_jobs; job; job = job->next) {
+		if (!job->agent || job->done || job->conn != conn)
+			continue;
+		args = fyai_tool_call_args(ctx, job->call);
+		if (!fy_get(args, "_fyai_background", false) && !job->btw)
+			return true;
+	}
+	return false;
 }
 
 /* Present a named sub-agent's question and return the user's answer. */
@@ -5393,6 +5544,8 @@ static int fyai_tool_job_spawn(struct fyai_ctx *ctx,
 
 		fyai_ctx_fork_disown(ctx);
 		ctx->cfg->tool_child = true;
+		if (agent_runtime)
+			ctx->cfg->diag.mask &= ~(1u << FYAIET_NOTICE);
 		fyai_diag_trace_reopen();
 		fyai_tool_child_signals(ctx);
 		if (fyai_setup_transient_builder(ctx))
@@ -5534,6 +5687,8 @@ static int fyai_tool_job_attach(struct fyai_ctx *ctx,
 
 static void fyai_tool_job_close_channel(struct fyai_tool_job *job)
 {
+	if (job->agent && job->branch)
+		fyai_agents_message_branch_closed(job->ctx, job->branch);
 	if (job->run) {
 		jsonrpc_request_destroy(job->run);
 		job->run = NULL;
@@ -5643,9 +5798,9 @@ static fy_generic fyai_list_tool(struct fyai_ctx *ctx, fy_generic args, bool *ok
 
 	*okp = false;
 	if (!all && !fy_any_equal(kind, "agents", "views", "shells", "waits",
-				  "monitors", "questions"))
+				  "monitors", "questions", "messages"))
 		return fy_value(gb, "tool error: kind is agents, views, shells, "
-				"waits, monitors or questions");
+				"waits, monitors, questions or messages");
 	if (all || !strcmp(kind, "agents"))
 		result = fy_assoc(gb, result, "agents", fyai_list_agents(ctx, gb));
 	if (all || !strcmp(kind, "views"))
@@ -5659,7 +5814,11 @@ static fy_generic fyai_list_tool(struct fyai_ctx *ctx, fy_generic args, bool *ok
 				  fyai_monitors_rows(ctx, gb));
 	if (all || !strcmp(kind, "questions"))
 		result = fy_assoc(gb, result, "questions",
-				  fyai_asks_rows(ctx, gb));
+				  fy_concat(gb, fyai_asks_rows(ctx, gb),
+					fyai_agents_parent_ask_rows(ctx, gb)));
+	if (all || !strcmp(kind, "messages"))
+		result = fy_assoc(gb, result, "messages",
+				  fyai_agents_message_rows(ctx, gb));
 	*okp = true;
 	return fy_gb_internalize(gb, result);
 }
@@ -7582,8 +7741,14 @@ fy_generic fyai_tool_job_collect(struct fyai_ctx *ctx,
 					    (job->result_ok ? 0 : 1),
 			 job->timed_out ? ", timed out" :
 			 (job->have_result ? "" : ", no result"));
-	if (fy_is_valid(job->diag))
-		fyai_diag_adopt(fyai_ctx_diag(ctx), job->diag, job->origin);
+	if (fy_is_valid(job->diag)) {
+		if (job->agent)
+			fyai_diag_adopt_agent(fyai_ctx_diag(ctx), job->diag,
+					      job->origin);
+		else
+			fyai_diag_adopt(fyai_ctx_diag(ctx), job->diag,
+					    job->origin);
+	}
 	/* Supply a cause when a failed child returned no diagnostic. */
 	if (!job->timed_out && job->term_signal) {
 		/* A job we stopped ended as we asked it to; that is not a
