@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "fyai.h"
+#include "fyai_ask.h"
 #include "fyai_auth.h"
 #include "fyai_branch.h"
 #include "fyai_catalog.h"
@@ -462,97 +463,119 @@ static bool acp_permission(void *userdata, fy_generic call)
 }
 
 static fy_generic acp_question(void *userdata, fy_generic args,
-			       const char *tool_call_id)
+                               const char *tool_call_id)
 {
 	struct acp_session *acp = userdata;
 	struct fy_generic_builder *gb;
 	struct jsonrpc_request *req;
-	fy_generic question, from, message, choices, choice, property, schema;
-	fy_generic params, reply, action, content, answer;
-	const char *text;
-	fy_generic result;
+	struct fyai_ask_reply replies[FYAI_ASK_QUESTIONS_MAX] = { 0 };
+	fy_generic questions, question, from, message, choices, choice, property;
+	fy_generic schema, params, reply, action, content, answer, result, label;
+	const char *text, *who;
 	char suggestions[2048];
-	size_t used;
-	int written;
-	int rc;
+	size_t used, n = 0, i;
+	int written, rc;
 
 	gb = fyai_ctx_transient_gb(acp->ctx);
-	if (!acp->form_capable || !acp->session_id ||
-	    jsonrpc_conn_closed(acp->conn))
-		goto no_answer;
-	question = fy_get(args, "question", fy_invalid);
-	text = fy_castp(&question, "");
-	if (!*text)
-		goto no_answer;
+	questions = fy_get(args, "questions", fy_invalid);
 	from = fy_get(args, "from", fy_invalid);
-	if (fy_is_string(from) && *fy_castp(&from, "")) {
-		message = fy_stringf(gb, "the sub-agent '%s' asks: %s",
-				fy_castp(&from, ""), text);
-		text = fy_castp(&message, text);
-	}
-	/* ACP form mode cannot carry secrets. Refuse common secret requests. */
-	if (strcasestr(text, "password") || strcasestr(text, "api key") ||
-	    strcasestr(text, "access token") ||
-	    strcasestr(text, "private key") ||
-	    strcasestr(text, "recovery code") ||
-	    strcasestr(text, "payment card"))
+	who = fy_castp(&from, "");
+	if (!acp->form_capable || !acp->session_id ||
+	    jsonrpc_conn_closed(acp->conn) || !fy_is_sequence(questions))
 		goto no_answer;
-	property = fy_mapping(gb, "type", "string", "title", "Answer",
-			      "maxLength", 4096LL);
-	choices = fy_get(args, "options", fy_invalid);
-	if (fy_is_sequence(choices) && fy_len(choices)) {
-		used = (size_t)snprintf(suggestions, sizeof(suggestions),
+	fy_foreach(question, questions) {
+		message = fy_get(question, "question", fy_invalid);
+		text = fy_castp(&message, "");
+		if (!*text)
+			goto no_answer;
+		if (*who) {
+			message = fy_stringf(gb, "the sub-agent '%s' asks: %s",
+					     who, text);
+			text = fy_castp(&message, text);
+		}
+		/* ACP form mode cannot carry secrets. */
+		if (strcasestr(text, "password") || strcasestr(text, "api key") ||
+		    strcasestr(text, "access token") ||
+		    strcasestr(text, "private key") ||
+		    strcasestr(text, "recovery code") ||
+		    strcasestr(text, "payment card"))
+			goto no_answer;
+		property = fy_mapping(gb, "type", "string", "title", "Answer",
+				      "maxLength", 4096LL);
+		choices = fy_get(question, "options", fy_invalid);
+		if (fy_is_sequence(choices) && fy_len(choices)) {
+			used = (size_t)snprintf(suggestions, sizeof(suggestions),
 					"Suggested answers: ");
-		fy_foreach(choice, choices) {
-			if (!fy_is_string(choice) || used >= sizeof(suggestions))
-				continue;
-			written = snprintf(suggestions + used,
-					   sizeof(suggestions) - used,
-					   "%s%s", used > 19 ? ", " : "",
-					   fy_castp(&choice, ""));
-			if (written < 0)
+			fy_foreach(choice, choices) {
+				if (used >= sizeof(suggestions))
+					break;
+				written = snprintf(suggestions + used,
+						   sizeof(suggestions) - used,
+						   "%s%s", used > 19 ? ", " : "",
+						   fy_get(choice, "label", ""));
+				if (written < 0)
+					break;
+				used += (size_t)written;
+			}
+			property = fy_assoc(gb, property, "description", suggestions);
+		}
+		schema = fy_mapping(gb, "type", "object",
+			"properties", fy_mapping(gb, "answer", property),
+			"required", fy_sequence(gb, "answer"));
+		params = fy_mapping(gb, "sessionId", acp->session_id,
+			"mode", "form", "message", text, "requestedSchema", schema);
+		if (tool_call_id && *tool_call_id)
+			params = fy_assoc(gb, params, "toolCallId", tool_call_id);
+		req = jsonrpc_request_submit(acp->conn, "elicitation/create",
+			params, jsonrpc_conn_next_id(acp->conn), false, NULL, NULL);
+		if (!req)
+			goto no_answer;
+		while (!jsonrpc_request_done(req) && !acp->cancelled &&
+		       !jsonrpc_conn_closed(acp->conn)) {
+			rc = fyai_event_loop_step(fyai_ctx_loop(acp->ctx), -1);
+			if (rc < 0)
 				break;
-			used += (size_t)written;
 		}
-		property = fy_assoc(gb, property, "description", suggestions);
-	}
-	schema = fy_mapping(gb, "type", "object",
-		"properties", fy_mapping(gb, "answer", property),
-		"required", fy_sequence(gb, "answer"));
-	params = fy_mapping(gb, "sessionId", acp->session_id,
-		"mode", "form", "message", text, "requestedSchema", schema);
-	if (tool_call_id && *tool_call_id)
-		params = fy_assoc(gb, params, "toolCallId", tool_call_id);
-	req = jsonrpc_request_submit(acp->conn, "elicitation/create",
-		params, jsonrpc_conn_next_id(acp->conn), false, NULL, NULL);
-	if (!req)
-		goto no_answer;
-	while (!jsonrpc_request_done(req) && !acp->cancelled &&
-	       !jsonrpc_conn_closed(acp->conn)) {
-		rc = fyai_event_loop_step(fyai_ctx_loop(acp->ctx), -1);
-		if (rc < 0)
-			break;
-	}
-	result = fy_invalid;
-	if (jsonrpc_request_done(req) && jsonrpc_request_ok(req)) {
-		reply = jsonrpc_request_result(req);
-		action = fy_get(reply, "action", fy_invalid);
-		if (fy_equal(action, "accept")) {
-			content = fy_get(reply, "content", fy_invalid);
-			answer = fy_get(content, "answer", fy_invalid);
-			if (fy_is_string(answer) &&
-			    strlen(fy_castp(&answer, "")) <= 4096)
-				result = fy_value(gb, fy_castp(&answer, ""));
+		answer = fy_invalid;
+		if (jsonrpc_request_done(req) && jsonrpc_request_ok(req)) {
+			reply = jsonrpc_request_result(req);
+			action = fy_get(reply, "action", fy_invalid);
+			if (fy_equal(action, "accept")) {
+				content = fy_get(reply, "content", fy_invalid);
+				answer = fy_get(content, "answer", fy_invalid);
+			}
 		}
+		if (!fy_is_string(answer) ||
+		    strlen(fy_castp(&answer, "")) > 4096) {
+			if (!jsonrpc_request_done(req))
+				jsonrpc_request_cancel(req);
+			jsonrpc_request_destroy(req);
+			goto no_answer;
+		}
+		/* A clicked option arrives as its label. */
+		for (i = 0; i < fy_len(choices); i++) {
+			label = fy_get(fy_get_at(choices, i), "label",
+				       fy_invalid);
+			if (fy_equal(answer, label)) {
+				replies[n].selected = 1u << i;
+				break;
+			}
+		}
+		rc = i == fy_len(choices) ?
+			fyai_ask_reply_from_line(question,
+					      fy_castp(&answer, ""), &replies[n]) : 0;
+		jsonrpc_request_destroy(req);
+		if (rc || !fyai_ask_reply_given(&replies[n]))
+			goto no_answer;
+		n++;
 	}
-	if (!jsonrpc_request_done(req))
-		jsonrpc_request_cancel(req);
-	jsonrpc_request_destroy(req);
-	if (fy_is_valid(result))
-		return result;
+	result = fyai_ask_result(gb, questions, replies, n);
+	fyai_ask_replies_free(replies, FYAI_ASK_QUESTIONS_MAX);
+	return result;
 no_answer:
 	acp->ctx->ask_abort = true;
-	return fy_value(gb, "tool note: the user did not provide an answer");
+	fyai_ask_replies_free(replies, FYAI_ASK_QUESTIONS_MAX);
+	return fyai_ask_result(gb, fy_invalid, NULL, 0);
 }
 
 static fy_generic acp_error(struct fyai_ctx *ctx, long long code,

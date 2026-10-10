@@ -49,14 +49,49 @@ The document is a sequence of tools in wire shape:
 Use these rules:
 
 - Keep the tool order: `read_file`, `write_file`, `apply_patch`, `exec_command`,
-  `shell_input`, `shell_output`, `shell_close`, `ask_user`, `agent`, `time`,
-  `wait`.
+  `shell_input`, `shell_output`, `shell_close`, `cancel`, `ask_user`, `agent`, `list`,
+  `time`, `wait`.
 - Write each description as a literal block scalar (`|-`) on one line. The
   provider receives the parsed text without a change.
 - Give each parameter object `type: object`, `properties`, `required`, and
   `additionalProperties: false`.
 - Property types include `string`, `integer`, `boolean`, and `array` of
   `string`.
+
+## Placeholders
+
+A description can hold `{{name}}`. When the tools are built for a run, each
+name is replaced by the text that the run needs, so the model learns what the
+run can do.
+
+The run decides the state of a name, and the tool holds the text of each
+state under `templates`, beside its description:
+
+```yaml
+- type: function
+  function:
+    name: agent
+    description: |-
+      ... {{project_isolation_description}}
+  templates:
+    project_isolation_description:
+      default: >-
+        Text for a run where the option is on.
+      optional: >-
+        Text for a run where the option can be chosen.
+```
+
+`fyai_tool_template_state()` in `src/fyai_tool_template.c` lists the names and
+gives the state of each. A name that has no text in this run, or in a state
+that the tool does not list, stands for nothing, and the blank it leaves is
+removed. The `templates` key is not sent to the provider.
+
+| Name | States |
+| --- | --- |
+| `project_isolation_description` | `default`: a sub-agent runs on a private copy of the project unless told otherwise (`agent/isolation: view`). `optional`: it does when asked (`none`). It has no state when the run cannot isolate: then the `isolated` parameter and the `project_view` tool are not offered either. |
+
+A unit test fails when a description names a placeholder that the table does
+not list.
 
 ## Embedding
 
@@ -90,3 +125,32 @@ it cannot parse the document. The tests in `tests/fyai_tool_spec_test.c` check
 that descriptions are non-empty and check selected property types. They do not
 validate the full document shape, exact tool order, every `required` list, or
 `additionalProperties`.
+
+## Tool registry
+
+`data/tools.yaml` describes a tool to the model. `struct fyai_tool_def`
+(`src/fyai_tool_registry.h`) describes it to the program. The file that
+implements a tool defines its entry, and `src/fyai_tool_registry.c` joins the
+tables. An entry holds:
+
+- `run` or `run_text`: the function that runs the call;
+- `head`: the title row of the call, unless the tool is `FYAI_TOOL_SILENT`;
+- `format_result`: writes the result of a call that succeeded as Markdown for
+  the user, when the result is a structure that reads badly as the text the
+  model gets (`ask_user` uses it for its answers). It returns a string or NULL
+  for the result as it is. The transcript stores that Markdown as the
+  `tool_result` fragment, with the language `fyai:markdown`, and replays it;
+  the model always gets the result as it is;
+- `effect`: the ordering class of the call against other calls of a batch;
+- `flags`: `PARENT` (never runs in a job), `SILENT`, `MARKED`,
+  `NOT_FOR_CHILD`, `HOSTED` (the provider runs it), and `INSTANT` (a call in
+  the parent returns at once and starts work for later); and
+- `in_parent`: a test of the arguments that keeps one call in the parent.
+
+A call with `INSTANT` runs in the order of the response, inside the group of
+the other calls. A `wait` that follows it in the same response thus sees the
+work that it started. Any other call of the parent runs after the group.
+
+To add a tool, add it to `data/tools.yaml` and add one entry. The test
+`tools/registry` fails when a tool of the file has no entry, no run function,
+or no head.

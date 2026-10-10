@@ -3,8 +3,14 @@
 # binding names any value. fyai decides every flag.
 type: object
 additionalProperties: false
-required: [input, ask, screen, tail, transcript, popup, note, pane, header, prompt, status]
+required: [input, ask, screen, tail, transcript, popup, note, todo, layout, pane, header, prompt, status]
 properties:
+  layout:
+    type: object
+    additionalProperties: false
+    required: [name]
+    properties:
+      name: { description: The layout of the document that the terminal took., type: string }
   input:
     type: object
     additionalProperties: false
@@ -17,9 +23,10 @@ properties:
   ask:
     type: object
     additionalProperties: false
-    required: [question, from, from_agent, options, waiting, waiting_shown]
+    required: [question, header, from, from_agent, options, lines, hint, progress, progress_shown, review, preview_shown, preview_rows, preview_title, bar, question_shown, waiting, waiting_shown]
     properties:
       question: { description: The question to the user., type: string }
+      header: { description: The short label of the question., type: string }
       from: { description: The sub-agent that asks., type: string }
       from_agent: { description: A sub-agent asks., type: boolean }
       options:
@@ -28,13 +35,37 @@ properties:
         items:
           type: object
           additionalProperties: false
-          required: [text, selected, other]
+          required: [text, box, description, has_description, selected_description, other_description, selected, other]
           properties:
             text: { description: The answer., type: string }
-            selected: { description: The answer is selected., type: boolean }
-            other: { description: The answer is not selected., type: boolean }
-      waiting: { description: Questions after this one., type: integer }
-      waiting_shown: { description: Questions wait after this one., type: boolean }
+            box: { description: The mark of a many-choice question, with a blank after it, else empty., type: string }
+            description: { description: What the answer means., type: string }
+            has_description: { description: The answer has a description., type: boolean }
+            selected_description: { description: The cursor is on the answer and it has a description., type: boolean }
+            other_description: { description: The cursor is not on the answer and it has a description., type: boolean }
+            selected: { description: The cursor is on the answer., type: boolean }
+            other: { description: The cursor is not on the answer., type: boolean }
+      lines:
+        description: The answers given, in the review step.
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [header, answer]
+          properties:
+            header: { description: The short label of the question., type: string }
+            answer: { description: The answer given., type: string }
+      hint: { description: The keys and the free answer, as one line., type: string }
+      progress: { description: Which question of the series this is., type: string }
+      progress_shown: { description: More than one question is asked., type: boolean }
+      review: { description: The step that shows every answer before they are sent., type: boolean }
+      preview_shown: { description: An option has a preview to show., type: boolean }
+      preview_rows: { description: The rows of the preview., type: integer }
+      preview_title: { description: The label of the option that the preview belongs to., type: string }
+      bar: { description: The glyph of the bar at the edge of the selected answer, one column wide., type: string }
+      question_shown: { description: A question, not the review, is shown., type: boolean }
+      waiting: { description: Questions after these., type: integer }
+      waiting_shown: { description: Questions wait after these., type: boolean }
   screen:
     type: object
     additionalProperties: false
@@ -49,8 +80,9 @@ properties:
   transcript:
     type: object
     additionalProperties: false
-    required: [rows]
+    required: [shown, rows]
     properties:
+      shown: { description: The transcript is a slot of its own, not a cell of the side column., type: boolean }
       rows: { description: Rows of the transcript view of a fullscreen page., type: integer }
   popup:
     type: object
@@ -71,19 +103,30 @@ properties:
     properties:
       shown: { description: A short result stands above the status., type: boolean }
       rows: { description: Rows of the short result., type: integer }
+  todo:
+    type: object
+    additionalProperties: false
+    required: [shown, below, source, rows]
+    properties:
+      shown: { description: The branch holds a todo list., type: boolean }
+      below: { description: The todo panel stands below the prompt., type: boolean }
+      source: { description: UI Markdown of the todo list that fyai wrote., type: string }
+      rows: { description: Rows of the todo panel., type: integer }
   tail:
     type: object
     additionalProperties: false
-    required: [rows]
+    required: [shown, rows]
     properties:
+      shown: { description: The tail is a slot of its own, not a cell of the side column., type: boolean }
       rows: { description: Rows of the transcript tail., type: integer }
   pane:
     type: object
     additionalProperties: false
-    required: [above, below, cap, cap_source, grid, grid_source, slot, rows]
+    required: [above, below, side, cap, cap_source, grid, grid_source, slot, rows]
     properties:
       above: { description: The pane stands above the prompt., type: boolean }
       below: { description: The pane stands below the prompt., type: boolean }
+      side: { description: The pane is a column beside the transcript, in the grid source., type: boolean }
       cap: { description: The pane has a cap row., type: boolean }
       cap_source: { description: UI Markdown of the cap row that fyai wrote., type: string }
       grid: { description: The pane is a grid that fyai wrote., type: boolean }
@@ -112,11 +155,12 @@ properties:
   status:
     type: object
     additionalProperties: false
-    required: [shown, completion, hint, hint_text, row, text, activity, gutter, "on", "off"]
+    required: [shown, completion, hint, hint_blank, hint_text, row, text, activity, gutter, "on", "off"]
     properties:
       shown: { description: The status rows are shown., type: boolean }
       completion: { description: The completion ribbon is shown., type: boolean }
-      hint: { description: The hint row is shown., type: boolean }
+      hint: { description: The hint row is shown with its text., type: boolean }
+      hint_blank: { description: The hint row is shown with no text., type: boolean }
       hint_text: { description: Text of the hint., type: string }
       row: { description: The status row is shown., type: boolean }
       text: { description: UI Markdown of the status that fyai wrote, with its values escaped and coloured., type: string }

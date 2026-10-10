@@ -146,6 +146,14 @@ int fyai_sandbox_mode_parse(const char *name, enum fyai_sandbox_mode *modep)
 #define LANDLOCK_ACCESS_FS_REFER 0
 #endif
 
+/* ABI 10 rights may be absent from the build host's kernel headers. */
+#ifndef LANDLOCK_ACCESS_NET_BIND_UDP
+#define LANDLOCK_ACCESS_NET_BIND_UDP (1ULL << 2)
+#endif
+#ifndef LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP
+#define LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP (1ULL << 3)
+#endif
+
 static long ll_create_ruleset(const struct landlock_ruleset_attr *attr,
 			      size_t size, uint32_t flags)
 {
@@ -384,6 +392,18 @@ bool fyai_sandbox_net_restrictable(int abi)
 #endif
 }
 
+bool fyai_sandbox_udp_restrictable(int abi)
+{
+	if (abi < 0)
+		abi = fyai_sandbox_abi();
+#ifdef LANDLOCK_ACCESS_NET_CONNECT_TCP
+	return abi >= 10;
+#else
+	(void)abi;
+	return false;
+#endif
+}
+
 int fyai_sandbox_apply(const struct fyai_sandbox_spec *spec)
 {
 	struct landlock_ruleset_attr attr = {0};
@@ -399,19 +419,31 @@ int fyai_sandbox_apply(const struct fyai_sandbox_spec *spec)
 	if (abi < 1)
 		return spec->strict ? -1 : 0;	/* unconfined: floor is elsewhere */
 	/* Fail closed when this build or kernel cannot restrict egress. */
-	if (spec->restrict_net && !fyai_sandbox_net_restrictable(abi))
+	if ((spec->restrict_tcp || spec->restrict_tcp_bind) &&
+	    !fyai_sandbox_net_restrictable(abi))
+		return -1;
+	if (spec->restrict_udp && !fyai_sandbox_udp_restrictable(abi))
 		return -1;
 
 	mask = fs_mask(abi);
 	attr.handled_access_fs = mask;
 #ifdef LANDLOCK_ACCESS_NET_CONNECT_TCP
-	if (spec->restrict_net)
-		attr.handled_access_net = LANDLOCK_ACCESS_NET_CONNECT_TCP;
+	if (spec->restrict_tcp)
+		attr.handled_access_net |= LANDLOCK_ACCESS_NET_CONNECT_TCP;
+	if (spec->restrict_tcp_bind)
+		attr.handled_access_net |= LANDLOCK_ACCESS_NET_BIND_TCP;
+	if (spec->restrict_udp)
+		attr.handled_access_net |= LANDLOCK_ACCESS_NET_BIND_UDP |
+					   LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP;
 #endif
 
 	fd = (int)ll_create_ruleset(&attr, sizeof(attr), 0);
 	if (fd < 0)
 		return -1;
+
+	if (spec->read_all && grant_except(fd, "/", FYAI_FS_READ & mask,
+					    spec->deny, spec->deny_global_n))
+		goto out;
 
 	/* Carve configured denies out of every granted hierarchy. */
 	for (p = fyai_sys_ro; *p; p++)
@@ -421,6 +453,9 @@ int fyai_sandbox_apply(const struct fyai_sandbox_spec *spec)
 	for (p = fyai_scratch_rw; *p; p++)
 		if (grant_except(fd, *p, mask, spec->deny, spec->deny_global_n))
 			goto out;
+	if (spec->scratch_root && grant_except(fd, spec->scratch_root, mask,
+					    spec->deny, spec->deny_global_n))
+		goto out;
 
 	if (spec->project_root &&
 	    grant_except(fd, spec->project_root, mask, spec->deny, spec->deny_n))
@@ -433,11 +468,39 @@ int fyai_sandbox_apply(const struct fyai_sandbox_spec *spec)
 			goto out;
 
 #ifdef LANDLOCK_ACCESS_NET_CONNECT_TCP
-	if (spec->restrict_net) {
-		for (i = 0; i < spec->ports_n; i++) {
+	if (spec->restrict_tcp) {
+		for (i = 0; i < spec->tcp_ports_n; i++) {
 			np.allowed_access = LANDLOCK_ACCESS_NET_CONNECT_TCP;
-			np.port = spec->ports[i];
+			np.port = spec->tcp_ports[i];
 
+			if (ll_add_rule(fd, LANDLOCK_RULE_NET_PORT, &np, 0))
+				goto out;
+		}
+	}
+	if (spec->restrict_tcp_bind) {
+		for (i = 0; i < spec->tcp_bind_ports_n; i++) {
+			np.allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP;
+			np.port = spec->tcp_bind_ports[i];
+			if (ll_add_rule(fd, LANDLOCK_RULE_NET_PORT, &np, 0))
+				goto out;
+		}
+	}
+	if (spec->restrict_udp) {
+		for (i = 0; i < spec->udp_ports_n; i++) {
+			np.allowed_access = LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP;
+			np.port = spec->udp_ports[i];
+			if (ll_add_rule(fd, LANDLOCK_RULE_NET_PORT, &np, 0))
+				goto out;
+		}
+		if (spec->udp_ports_n) {
+			np.allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP;
+			np.port = 0;
+			if (ll_add_rule(fd, LANDLOCK_RULE_NET_PORT, &np, 0))
+				goto out;
+		}
+		for (i = 0; i < spec->udp_bind_ports_n; i++) {
+			np.allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP;
+			np.port = spec->udp_bind_ports[i];
 			if (ll_add_rule(fd, LANDLOCK_RULE_NET_PORT, &np, 0))
 				goto out;
 		}
@@ -467,6 +530,12 @@ bool fyai_sandbox_available(void)
 }
 
 bool fyai_sandbox_net_restrictable(int abi)
+{
+	(void)abi;
+	return false;
+}
+
+bool fyai_sandbox_udp_restrictable(int abi)
 {
 	(void)abi;
 	return false;

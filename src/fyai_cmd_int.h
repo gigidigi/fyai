@@ -78,6 +78,11 @@ bool fyai_cmd_seq_has(fy_generic seq, const char *word);
 bool fyai_cmd_def_on(fy_generic def, fy_generic inherited,
 		     enum fyai_cmd_surface surface);
 fy_generic fyai_cmd_def_surfaces(fy_generic def, fy_generic inherited);
+/*
+ * Return the items of @list ordered by their string member @key, in a new
+ * array of *@np items. The caller frees it. NULL when allocation fails.
+ */
+fy_generic *fyai_cmd_defs_sorted(fy_generic list, const char *key, size_t *np);
 bool fyai_cmd_def_names(fy_generic def, const char *word);
 fy_generic fyai_cmd_def_find(fy_generic defs, fy_generic inherited,
 			     const char *word, size_t len,
@@ -116,6 +121,8 @@ int fyai_cmd_config_get(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_config_set(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_config_delete(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_config_import(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_config_reset(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_config_undo(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_config_export(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_config_validate(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_config_schema(struct fyai_cmd_call *call, fy_generic *result);
@@ -154,14 +161,45 @@ int fyai_cmd_mcp_login(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_mcp_enable(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_mcp_import_client(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_exit(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_reload(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_btw(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_branches(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_resume(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_zoom(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_page(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_page_review(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_page_review_sample(struct fyai_cmd_call *call,
+				fy_generic *result);
 int fyai_cmd_sessions(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_kill(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_status(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_profiles(struct fyai_cmd_call *call, fy_generic *result);
+
+/* Handlers of the filesystem views. */
+int fyai_cmd_view_apply(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_diff(struct fyai_cmd_call *call, fy_generic *result);
+
+/* Handlers of the filesystem views. */
+int fyai_cmd_view_remove(struct fyai_cmd_call *call, fy_generic *result);
+
+/* Handlers of the filesystem views. */
+int fyai_cmd_view_sync(struct fyai_cmd_call *call, fy_generic *result);
+
+/* Handlers of the filesystem views. */
+int fyai_cmd_view_mount(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_unmount(struct fyai_cmd_call *call, fy_generic *result);
+
+/* Handlers of the filesystem views. */
+int fyai_cmd_view_create(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_update(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_show(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_list(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_enter(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_ls(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_undo(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_rm(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_cp(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_view_fs(struct fyai_cmd_call *call, fy_generic *result);
 
 fyai_cmd_prepare_fn fyai_cmd_prepare(const char *name);
 fyai_cmd_prepare_fn fyai_cmd_early_hook(const char *name);
@@ -170,12 +208,23 @@ int fyai_cmd_resume_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_term_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_init_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_agent_prepare(struct fyai_cfg *cfg, fy_generic args);
+int fyai_cmd_transport_early(struct fyai_cfg *cfg, fy_generic args);
+int fyai_cmd_transport(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_agent(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_acp_prepare(struct fyai_cfg *cfg, fy_generic args);
 int fyai_cmd_acp(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_setting(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_lockdown(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_yolo(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_session_status(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_session_new(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_session_push(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_session_pull(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_todo_show(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_todo_clear(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_show(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_list(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_render(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_tools(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_get(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_set(struct fyai_cmd_call *call, fy_generic *result);
@@ -187,6 +236,7 @@ int fyai_cmd_catalog_schema(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_reset(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_edit(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_catalog_update(struct fyai_cmd_call *call, fy_generic *result);
+int fyai_cmd_auth_accounts(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_auth_status(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_auth_usage(struct fyai_cmd_call *call, fy_generic *result);
 int fyai_cmd_auth_login(struct fyai_cmd_call *call, fy_generic *result);

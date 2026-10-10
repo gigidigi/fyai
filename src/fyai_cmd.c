@@ -59,6 +59,8 @@ static const struct {
 	{ "config_set",		fyai_cmd_config_set },
 	{ "config_delete",	fyai_cmd_config_delete },
 	{ "config_import",	fyai_cmd_config_import },
+	{ "config_reset",	fyai_cmd_config_reset },
+	{ "config_undo",	fyai_cmd_config_undo },
 	{ "config_export",	fyai_cmd_config_export },
 	{ "config_validate",	fyai_cmd_config_validate },
 	{ "config_schema",	fyai_cmd_config_schema },
@@ -92,19 +94,33 @@ static const struct {
 	{ "mcp_enable",		fyai_cmd_mcp_enable },
 	{ "mcp_import_client",	fyai_cmd_mcp_import_client },
 	{ "exit",		fyai_cmd_exit },
+	{ "reload",		fyai_cmd_reload },
 	{ "btw",		fyai_cmd_btw },
 	{ "branches",		fyai_cmd_branches },
 	{ "resume",		fyai_cmd_resume },
 	{ "zoom",		fyai_cmd_zoom },
 	{ "page",		fyai_cmd_page },
+	{ "page_review",	fyai_cmd_page_review },
+	{ "page_review_sample",	fyai_cmd_page_review_sample },
 	{ "sessions",		fyai_cmd_sessions },
 	{ "kill",		fyai_cmd_kill },
 	{ "status",		fyai_cmd_status },
+	{ "profiles",		fyai_cmd_profiles },
 	{ "agent",		fyai_cmd_agent },
 	{ "acp",		fyai_cmd_acp },
+	{ "transport",		fyai_cmd_transport },
 	{ "setting",		fyai_cmd_setting },
+	{ "lockdown",		fyai_cmd_lockdown },
+	{ "yolo",		fyai_cmd_yolo },
+	{ "session_status",	fyai_cmd_session_status },
+	{ "session_new",	fyai_cmd_session_new },
+	{ "session_push",	fyai_cmd_session_push },
+	{ "session_pull",	fyai_cmd_session_pull },
+	{ "todo_show",		fyai_cmd_todo_show },
+	{ "todo_clear",		fyai_cmd_todo_clear },
 	{ "catalog_show",	fyai_cmd_catalog_show },
 	{ "catalog_list",	fyai_cmd_catalog_list },
+	{ "render",		fyai_cmd_render },
 	{ "catalog_tools",	fyai_cmd_catalog_tools },
 	{ "catalog_get",	fyai_cmd_catalog_get },
 	{ "catalog_set",	fyai_cmd_catalog_set },
@@ -116,10 +132,27 @@ static const struct {
 	{ "catalog_reset",	fyai_cmd_catalog_reset },
 	{ "catalog_edit",	fyai_cmd_catalog_edit },
 	{ "catalog_update",	fyai_cmd_catalog_update },
+	{ "auth_accounts",	fyai_cmd_auth_accounts },
 	{ "auth_status",	fyai_cmd_auth_status },
 	{ "auth_usage",		fyai_cmd_auth_usage },
 	{ "auth_login",		fyai_cmd_auth_login },
 	{ "auth_logout",	fyai_cmd_auth_logout },
+	{ "view_apply",		fyai_cmd_view_apply },
+	{ "view_diff",		fyai_cmd_view_diff },
+	{ "view_remove",	fyai_cmd_view_remove },
+	{ "view_ls",		fyai_cmd_view_ls },
+	{ "undo",		fyai_cmd_undo },
+	{ "view_rm",		fyai_cmd_view_rm },
+	{ "view_cp",		fyai_cmd_view_cp },
+	{ "view_fs",		fyai_cmd_view_fs },
+	{ "view_sync",		fyai_cmd_view_sync },
+	{ "view_mount",		fyai_cmd_view_mount },
+	{ "view_unmount",	fyai_cmd_view_unmount },
+	{ "view_create",	fyai_cmd_view_create },
+	{ "view_update",	fyai_cmd_view_update },
+	{ "view_show",		fyai_cmd_view_show },
+	{ "view_list",		fyai_cmd_view_list },
+	{ "view_enter",		fyai_cmd_view_enter },
 };
 
 static const struct {
@@ -127,6 +160,7 @@ static const struct {
 	fyai_cmd_prepare_fn fn;
 } cmd_earlies[] = {
 	{ "resume",		fyai_cmd_resume_early },
+	{ "transport",		fyai_cmd_transport_early },
 };
 
 static const struct {
@@ -355,6 +389,51 @@ const char *fyai_cmd_registry_why(void)
 const char *fyai_cmd_surface_name(enum fyai_cmd_surface surface)
 {
 	return surface == FYAI_CMD_SESSION ? "session" : "cli";
+}
+
+static int defs_cmp_key(const void *a, const void *b, const char *key)
+{
+	fy_generic va = fy_get(*(const fy_generic *)a, key, fy_invalid);
+	fy_generic vb = fy_get(*(const fy_generic *)b, key, fy_invalid);
+	const char *sa = fy_str(va), *sb = fy_str(vb);
+
+	return strcmp(sa ? sa : "", sb ? sb : "");
+}
+
+#ifndef __APPLE__
+static int defs_cmp(const void *a, const void *b, void *arg)
+{
+	return defs_cmp_key(a, b, arg);
+}
+#define defs_sort(_base, _n, _key) \
+	qsort_r((_base), (_n), sizeof(fy_generic), defs_cmp, (void *)(_key))
+#else
+/* macOS takes the argument first, in the call and in the comparator. */
+static int defs_cmp(void *arg, const void *a, const void *b)
+{
+	return defs_cmp_key(a, b, arg);
+}
+#define defs_sort(_base, _n, _key) \
+	qsort_r((_base), (_n), sizeof(fy_generic), (void *)(_key), defs_cmp)
+#endif
+
+fy_generic *fyai_cmd_defs_sorted(fy_generic list, const char *key, size_t *np)
+{
+	fy_generic item, *arr;
+	size_t n = 0, i = 0;
+
+	fy_foreach(item, list)
+		n++;
+	arr = malloc((n ? n : 1) * sizeof(*arr));
+	fyai_error_check(NULL, arr, err_out, "cannot allocate a command list");
+	fy_foreach(item, list)
+		arr[i++] = item;
+	defs_sort(arr, n, key);
+	*np = n;
+	return arr;
+err_out:
+	*np = 0;
+	return NULL;
 }
 
 bool fyai_cmd_def_on(fy_generic def, fy_generic inherited,
@@ -833,6 +912,17 @@ static int parse_args(struct fyai_cmd_parse_state *st, size_t i)
 	npos = 0;
 	for (; i < st->nwords; i++) {
 		w = st->words[i];
+		cp = fyai_cmd_prop_positional(props, n, npos);
+		if (cp && cp->rest && cp->array) {
+			if (!strcmp(w, "--"))
+				i++;
+			for (j = i; j < st->nwords; j++) {
+				if (prop_value(st->gb, cp, st->words[j], &value) ||
+				    parse_set(st, cp, value))
+					return -1;
+			}
+			break;
+		}
 		if (!opts_done && !strcmp(w, "--")) {
 			opts_done = true;
 			continue;
@@ -1886,6 +1976,16 @@ int fyai_cmd_session_run(struct fyai_ctx *ctx, const char *line, bool *viewp)
 	return rc ? -1 : 0;
 err:
 	return -1;
+}
+
+bool fyai_cmd_session_input(struct fyai_ctx *ctx, const char *line)
+{
+	struct fyai_cmd_call *call = ctx->cmd_call;
+
+	if (!call || call->done || !call->input)
+		return false;
+	call->input(call, line);
+	return true;
 }
 
 bool fyai_cmd_session_step(struct fyai_ctx *ctx)

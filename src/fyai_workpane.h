@@ -161,14 +161,19 @@ void fyai_workpane_destroy(struct fyai_workpane_manager *wm);
  */
 struct fytim_workpane *fyai_workpane_acquire(struct fyai_workpane_manager *wm);
 struct response_buffer;
+struct fyai_page_layout;
 /*
  * Append the pane as an fy-grid of tile slots to @out (NULL to size it only):
  * the tiles in the cells the layout gives them, the zoomed tile alone, at
  * @height rows or, for zero, the rows the tiles ask for within the pane
- * ceiling. *@rowsp receives the rows. Returns 0, or non-zero with no tile.
+ * ceiling. With a side @lay the tiles stand in a column of its pane columns,
+ * each a panel of its tile rows, beside a cell that holds the slot @lead.
+ * *@rowsp receives the rows. Returns 0, or non-zero with no tile.
  */
 int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 			    const char *sep, int sep_cols,
+			    const struct fyai_page_layout *lay,
+			    const char *lead,
 			    struct response_buffer *out, int *rowsp);
 /* The pane while a tile holds it, or NULL. Borrowed. */
 struct fytim_workpane *fyai_workpane_pane(const struct fyai_workpane_manager *wm);
@@ -295,6 +300,16 @@ int fyai_workpane_tile_set_head(struct fyai_workpane_manager *wm,
  */
 int fyai_workpane_page_tiles(const struct fyai_workpane_manager *wm,
 			     struct fyai_page_tile *tiles, int max);
+/*
+ * Scroll the tile of text in the page slot @slot by @delta rows toward the
+ * start of its content, or by @delta pages. It stays on the rows it shows
+ * while the content grows, until it is back at the end. Returns false when
+ * @slot is not a tile of text.
+ */
+bool fyai_workpane_band_scroll(struct fyai_workpane_manager *wm,
+			       unsigned int slot, int delta, bool pages);
+/* Return every tile of text to the end of its content. */
+void fyai_workpane_bands_follow(struct fyai_workpane_manager *wm);
 /* Record what the page gave the screen of @sf in its last frame. */
 void fyai_workpane_tile_set_page_grant(struct fyai_workpane_manager *wm,
 				       const struct fytim_surface *sf,
@@ -310,6 +325,10 @@ void fyai_workpane_band_set_page_grant(struct fyai_workpane_manager *wm,
 bool fyai_workpane_band_page_grant(const struct fyai_workpane_manager *wm,
 				   const struct fytim_workband *band, int *rows,
 				   int *cols);
+/* The page slot of the tile of @sf into *@slotp; false for no such tile. */
+bool fyai_workpane_surface_slot(const struct fyai_workpane_manager *wm,
+				const struct fytim_surface *sf,
+				unsigned int *slotp);
 /* The surface of the tile in the page slot "tile:@slot", or NULL. */
 struct fytim_surface *
 fyai_workpane_slot_surface(const struct fyai_workpane_manager *wm,

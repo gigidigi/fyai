@@ -247,7 +247,7 @@ for action in ('accept', 'decline', 'cancel', 'disconnect', 'unsupported'):
     project = Path(tempfile.mkdtemp(prefix='m4-question-', dir=fixtures))
     tool = {'id': 'call_ask_1', 'type': 'function', 'function': {
         'name': 'ask_user', 'arguments': json.dumps({
-            'question': 'Proceed with the mock plan?', 'options': ['yes', 'no']})}}
+            'questions': [{'header': 'Plan', 'question': 'Proceed with the mock plan?', 'options': [{'label': 'yes', 'description': 'The yes choice'}, {'label': 'no', 'description': 'The no choice'}]}]})}}
     server = make_server(tool, 'User said yes, proceeding.')
     try:
         p = Peer()
@@ -275,6 +275,11 @@ for action in ('accept', 'decline', 'cancel', 'disconnect', 'unsupported'):
         result = p.until(3)
         if action == 'accept':
             assert result.get('result', {}).get('stopReason') == 'end_turn', result
+            requests = [json.loads(line) for line in (project / "requests.jsonl").read_text().splitlines()]
+            tool_reply = next(m for m in requests[-1]["body"]["messages"] if m["role"] == "tool")
+            answer = json.loads(tool_reply["content"])["answers"][0]
+            assert answer["selected"] == ["yes"] and answer["labels"] == ["yes"], answer
+            assert "other" not in answer, answer
         else:
             assert 'result' in result or 'error' in result, result
             requests = [json.loads(line) for line in (project / 'requests.jsonl').read_text().splitlines()]

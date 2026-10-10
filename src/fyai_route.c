@@ -386,7 +386,8 @@ fy_generic fyai_route_price_usage(struct fyai_ctx *ctx, fy_generic usage)
 	if (fy_is_invalid(usage))
 		return usage;
 	reported = fy_get(usage, "cost_source", fy_invalid);
-	if (fy_equal(reported, "provider"))
+	if (fy_equal(reported, "provider") ||
+	    fy_equal(reported, "catalogue_estimate"))
 		return usage;
 	priced = route_prices(ctx, ctx->cfg->provider, ctx->cfg->model,
 			      ctx->cfg->api_mode, ctx->cfg->api_url,
@@ -397,6 +398,7 @@ fy_generic fyai_route_price_usage(struct fyai_ctx *ctx, fy_generic usage)
 		(double)fy_get(usage, "output", 0LL) * output_price) /
 		1000000.0;
 	usage = fy_assoc(ctx->transient_gb, usage, "cost", cost);
+	usage = fy_assoc(ctx->transient_gb, usage, "est", true);
 	usage = fy_assoc(ctx->transient_gb, usage, "price_input_usd_per_million",
 			 input_price);
 	usage = fy_assoc(ctx->transient_gb, usage, "price_output_usd_per_million",

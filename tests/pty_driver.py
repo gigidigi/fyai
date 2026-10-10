@@ -229,7 +229,7 @@ def check_after_script(after_script, snapshot):
     that describes the symptom and not the misspelled step. Worse, a
     dropped step silently changes what the case proves.
     """
-    kinds = ("send", "raw", "resize", "wait", "wait-frame", "wait-gone", "wait-screen",
+    kinds = ("send", "raw", "resize", "wait", "wait-frame", "wait-ready", "wait-gone", "wait-screen",
              "wait-repaint", "wait-row",
              "wait-copy", "frame", "drain", "settle", "snapshot", "release",
              "signal", "click")
@@ -344,6 +344,7 @@ def main():
     #   wait:TEXT   read until TEXT is on the capture
     #   release:PATH     create a file to release a held fixture
     #   wait-frame:TEXT  require TEXT after the last action and a frame end
+    #   wait-ready       wait for a new terminal probe and a ready UI frame
     #   wait-screen:TEXT read until TEXT is on the screen, or on a row that
     #               scrolled off it or that an erase of the display removed
     #               since the last action: a row the output took away within
@@ -679,9 +680,16 @@ def main():
                 with open(snapshot, "wb") as fp:
                     fp.write(data)
                 snapshot_taken = True
-            elif kind in ("wait", "wait-frame"):
+            elif kind in ("wait", "wait-frame", "wait-ready"):
                 needle = value.encode()
                 def matched():
+                    if kind == "wait-ready":
+                        probe = data.find(DA1_QUERY, action_start)
+                        if probe < 0:
+                            return False
+                        ready = data.find(ready_needle, probe + len(DA1_QUERY))
+                        return (ready >= 0 and
+                                data.find(FRAME_END, ready) >= 0)
                     if kind == "wait":
                         return needle in data
                     start = data.find(needle, action_start)

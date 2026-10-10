@@ -12,6 +12,7 @@ copies with OSC 52.
 
 import base64
 import binascii
+import os
 import re
 import sys
 
@@ -47,6 +48,11 @@ class Screen:
         self.pending = b""
         # The text of each OSC 52 copy, in the order the terminal took it.
         self.clipboard = []
+        # $FYAI_PTY_EMOJI_VS=narrow plays a terminal that draws an emoji
+        # base with U+FE0F in one column, as VTE does: the selector joins
+        # the cell before it. Otherwise it takes a cell of its own, and the
+        # emoji two columns, as most terminals draw it.
+        self.emoji_vs_narrow = os.environ.get("FYAI_PTY_EMOJI_VS") == "narrow"
 
     def display(self):
         return ["".join(r).rstrip() for r in self.grid]
@@ -159,8 +165,11 @@ class Screen:
                 if len(data) - i < length:
                     self.pending = data[i:]
                     return
-                ch = data[i:i + length]
-                self._put(ch.decode("utf-8", "replace"))
+                ch = data[i:i + length].decode("utf-8", "replace")
+                if ch == "\ufe0f" and self.emoji_vs_narrow and self.col > 0:
+                    self.grid[self.row][self.col - 1] += ch
+                else:
+                    self._put(ch)
                 i += length
                 continue
             i += 1

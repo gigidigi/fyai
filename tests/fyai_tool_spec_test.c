@@ -16,6 +16,10 @@
 
 #include "fyai.h"
 #include "fyai_tool_spec.h"
+#include "fyai_tool_template.h"
+#include "fyai_tool_registry.h"
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "fyai_test_registry.h"
 
@@ -23,6 +27,8 @@ FYAI_TEST_ENTRY(tools, descriptions, tools_descriptions)
 FYAI_TEST_ENTRY(tools, filtered, tools_filtered)
 FYAI_TEST_ENTRY(tools, personas, tools_personas)
 FYAI_TEST_ENTRY(tools, cache, tools_cache)
+FYAI_TEST_ENTRY(tools, templates, tools_templates)
+FYAI_TEST_ENTRY(tools, registry, tools_registry)
 
 static struct fyai_cfg test_cfg;
 static struct fyai_ctx test_ctx;
@@ -137,15 +143,15 @@ static void test_descriptions(void)
 	require(fy_equal(
 		fy_get(fy_get(fy_get(fy_get(fy_get(
 			tool_by_name(tools, "ask_user"), "function"),
-			"parameters"), "properties"), "options"), "type"),
-		"array"), "ask_user.options type");
+			"parameters"), "properties"), "questions"), "type"),
+		"array"), "ask_user.questions type");
 	require(fy_equal(
 		fy_get(fy_get(fy_get(fy_get(fy_get(fy_get(
 			tool_by_name(tools, "ask_user"), "function"),
-			"parameters"), "properties"), "options"), "items"),
+			"parameters"), "properties"), "questions"), "items"),
 		"type"),
-		"string"),
-		"ask_user.options items");
+		"object"),
+		"ask_user.questions items");
 }
 
 static void test_filtered(void)
@@ -253,4 +259,165 @@ int tools_personas(void)
 int tools_cache(void)
 {
 	return tools_run(test_cache);
+}
+
+/* Every {{name}} in the embedded tools is a name that has a value. */
+static void template_names_known(fy_generic tree)
+{
+	fy_generic key, item;
+	const char *text, *open, *close, *name;
+	char buffer[64];
+	size_t length;
+
+	if (fy_is_string(tree)) {
+		text = fy_castp(&tree, "");
+		for (open = strstr(text, "{{"); open; open = strstr(close + 2, "{{")) {
+			close = strstr(open + 2, "}}");
+			require(close, "an unclosed {{ in a tool description");
+			length = (size_t)(close - open - 2);
+			require(length < sizeof(buffer), "a placeholder name is too long");
+			memcpy(buffer, open + 2, length);
+			buffer[length] = '\0';
+			require(fyai_tool_template_state(&test_ctx, buffer),
+				"a tool description names an unknown placeholder");
+		}
+	} else if (fy_is_mapping(tree)) {
+		fy_foreach_key_value(name, item, tree)
+			template_names_known(item);
+	} else if (fy_is_sequence(tree)) {
+		fy_foreach(item, tree)
+			template_names_known(item);
+	}
+	(void)key;
+}
+
+static bool template_has(fy_generic tree, const char *needle)
+{
+	fy_generic item;
+	const char *name;
+
+	if (fy_is_string(tree))
+		return strstr(fy_castp(&tree, ""), needle) != NULL;
+	if (fy_is_mapping(tree)) {
+		fy_foreach_key_value(name, item, tree)
+			if (template_has(item, needle))
+				return true;
+	} else if (fy_is_sequence(tree)) {
+		fy_foreach(item, tree)
+			if (template_has(item, needle))
+				return true;
+	}
+	return false;
+}
+
+static void test_templates(void)
+{
+#ifdef __linux__
+	char root[] = "/tmp/fyai-tool-template-XXXXXX", arena[256];
+#endif
+	fy_generic tools, agent;
+
+	template_names_known(make_tools(&test_ctx));
+
+	/* A run that cannot isolate says nothing of it, and offers no tool for it. */
+	tools = make_tools_filtered(&test_ctx);
+	require(!template_has(tools, "{{"), "a placeholder was not expanded");
+	require(!template_has(tools, "templates"), "the templates are sent to the provider");
+	require(!template_has(tools, "private copy"), "isolation is described but unavailable");
+	require(fy_is_invalid(tool_by_name(tools, "project_view")), "project_view is offered");
+	agent = tool_by_name(tools, "agent");
+	require(!fy_is_valid(fy_get(fy_get(fy_get(fy_get(agent, "function"), "parameters"),
+					   "properties"), "isolated")),
+		"the isolated parameter is offered");
+
+#ifdef __linux__
+	/* With an arena in the project, isolation is optional, or on. */
+	require(mkdtemp(root) != NULL, "mkdtemp");
+	snprintf(arena, sizeof(arena), "%s/.fyai", root);
+	require(!mkdir(arena, 0700), "mkdir .fyai");
+	snprintf(arena, sizeof(arena), "%s/.fyai/arena", root);
+	require(!mkdir(arena, 0700), "mkdir arena");
+	test_cfg.arena_dir = arena;
+	test_cfg.config_generation++;
+	tools = make_tools_filtered(&test_ctx);
+	require(template_has(tools, "set `isolated` to true"), "the optional text is missing");
+	require(!template_has(tools, "isolated by default"), "the default text is present");
+	require(fy_is_valid(tool_by_name(tools, "project_view")), "project_view is missing");
+
+	test_cfg.config_doc = fy_mapping(test_ctx.gb, "agent",
+					 fy_mapping(test_ctx.gb, "isolation", "view"));
+	test_cfg.config_generation++;
+	tools = make_tools_filtered(&test_ctx);
+	require(template_has(tools, "isolated by default"), "the enabled text is missing");
+	require(!template_has(tools, "{{"), "a placeholder was not expanded");
+
+	test_cfg.arena_dir = NULL;
+	require(!rmdir(arena), "remove the arena directory");
+	snprintf(arena, sizeof(arena), "%s/.fyai", root);
+	require(!rmdir(arena), "remove .fyai");
+	require(!rmdir(root), "remove the project");
+#endif
+}
+
+int tools_templates(void)
+{
+	return tools_run(test_templates);
+}
+
+/* Every tool of data/tools.yaml is registered with all that it needs. */
+static void test_registry(void)
+{
+	fy_generic tools = make_tools(&test_ctx);
+	const struct fyai_tool_def *def, *other;
+	fy_generic tool, gname;
+	const char *name;
+	size_t i, j;
+
+	fy_foreach(tool, tools) {
+		gname = fy_get(fy_get(tool, "function"), "name");
+		name = fy_castp(&gname, "");
+		def = fyai_tool_find(name);
+		if (!def) {
+			fprintf(stderr, "tool '%s' is not registered\n", name);
+			fail("a tool of tools.yaml has no registry entry");
+		}
+		require(def->run || def->run_text, "a tool needs a run function");
+		require(def->head || (def->flags & FYAI_TOOL_SILENT),
+			"a tool needs a head or must be silent");
+	}
+
+	/* The entries are unique, named, and hosted ones have no local run. */
+	for (i = 0; (def = fyai_tool_at(i)); i++) {
+		require(def->name && *def->name, "an entry needs a name");
+		require(!(def->flags & FYAI_TOOL_HOSTED) ||
+			(!def->run && !def->run_text),
+			"a hosted tool is run by the provider");
+		for (j = i + 1; (other = fyai_tool_at(j)); j++)
+			require(strcmp(def->name, other->name),
+				"a tool is registered twice");
+	}
+
+	/* A call that reads the tables of the parent never runs in a job. */
+	for (i = 0; i < 4; i++) {
+		static const char *const parent[] = {
+			"agent_input", "cancel", "shell_close", "time",
+		};
+
+		require(fyai_tool_has(parent[i], FYAI_TOOL_PARENT),
+			"a tool of the parent runs in a job");
+		require(fyai_tool_find(parent[i])->effect !=
+			FYAI_TOOL_EFFECT_NONE || !strcmp(parent[i], "time"),
+			"a tool that ends processes needs an ordering class");
+	}
+	/* A wait stays in the parent unless it waits for an event. */
+	require(fyai_tool_find("wait")->in_parent, "wait needs an in_parent test");
+	/* The wire name of the shell finds the shell. */
+	require(fyai_tool_find("exec_command") == fyai_tool_find("shell"),
+		"the wire name of the shell must find it");
+	require(!fyai_tool_find("no_such_tool"), "an unknown name has no entry");
+}
+
+int tools_registry(void)
+{
+	return tools_run(test_registry);
 }

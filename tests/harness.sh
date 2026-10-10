@@ -97,6 +97,10 @@ fyai_test_cleanup() {
 		fi
 	fi
 	mock_stop_quiet
+	if [ -n "${FYAI_VIEW_SCRATCH:-}" ]; then
+		rmdir "$FYAI_VIEW_SCRATCH" || { echo "FAIL: view scratch cleanup" >&2; exit 1; }
+		FYAI_VIEW_SCRATCH=""
+	fi
 	if [ -n "$TEST_DIR" ]; then
 		fyai_sanitizer_report
 		rm -rf "$TEST_DIR"
@@ -166,9 +170,19 @@ fyai_test_setup_bare() {
 	# Treat undefined behavior as a fatal sanitizer finding.
 	export UBSAN_OPTIONS="${UBSAN_OPTIONS:+$UBSAN_OPTIONS:}log_path=$TEST_DIR/sanitizer.log:print_stacktrace=1:halt_on_error=1"
 
+	# FYAI_TEST_TRANSPORT=level-b (or auto) runs every case with credential
+	# isolation on, as the compatibility gate of the transport.
+	if [ -n "${FYAI_TEST_TRANSPORT:-}" ]; then
+		export FYAI_TRANSPORT_ISOLATION="$FYAI_TEST_TRANSPORT"
+	else
+		unset FYAI_TRANSPORT_ISOLATION || true
+	fi
+
 	export HOME="$TEST_DIR/home"
 	export XDG_STATE_HOME="$TEST_DIR/home/.local/state"
 	export XDG_CONFIG_HOME="$TEST_DIR/home/.config"
+	# System keyrings are shared across private HOME and XDG directories.
+	export FYAI_AUTH_STORAGE=file
 	mkdir -p "$HOME"
 	unset OPENAI_API_KEY OPENROUTER_API_KEY DEEPSEEK_API_KEY ANTHROPIC_API_KEY \
 	      GOOGLE_API_KEY || true
@@ -182,8 +196,10 @@ fyai_test_setup() {
 	# The arena states the display a case runs under. The shipped defaults
 	# are the page on the alternate screen with the mouse taken; a case
 	# that tests them selects them, and every other case reads its output
-	# from the scrollback of the terminal.
-	printf 'display:\n  markdown: false\n  renderer: stack\n  screen: inline\n  work_controls: none\n  work_zoom_rows: full\n' > config.yaml
+	# from the scrollback of the terminal. Slash-command output and the live
+	# output of a call go to the pane, which most cases read; a case of the
+	# transcript selects it.
+	printf 'display:\n  markdown: false\n  screen: inline\n  work_controls: none\n  work_zoom_rows: full\n  command_output: pane\n  tool_display: pane\n' > config.yaml
 	${FYAI_VALGRIND} "$FYAI_BIN" init >/dev/null 2>&1 || fail "fyai init"
 	rm -f config.yaml
 }
@@ -399,4 +415,12 @@ assert_state_absent() {
 pass() {
 	echo "PASS: $(basename "$0")"
 	exit 0
+}
+
+# A view mounts over its scratch root, so keep it away from the build libraries.
+fyai_test_view_scratch() {
+	if [ -z "${FYAI_VIEW_SCRATCH:-}" ]; then
+		FYAI_VIEW_SCRATCH="$(mktemp -d "$FYAI_TMPDIR_BASE/fyai-view-scratch-XXXXXX")" || exit 99
+	fi
+	export TMPDIR="$FYAI_VIEW_SCRATCH"
 }

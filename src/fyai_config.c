@@ -21,9 +21,15 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 
 #include <libfyaml/libfyaml-blake3.h>
 
+#include "fyai_transport_boot.h"
 #include "fyai_sink.h"
 #include "fyai_catalog.h"
 #include "fyai_branch.h"
@@ -38,7 +44,192 @@
 #include "fyai_storage.h"
 #include "commands.h"
 #include "fyai_cmd.h"
+#include "fyai_fsview.h"
 #include "utils.h"
+
+#define FYAI_RELOAD_FD_ENV "FYAI_RELOAD_FD"
+
+/* The descriptor carries invocation state without putting credentials in argv. */
+static fy_generic config_reload_read(struct fyai_cfg *cfg)
+{
+	struct response_buffer buf = {0};
+	fy_generic state = fy_invalid;
+	const char *fd_text;
+	char chunk[4096];
+	char *end;
+	size_t size;
+	ssize_t n = -1;
+	long fd;
+	bool failed = false;
+	int rc;
+
+	fd_text = getenv(FYAI_RELOAD_FD_ENV);
+	if (!fd_text)
+		return fy_invalid;
+	fd = strtol(fd_text, &end, 10);
+	if (!*fd_text || *end || fd < 3 || fd > INT_MAX) {
+		fyai_cfg_error(cfg, "reload: invalid state descriptor");
+		unsetenv(FYAI_RELOAD_FD_ENV);
+		return fy_invalid;
+	}
+	unsetenv(FYAI_RELOAD_FD_ENV);
+	for (;;) {
+		n = read((int)fd, chunk, sizeof(chunk));
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		size = buf.len + (size_t)n;
+		if (size > (16U << 20)) {
+			fyai_cfg_error(cfg, "reload: saved state exceeds 16 MiB");
+			failed = true;
+			break;
+		}
+		rc = response_buffer_append_data(&buf, chunk, (size_t)n);
+		if (rc) {
+			fyai_cfg_error(cfg, "reload: cannot read saved state");
+			failed = true;
+			break;
+		}
+	}
+	close((int)fd);
+	if (n < 0)
+		fyai_cfg_error(cfg, "reload: cannot read saved state: %s",
+			       strerror(errno));
+	if (!failed && n == 0 && buf.data)
+		state = parse_json_string(cfg->gb, buf.data);
+	free(buf.data);
+	if (!fy_is_mapping(state))
+		fyai_cfg_error(cfg, "reload: invalid saved state");
+	return state;
+}
+
+/* The handoff must not put an explicit API key in a filesystem object. */
+static FILE *config_reload_file(struct fyai_cfg *cfg)
+{
+	FILE *fp;
+#ifdef __linux__
+	int fd;
+
+	(void)cfg;
+	fd = memfd_create("fyai-reload", MFD_CLOEXEC);
+	if (fd < 0)
+		return NULL;
+	fp = fdopen(fd, "w+");
+	if (!fp)
+		close(fd);
+#else
+	if (cfg->reload_key) {
+		errno = ENOTSUP;
+		return NULL;
+	}
+	fp = tmpfile();
+#endif
+	return fp;
+}
+
+int fyai_config_reload_exec(struct fyai_cfg *cfg)
+{
+	const char *argv[13];
+	const char *text;
+	fy_generic config, session, state;
+	FILE *fp;
+	char fd_text[32], arena_text[32];
+	int fd, flags, rc, argc;
+	size_t len;
+
+	if (!cfg->reload_branch || !cfg->reload_config ||
+	    !cfg->reload_session || !cfg->reload_arena) {
+		fyai_cfg_error(cfg, "reload: incomplete saved state");
+		return -1;
+	}
+	config = parse_json_string(cfg->gb, cfg->reload_config);
+	session = parse_json_string(cfg->gb, cfg->reload_session);
+	if (!fy_is_mapping(config) || !fy_is_valid(session)) {
+		fyai_cfg_error(cfg, "reload: cannot restore the saved configuration");
+		return -1;
+	}
+	state = fy_mapping(cfg->gb,
+		"config", config, "session", session,
+		"arena", cfg->reload_arena,
+		"key", cfg->reload_key ? fy_value(cfg->gb, cfg->reload_key) :
+			fy_null);
+	text = emit_json_string(cfg->gb, state);
+	if (!text) {
+		fyai_cfg_error(cfg, "reload: cannot build the saved state");
+		return -1;
+	}
+	len = strlen(text);
+	if (len > (16U << 20)) {
+		fyai_cfg_error(cfg, "reload: saved state exceeds 16 MiB");
+		return -1;
+	}
+	fp = config_reload_file(cfg);
+	if (!fp) {
+		fyai_cfg_error(cfg, "reload: cannot create a state file: %s",
+			       strerror(errno));
+		return -1;
+	}
+	fd = fileno(fp);
+	flags = fcntl(fd, F_GETFD);
+	if (flags < 0)
+		goto file_error;
+	rc = fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+	if (rc < 0)
+		goto file_error;
+	if (fwrite(text, 1, len, fp) != len)
+		goto file_error;
+	rc = fflush(fp);
+	if (rc)
+		goto file_error;
+	rc = fseek(fp, 0, SEEK_SET);
+	if (rc)
+		goto file_error;
+	snprintf(fd_text, sizeof(fd_text), "%d", fd);
+	rc = setenv(FYAI_RELOAD_FD_ENV, fd_text, 1);
+	if (rc) {
+		fyai_cfg_error(cfg, "reload: cannot pass the state file: %s",
+			       strerror(errno));
+		fclose(fp);
+		return -1;
+	}
+	argc = 0;
+	argv[argc++] = "fyai";
+	if (cfg->view_project) {
+		argv[argc++] = "--view-project";
+		argv[argc++] = cfg->view_project;
+		argv[argc++] = "--view-scratch";
+		argv[argc++] = cfg->view_scratch;
+	}
+	if (cfg->view_arena_fd >= 0) {
+		snprintf(arena_text, sizeof(arena_text), "%d", cfg->view_arena_fd);
+		argv[argc++] = "--view-arena-fd";
+		argv[argc++] = arena_text;
+		if (fyai_fsview_arena_pass(cfg)) {
+			fyai_cfg_error(cfg, "reload: cannot pass the arena of the view: %s",
+				       strerror(errno));
+			unsetenv(FYAI_RELOAD_FD_ENV);
+			fclose(fp);
+			return -1;
+		}
+	}
+	argv[argc++] = "-b";
+	argv[argc++] = cfg->reload_branch;
+	argv[argc++] = "-i";
+	argv[argc] = NULL;
+	fyai_exec_self(argv);
+	fyai_cfg_error(cfg, "reload: cannot execute this binary: %s",
+		       strerror(errno));
+	unsetenv(FYAI_RELOAD_FD_ENV);
+	fclose(fp);
+	return -1;
+
+file_error:
+	fyai_cfg_error(cfg, "reload: cannot prepare the state file: %s",
+		       strerror(errno));
+	fclose(fp);
+	return -1;
+}
 
 /* FYAI_EMBEDDED_CONFIG_SCHEMA[] / FYAI_EMBEDDED_CONFIG_SCHEMA_LEN - the
  * vendored data/config.schema.yaml, generated at configure time. */
@@ -156,6 +347,9 @@ static int resolve_secret(struct fyai_cfg *cfg, const char **out, fy_generic v)
 	if (!*name)
 		return -1;
 	if (fy_equal(fy_get(v, "type"), "secret")) {
+		/* Under isolation only the transport reads the secret store. */
+		if (fyai_transport_supervised())
+			return -1;
 		key_name = fy_sprintfa("fyai:%s", name);
 		rc = fyai_secret_kernel_get(key_name, &secret, &len);
 		if (rc != FYAI_SECRET_OK)
@@ -176,6 +370,49 @@ static int resolve_secret(struct fyai_cfg *cfg, const char **out, fy_generic v)
 }
 
 /*
+ * The policy of the lockdown profile: the keys of sandbox_lockdown over the
+ * default, which denies the secret locations of the platform and supported
+ * TCP and UDP operations. The result lives in the builder of the configuration.
+ */
+static fy_generic sandbox_lockdown_policy(struct fyai_cfg *cfg, fy_generic root)
+{
+	fy_generic set = fy_get(root, "sandbox_lockdown", fy_invalid);
+	fy_generic deny = fy_get(set, "deny", fy_invalid);
+	fy_generic allow = fy_get(set, "allow", fy_invalid);
+	fy_generic net = fy_get(set, "network", fy_invalid);
+	fy_generic tcp, udp;
+
+	if (!fy_is_sequence(deny))
+		deny = fy_sequence(cfg->gb, "~/.ssh");
+	if (!fy_is_mapping(net))
+		net = fy_mapping(cfg->gb);
+	tcp = fy_get(net, "tcp", fy_invalid);
+	udp = fy_get(net, "udp", fy_invalid);
+	if (!fy_is_mapping(tcp))
+		tcp = fy_mapping(cfg->gb);
+	if (!fy_is_mapping(udp))
+		udp = fy_mapping(cfg->gb);
+	tcp = fy_mapping(cfg->gb,
+			 "ports", fy_get(tcp, "ports", fy_sequence(cfg->gb)),
+			 "bind_ports", fy_get(tcp, "bind_ports", fy_sequence(cfg->gb)));
+	udp = fy_mapping(cfg->gb,
+			 "ports", fy_get(udp, "ports", fy_sequence(cfg->gb)),
+			 "bind_ports", fy_get(udp, "bind_ports", fy_sequence(cfg->gb)));
+	net = fy_mapping(cfg->gb, "tcp", tcp, "udp", udp);
+	if (!fy_is_sequence(allow))
+		allow = fy_sequence(cfg->gb);
+	return fy_mapping(cfg->gb, "enabled", true, "deny", deny, "allow", allow,
+			  "network", net);
+}
+
+void fyai_config_sandbox_lockdown(struct fyai_cfg *cfg)
+{
+	cfg->sandbox_lockdown = true;
+	cfg->sandbox = sandbox_lockdown_policy(cfg, cfg->config_doc);
+	cfg->enable_sandbox = true;
+}
+
+/*
  * Overlay the keys present in @root onto @cfg. Absent keys leave the
  * existing value untouched, so each layer only overrides what it sets.
  *
@@ -184,6 +421,7 @@ static int resolve_secret(struct fyai_cfg *cfg, const char **out, fy_generic v)
 int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 {
 	fy_generic v, sb, tbv, shell, retry, secret_ref, zoom_rows, preview_width;
+	fy_generic rtype, rname;
 
 	if (fy_is_invalid(root))
 		return 0;
@@ -194,10 +432,19 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 	if (fy_is_mapping(secret_ref)) {
 		if (fy_equal(fy_get(secret_ref, "type"), "auto")) {
 			cfg->api_key = NULL;
+			cfg->api_key_ref = NULL;
 			cfg->api_key_auto = true;
 			cfg->api_key_explicit = false;
 		} else {
+			rtype = fy_get(secret_ref, "type", fy_invalid);
+			rname = fy_get(secret_ref, "value", fy_invalid);
+
 			cfg->api_key = NULL;
+			cfg->api_key_ref = NULL;
+			if (fy_is_string(rtype) && fy_is_string(rname))
+				cfg->api_key_ref = fy_gb_intern_string(cfg->gb,
+					fy_sprintfa("%s:%s", fy_castp(&rtype, ""),
+						    fy_castp(&rname, "")));
 			cfg->api_key_auto = false;
 			cfg->api_key_explicit = true;
 			(void)resolve_secret(cfg, &cfg->api_key, secret_ref);
@@ -233,7 +480,9 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 		fy_get(root, "parallel_tool_calls_prompt",
 		       cfg->parallel_tool_calls_prompt);
 	cfg->api_url = fy_get(root, "api_url", cfg->api_url);
-	cfg->arena_dir = fy_get(root, "arena_dir", cfg->arena_dir);
+	cfg->arena_dir = cfg->view_arena ?
+		cfg->view_arena :
+		fy_get(root, "arena_dir", cfg->arena_dir);
 
 	cfg->temperature = fy_get(root, "temperature",
 				cfg->temperature);
@@ -286,6 +535,13 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 				cfg->agent_timeout_ms);
 	cfg->agent_max_timeout_ms = fy_get(fy_get(root, "agent"),
 				"max_timeout_ms", cfg->agent_max_timeout_ms);
+	cfg->agent_hang_timeout_ms = fy_get(fy_get(root, "agent"),
+				"hang_timeout_ms", cfg->agent_hang_timeout_ms);
+	cfg->agent_timeout_kill = apply_bool(fy_get(root, "agent"),
+				"timeout_kill", cfg->agent_timeout_kill);
+	cfg->agent_transport_isolation = fy_gb_intern_string(cfg->gb,
+		fy_get(fy_get(root, "agent"), "transport_isolation",
+		       cfg->agent_transport_isolation));
 	cfg->agent_max_live_agents = fy_get(fy_get(root, "agent"),
 				"max_live_agents", cfg->agent_max_live_agents);
 	cfg->agent_max_branch_depth = fy_get(fy_get(root, "agent"),
@@ -306,12 +562,21 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 					       cfg->enable_builtin_shell);
 	/* sandbox is either a bool (enable with defaults) or a mapping
 	 * { enabled, allow, deny, network }. A mapping enables unless it says
-	 * otherwise and is retained for the tool path to read grants from. */
+	 * otherwise and is retained for the tool path to read grants from. The
+	 * lockdown profile replaces it and is always enabled. */
+	v = fy_get(root, "sandbox_profile", fy_invalid);
+	if (fy_is_string(v))
+		cfg->sandbox_lockdown = fy_equal(v, "lockdown");
 	sb = fy_get(root, "sandbox");
-	if (fy_is_mapping(sb)) {
+	if (cfg->sandbox_lockdown) {
+		cfg->sandbox = sandbox_lockdown_policy(cfg, root);
+		cfg->enable_sandbox = true;
+	} else if (fy_is_mapping(sb)) {
 		cfg->sandbox = sb;
 		cfg->enable_sandbox = apply_bool(sb, "enabled", true);
 	} else {
+		if (fy_is_valid(sb))
+			cfg->sandbox = fy_invalid;
 		cfg->enable_sandbox = apply_bool(root, "sandbox",
 				cfg->enable_sandbox);
 	}
@@ -377,6 +642,8 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 		cfg->conversation_logging = apply_bool(v, "conversation",
 						       cfg->conversation_logging);
 		cfg->mcp_logging = apply_bool(v, "mcp", cfg->mcp_logging);
+		cfg->transport_logging = apply_bool(v, "transport",
+						    cfg->transport_logging);
 	}
 
 	v = fy_get(root, "branch");
@@ -493,6 +760,8 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 			cfg->table_border = 0;
 		cfg->tool_preview_lines = fy_get(v, "tool_preview_lines",
 						cfg->tool_preview_lines);
+		cfg->tool_history_lines = fy_get(v, "tool_history_lines",
+						 cfg->tool_history_lines);
 		cfg->session_margin = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "session_margin", cfg->session_margin));
 		/* Intern work-pane strings beyond the document lifetime. */
@@ -504,18 +773,40 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 			fy_get(v, "editor", cfg->editor_mode));
 		cfg->completion_mode = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "completion", cfg->completion_mode));
+		cfg->chord_timeout_ms = (int)fy_get(v, "chord_timeout_ms",
+						    (long long)cfg->chord_timeout_ms);
 		cfg->command_output = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "command_output", cfg->command_output));
+		cfg->command_bg = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "command_bg", cfg->command_bg));
+		cfg->command_bg_mix = (int)fy_get(v, "command_bg_mix",
+						  (long long)cfg->command_bg_mix);
+		cfg->tool_display = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "tool_display", cfg->tool_display));
+		cfg->inline_terminal_rows = fy_get(v, "inline_terminal_rows",
+						   cfg->inline_terminal_rows);
 		cfg->focus_bg = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "focus_bg", cfg->focus_bg));
+		cfg->focus_mark = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "focus_mark", cfg->focus_mark));
 		cfg->focus_bg_mix = (int)fy_get(v, "focus_bg_mix",
 						(long long)cfg->focus_bg_mix);
 		cfg->work_columns = fy_get(v, "work_columns",
 					   cfg->work_columns);
+		cfg->work_panels = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "work_panels", cfg->work_panels));
+		cfg->page_layout = fy_gb_intern_string(cfg->gb,
+			fy_get(v, "page_layout", cfg->page_layout));
+		cfg->work_panel_cols = fy_get(v, "work_panel_cols",
+					      cfg->work_panel_cols);
+		cfg->work_panel_rows = fy_get(v, "work_panel_rows",
+					      cfg->work_panel_rows);
 		cfg->work_min_tile_cols = fy_get(v, "work_min_tile_cols",
 						 cfg->work_min_tile_cols);
 		cfg->work_history_rows = fy_get(v, "work_history_rows",
 						cfg->work_history_rows);
+		cfg->work_open_delay_ms = fy_get(v, "work_open_delay_ms",
+						cfg->work_open_delay_ms);
 		cfg->work_max_rows = fy_get(v, "work_max_rows",
 					    cfg->work_max_rows);
 		zoom_rows = fy_get(v, "work_zoom_rows", fy_invalid);
@@ -536,8 +827,6 @@ int fyai_config_apply(struct fyai_cfg *cfg, fy_generic root)
 			fy_get(v, "tile_sep", cfg->tile_sep));
 		cfg->work_controls = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "work_controls", cfg->work_controls));
-		cfg->renderer = fy_gb_intern_string(cfg->gb,
-			fy_get(v, "renderer", cfg->renderer));
 		cfg->page_path = fy_gb_intern_string(cfg->gb,
 			fy_get(v, "page", cfg->page_path));
 		cfg->screen = fy_gb_intern_string(cfg->gb,
@@ -723,7 +1012,9 @@ static int env_apply_line(char *line, fy_generic names, const char *path,
 		return -1;
 	}
 
-	if (env_name_allowed(names, key))
+	/* A supervisor holds no credential: the transport has the keys. */
+	if (env_name_allowed(names, key) &&
+	    !(fyai_transport_supervised() && fyai_env_is_credential(key)))
 		setenv(key, val, 1);
 	return 0;
 }
@@ -1036,15 +1327,21 @@ int fyai_config_load(struct fyai_cfg *cfg,
 	gb = cfg->gb;
 
 	root_explicit = fy_invalid;
-	user_path = user_config_path();
-	rc = parse_config_file(gb, user_path, &root_user);
-	free(user_path);
-	if (rc)
-		return -1;
+	root_user = fy_invalid;
+	if (!fy_is_mapping(cfg->reload_state)) {
+		user_path = user_config_path();
+		rc = parse_config_file(gb, user_path, &root_user);
+		free(user_path);
+		if (rc)
+			return -1;
+	}
 
 	/* Load the catalogue and selected branch configuration. */
 	branch = NULL;
-	if (fyai_peek_arena_config(NULL, cfg->branch_explicit ? cfg->branch : NULL,
+	if (fyai_peek_arena_config(cfg->view_arena ? cfg->view_arena :
+				   fy_is_mapping(cfg->reload_state) ?
+				   cfg->arena_dir : NULL,
+				   cfg->branch_explicit ? cfg->branch : NULL,
 				   cfg->root_spec, gb, &root_repo, &cfg->catalog,
 				   &branch, &cfg->root_ref))
 		return -1;
@@ -1093,10 +1390,18 @@ int fyai_config_load(struct fyai_cfg *cfg,
 	 * an explicit --config merged on top. One document, one apply pass;
 	 * `config effective` emits it verbatim.
 	 */
-	cfg->config_doc = config_merge(gb,
-				       fy_is_valid(root_repo) ?
-						root_repo : root_user,
-				       root_explicit);
+	cfg->config_doc = fy_is_mapping(cfg->reload_state) ?
+		fy_get(cfg->reload_state, "config", fy_invalid) :
+		config_merge(gb, fy_is_valid(root_repo) ? root_repo : root_user,
+			     root_explicit);
+	if (fy_is_mapping(cfg->reload_state) && !fy_is_mapping(cfg->config_doc)) {
+		fyai_cfg_error(cfg, "reload: invalid saved configuration");
+		return -1;
+	}
+	if (fy_is_mapping(cfg->reload_state) &&
+	    fyai_config_validate_document(cfg, cfg->config_doc,
+					  "reload config"))
+		return -1;
 	if (fyai_config_apply(cfg, cfg->config_doc))
 		return -1;
 
@@ -1854,6 +2159,77 @@ int fyai_config_import(struct fyai_ctx *ctx, const char *path)
 	return 0;
 }
 
+int fyai_config_reset(struct fyai_ctx *ctx)
+{
+	fy_generic report, doc = fy_map_empty;
+
+	if (!ctx->gb) {
+		fyai_error(ctx, "no arena; run fyai init");
+		return -1;
+	}
+	/* An empty document takes every default of the schema. */
+	report = fyai_config_validate_report(ctx->cfg, doc, "config");
+	if (config_report_commit(report, &doc))
+		return -1;
+	if (fyai_publish_root(ctx, doc, fy_invalid, fy_invalid))
+		return -1;
+	/* The settings of this session go too: the defaults are the whole
+	 * configuration. */
+	ctx->cfg->config_session = fy_invalid;
+	return 0;
+}
+
+/* The bound on the ref-log entries an undo walks. */
+#define FYAI_CONFIG_UNDO_WALK_MAX 100000
+
+int fyai_config_undo(struct fyai_ctx *ctx, long long n, long long *foundp)
+{
+	struct fyai_branch b;
+	fy_generic last, config, report;
+	const char *name = fyai_ctx_branch(ctx);
+	long long changes = 0, walked = 0;
+
+	*foundp = 0;
+	if (!ctx->gb) {
+		fyai_error(ctx, "no arena; run fyai init");
+		return -1;
+	}
+	if (n < 1) {
+		fyai_error(ctx, "config undo: the count must be 1 or more");
+		return -1;
+	}
+	if (!fyai_branch_lookup(ctx->arena_branches, name, &b)) {
+		fyai_error(ctx, "config undo: no branch '%s'", name);
+		return -1;
+	}
+	/*
+	 * Walk the ref log back and count each change of the configuration;
+	 * an entry that moved only the head does not count.
+	 */
+	last = fy_get(b.store, "config", fy_invalid);
+	config = fy_invalid;
+	while (changes < n && walked++ < FYAI_CONFIG_UNDO_WALK_MAX &&
+	       fyai_branch_decode(b.prev, &b)) {
+		config = fy_get(b.store, "config", fy_invalid);
+		if (!fy_is_mapping(config) || !fy_is_mapping(last) ||
+		    fy_compare(config, last) != 0) {
+			changes++;
+			last = config;
+		}
+	}
+	*foundp = changes;
+	if (changes < n || !fy_is_mapping(config)) {
+		fyai_error(ctx, "config undo: branch %s has %lld earlier "
+			   "configuration%s, not %lld", name, changes,
+			   changes == 1 ? "" : "s", n);
+		return -1;
+	}
+	report = fyai_config_validate_report(ctx->cfg, config, "config");
+	if (config_report_commit(report, &config))
+		return -1;
+	return fyai_publish_root(ctx, config, fy_invalid, fy_invalid);
+}
+
 static fy_generic config_emit_yaml(struct fy_generic_builder *gb, fy_generic v)
 {
 	return fy_gb_emit(gb, v, FYAI_YAML_EMIT_FLAGS, NULL);
@@ -2319,7 +2695,7 @@ err_out:
 int fyai_config_adopt_arena(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
-	fy_generic doc;
+	fy_generic doc, key;
 
 	if (!cfg || !cfg->gb || !fy_is_valid(ctx->arena_config))
 		return -1;
@@ -2329,7 +2705,24 @@ int fyai_config_adopt_arena(struct fyai_ctx *ctx)
 	 * and the session layer is above them. */
 	doc = config_merge(cfg->gb, ctx->arena_config, cfg->config_doc);
 	doc = config_merge(cfg->gb, doc, cfg->config_session);
-	return config_rederive_doc(ctx, doc);
+	if (config_rederive_doc(ctx, doc))
+		return -1;
+	/* An explicit key is invocation state, not a member of the branch store. */
+	if (fy_is_mapping(cfg->reload_state)) {
+		key = fy_get(cfg->reload_state, "key", fy_invalid);
+		if (fy_is_string(key) && *fy_castp(&key, "")) {
+			cfg->api_key = fy_gb_intern_string(cfg->gb,
+							fy_castp(&key, ""));
+			if (!cfg->api_key) {
+				fyai_cfg_error(cfg, "reload: cannot retain API key");
+				return -1;
+			}
+			cfg->api_key_ref = "mem:cli";
+			cfg->api_key_explicit = true;
+			cfg->api_key_auto = false;
+		}
+	}
+	return 0;
 }
 
 void fyai_config_set_defaults(struct fyai_cfg *cfg)
@@ -2349,6 +2742,11 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->agent_spawn = DEFAULT_AGENT_SPAWN;
 	cfg->agent_max_live_agents = 16;
 	cfg->agent_max_timeout_ms = DEFAULT_AGENT_MAX_TIMEOUT_MS;
+	cfg->agent_hang_timeout_ms = DEFAULT_AGENT_HANG_TIMEOUT_MS;
+	cfg->agent_timeout_kill = true;
+	cfg->agent_transport_isolation = "none";
+	cfg->transport_ctl_fd = -1;
+	cfg->view_arena_fd = -1;
 	cfg->retry_max_attempts = DEFAULT_RETRY_MAX_ATTEMPTS;
 	cfg->retry_initial_delay_ms = DEFAULT_RETRY_INITIAL_DELAY_MS;
 	cfg->retry_max_delay_ms = DEFAULT_RETRY_MAX_DELAY_MS;
@@ -2368,17 +2766,29 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->shell_hard_max_output_tokens =
 		DEFAULT_SHELL_HARD_MAX_OUTPUT_TOKENS;
 	cfg->tool_preview_lines = DEFAULT_TOOL_PREVIEW_LINES;
+	cfg->tool_history_lines = DEFAULT_TOOL_HISTORY_LINES;
 	cfg->session_margin = FYAI_SESSION_MARGIN;
 	cfg->work_layout = DEFAULT_WORK_LAYOUT;
 	cfg->work_position = DEFAULT_WORK_POSITION;
 	cfg->editor_mode = DEFAULT_EDITOR_MODE;
 	cfg->completion_mode = DEFAULT_COMPLETION_MODE;
+	cfg->chord_timeout_ms = DEFAULT_CHORD_TIMEOUT_MS;
 	cfg->command_output = DEFAULT_COMMAND_OUTPUT;
+	cfg->command_bg = DEFAULT_COMMAND_BG;
+	cfg->command_bg_mix = DEFAULT_COMMAND_BG_MIX;
+	cfg->tool_display = DEFAULT_TOOL_DISPLAY;
+	cfg->focus_mark = DEFAULT_FOCUS_MARK;
+	cfg->inline_terminal_rows = DEFAULT_INLINE_TERMINAL_ROWS;
 	cfg->focus_bg = DEFAULT_FOCUS_BG;
 	cfg->focus_bg_mix = DEFAULT_FOCUS_BG_MIX;
 	cfg->work_columns = 0;
+	cfg->work_panels = DEFAULT_WORK_PANELS;
+	cfg->page_layout = DEFAULT_PAGE_LAYOUT;
+	cfg->work_panel_cols = 0;
+	cfg->work_panel_rows = 0;
 	cfg->work_min_tile_cols = DEFAULT_WORK_MIN_TILE_COLS;
 	cfg->work_history_rows = DEFAULT_WORK_HISTORY_ROWS;
+	cfg->work_open_delay_ms = DEFAULT_WORK_OPEN_DELAY_MS;
 	cfg->work_max_rows = 0;
 	cfg->work_zoom_rows = DEFAULT_WORK_ZOOM_ROWS;
 	cfg->work_zoom_fixed_rows = 0;
@@ -2387,7 +2797,6 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->tile_frame = DEFAULT_TILE_FRAME;
 	cfg->tile_sep = DEFAULT_TILE_SEP;
 	cfg->work_controls = DEFAULT_WORK_CONTROLS;
-	cfg->renderer = DEFAULT_RENDERER;
 	cfg->page_path = "";
 	cfg->screen = DEFAULT_SCREEN;
 	cfg->recap_exchanges = DEFAULT_RECAP_EXCHANGES;
@@ -2407,6 +2816,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->stream_logging = false;
 	cfg->conversation_logging = false;
 	cfg->mcp_logging = false;
+	cfg->transport_logging = false;
 	cfg->whitewash_api_keys = true;
 	/* This is an opt-in because provider-side response retention is lossy. */
 	cfg->response_chain = false;
@@ -2415,7 +2825,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 		DEFAULT_MARKDOWN_UPDATE_INTERVAL_MS;
 	cfg->color = DEFAULT_COLOR;
 	cfg->theme = DEFAULT_THEME;
-	cfg->theme_ground = "theme";
+	cfg->theme_ground = "terminal";
 	cfg->theme_variant = NULL;
 	cfg->markdown_theme = NULL;
 	cfg->turn_separator = DEFAULT_TURN_SEPARATOR;
@@ -2437,6 +2847,7 @@ void fyai_config_set_defaults(struct fyai_cfg *cfg)
 	cfg->catalog = fy_invalid;
 	cfg->catalog_src = fy_invalid_value;
 	cfg->config_doc = fy_invalid;
+	cfg->reload_state = fy_invalid;
 	cfg->sandbox = fy_invalid;
 	cfg->mcp_enabled = false;
 	cfg->mcp_startup_wait = true;
@@ -2457,6 +2868,11 @@ void fyai_config_cleanup(struct fyai_cfg *cfg)
 	/* Drains whatever no earlier boundary reported. */
 	fyai_diag_cleanup(&cfg->diag);
 	free(cfg->branch);
+	free(cfg->reload_branch);
+	free(cfg->reload_config);
+	free(cfg->reload_session);
+	free(cfg->reload_key);
+	free(cfg->reload_arena);
 	free(cfg->root_spec);
 	free(cfg->terminal_input);
 	markdown_palettes_destroy(cfg);
@@ -2476,6 +2892,9 @@ enum {
 	OPT_TRANSIENT,
 	OPT_VERSION,
 	OPT_ROOT,
+	OPT_VIEW_PROJECT,
+	OPT_VIEW_SCRATCH,
+	OPT_VIEW_ARENA_FD,
 };
 
 static const struct option long_options[] = {
@@ -2487,6 +2906,9 @@ static const struct option long_options[] = {
 	{ "api-key", required_argument, NULL, 'k' },
 	{ "branch", required_argument, NULL, 'b' },
 	{ "root", required_argument, NULL, OPT_ROOT },
+	{ "view-project", required_argument, NULL, OPT_VIEW_PROJECT },
+	{ "view-scratch", required_argument, NULL, OPT_VIEW_SCRATCH },
+	{ "view-arena-fd", required_argument, NULL, OPT_VIEW_ARENA_FD },
 	{ "sandbox", no_argument, NULL, OPT_SANDBOX },
 	{ "color", required_argument, NULL, OPT_COLOR },
 	{ "theme", required_argument, NULL, OPT_THEME },
@@ -2508,8 +2930,8 @@ static const struct option long_options[] = {
  * (openai -> OPENAI_API_KEY, openrouter -> OPENROUTER_API_KEY). Interned into
  * @gb (deduped, so stored once); returns NULL only when @name is too long.
  */
-static const char *provider_env_key(struct fy_generic_builder *gb,
-				    const char *name)
+const char *fyai_config_provider_env_key(struct fy_generic_builder *gb,
+					 const char *name)
 {
 	char buf[128];
 	size_t i;
@@ -2674,7 +3096,7 @@ int fyai_config_resolve_model(struct fyai_cfg *cfg)
 	 */
 	if (cfg->api_key_auto && (!cfg->api_key || !*cfg->api_key) &&
 	    cfg->provider && *cfg->provider) {
-		env = provider_env_key(cfg->gb, cfg->provider);
+		env = fyai_config_provider_env_key(cfg->gb, cfg->provider);
 		if (env) {
 			val = getenv(env);
 			if (val && *val)
@@ -2683,6 +3105,7 @@ int fyai_config_resolve_model(struct fyai_cfg *cfg)
 		secret_name = fy_sprintfa("fyai:api-key/%s", cfg->provider);
 
 		if ((!cfg->api_key || !*cfg->api_key) &&
+		    !fyai_transport_supervised() &&
 		    fyai_secret_kernel_get(secret_name, &secret, &secret_len) == FYAI_SECRET_OK) {
 			cfg->api_key = fy_gb_intern_string(cfg->gb, secret);
 			fyai_secret_clear_and_free(&secret, &secret_len);
@@ -2933,6 +3356,9 @@ static int config_parse_set_option(struct fyai_cfg *cfg, int argc, char *argv[])
 static int config_parse_cli_options(struct fyai_cfg *cfg, int argc, char *argv[],
 				    struct config_cli_options *options)
 {
+	struct stat st;
+	char *end;
+	long fd;
 	int opt;
 
 	options->config = NULL;
@@ -3024,6 +3450,26 @@ static int config_parse_cli_options(struct fyai_cfg *cfg, int argc, char *argv[]
 			if (config_queue_op(cfg, 'd', optarg, NULL, true, true))
 				return -1;
 			break;
+		case OPT_VIEW_PROJECT:
+			cfg->view_project = fy_gb_intern_string(cfg->gb, optarg);
+			break;
+		case OPT_VIEW_SCRATCH:
+			cfg->view_scratch = fy_gb_intern_string(cfg->gb, optarg);
+			break;
+		case OPT_VIEW_ARENA_FD:
+			errno = 0;
+			fd = strtol(optarg, &end, 10);
+			if (errno || !*optarg || *end || fd < 3 || fd > INT_MAX ||
+			    fstat((int)fd, &st) || !S_ISDIR(st.st_mode)) {
+				fyai_cfg_error(cfg, "view: '%s' names no arena directory", optarg);
+				return -1;
+			}
+			if (fyai_fsview_arena_adopt(cfg, (int)fd)) {
+				fyai_cfg_error(cfg, "view: cannot adopt the arena descriptor %ld: %s",
+					       fd, strerror(errno));
+				return -1;
+			}
+			break;
 		case OPT_ROOT:
 			if (fyai_cfg_set_root(cfg, optarg))
 				return -1;
@@ -3082,6 +3528,7 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 {
 	struct fy_generic_builder_cfg gb_cfg;
 	struct config_cli_options cli;
+	fy_generic doc, session, key;
 	int rc, arg_index;
 	char *def_arena_dir = NULL;
 	const char *verb = NULL;
@@ -3109,6 +3556,16 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 
 	fyai_config_set_defaults(cfg);
 	cfg->config_session = fy_invalid;
+	if (getenv(FYAI_RELOAD_FD_ENV)) {
+		cfg->reload_state = config_reload_read(cfg);
+		if (!fy_is_mapping(cfg->reload_state))
+			goto err_out;
+		cfg->arena_dir = fy_get(cfg->reload_state, "arena", "");
+		if (!cfg->arena_dir || !*cfg->arena_dir) {
+			fyai_cfg_error(cfg, "reload: missing arena path");
+			goto err_out;
+		}
+	}
 
 	rc = config_parse_cli_options(cfg, argc, argv, &cli);
 	if (rc > 0) {
@@ -3157,6 +3614,39 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 	rc = fyai_config_load(cfg, cli.config, cli.env);
 	if (rc)
 		goto err_out;
+	if (fy_is_mapping(cfg->reload_state)) {
+		doc = fy_get(cfg->reload_state, "config", fy_invalid);
+		session = fy_get(cfg->reload_state, "session", fy_invalid);
+		key = fy_get(cfg->reload_state, "key", fy_invalid);
+		if (!fy_is_mapping(doc) ||
+		    (fy_is_valid(session) && !fy_is_null(session) &&
+		     !fy_is_mapping(session)) ||
+		    (fy_is_valid(key) && !fy_is_null(key) &&
+		     !fy_is_string(key))) {
+			fyai_cfg_error(cfg, "reload: invalid configuration handoff");
+			goto err_out;
+		}
+		if (fy_is_mapping(session)) {
+			cfg->config_session = session;
+			if (fyai_config_validate_document(cfg,
+				config_merge(cfg->gb, doc, session),
+				"reload session config"))
+				goto err_out;
+			if (fyai_config_apply(cfg, session))
+				goto err_out;
+		}
+		if (fy_is_string(key) && *fy_castp(&key, "")) {
+			cfg->api_key = fy_gb_intern_string(cfg->gb,
+							fy_castp(&key, ""));
+			if (!cfg->api_key) {
+				fyai_cfg_error(cfg, "reload: cannot retain API key");
+				goto err_out;
+			}
+			cfg->api_key_ref = "mem:cli";
+			cfg->api_key_explicit = true;
+			cfg->api_key_auto = false;
+		}
+	}
 
 	/*
 	 * Fold pending --set edits into this run before model/theme resolution,
@@ -3169,6 +3659,7 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 	 * intent, including a pending --set api_key operation. */
 	if (cli.api_key) {
 		cfg->api_key = cli.api_key;
+		cfg->api_key_ref = "mem:cli";
 		cfg->api_key_explicit = true;
 		cfg->api_key_auto = false;
 	}
@@ -3241,6 +3732,7 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 		prompt = NULL;
 		if (stdin_prompt) {
 			prompt = read_all_stdin();
+			cfg->stdin_consumed = true;
 			if (!prompt) {
 				fyai_cfg_error(cfg, "failed to read prompt from stdin");
 				goto err_out;
@@ -3251,6 +3743,15 @@ int fyai_config_setup(struct fyai_cfg *cfg, int argc, char *argv[])
 				fyai_cfg_error(cfg, "Out of memory");
 				goto err_out;;
 			}
+		}
+		/*
+		 * A session started again on a fresh view has had its first prompt already.
+		 * The mark is for this process alone: a program that the session runs does not inherit it.
+		 */
+		if (getenv("FYAI_SESSION_RESTART")) {
+			unsetenv("FYAI_SESSION_RESTART");
+			free(prompt);
+			prompt = NULL;
 		}
 		cfg->prompt = fy_gb_intern_string(cfg->gb, prompt ? prompt : "");
 		free(prompt);

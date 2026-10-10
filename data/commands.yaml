@@ -52,6 +52,23 @@ global:
         type: string
         description: read one exact state by root handle (read-only)
         x-fyai-meta: HANDLE
+      view-project:
+        type: string
+        description: use this project root in an internal view child
+        x-fyai-meta: DIR
+        x-fyai-hidden: true
+      view-scratch:
+        type: string
+        description: use this scratch directory in an internal view child
+        x-fyai-meta: DIR
+        x-fyai-hidden: true
+      view-arena-fd:
+        type: integer
+        minimum: 3
+        maximum: 2147483647
+        description: use the arena behind this inherited descriptor in an internal view child
+        x-fyai-meta: FD
+        x-fyai-hidden: true
       set:
         type: array
         items: {type: string}
@@ -202,6 +219,33 @@ commands:
           type: boolean
           description: write the whole reference as the manual page fyai(1)
           x-fyai-surfaces: [cli]
+
+  - command: render
+    title: render Markdown in the terminal
+    description: |
+      Read Markdown from a file, or from standard input when no file is
+      given or the file is `-`, and write it with the renderer of fyai: the
+      theme, the tables, the fenced code, and the `mermaid` diagrams of the
+      display configuration. With `display/markdown` off, the source is
+      written as it is.
+    surfaces: [cli]
+    handler: render
+    flags: [no-storage]
+    examples:
+      - args: render README.md
+        text: show a file as the conversation shows an answer
+      - args: render - <<< '# Title'
+        text: render Markdown from standard input
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        file:
+          type: string
+          description: the Markdown file (default standard input)
+          x-fyai-positional: 0
+          x-fyai-meta: FILE
+          x-fyai-complete: file
 
   - command: branch
     title: list, create, and manage branches
@@ -506,7 +550,9 @@ commands:
           x-fyai-meta: MODEL
           x-fyai-complete: model
     render:
-      message: "model: {model} (provider {provider}, api {api})"
+      message:
+        - "model: {model} (provider {provider}, api {api})"
+        - "cache miss: {cache}"
 
   - command: init
     title: create the arena in this directory
@@ -723,12 +769,17 @@ commands:
     title: move the head of the branch to a reference
     description: |
       Move the head of the current branch to REF. The previous head stays
-      in the ref log as `<branch>@{1}`.
+      in the ref log as `<branch>@{1}`. With view/track_project the project
+      files also go back to the state that REF recorded. A path that changed
+      since the state of the head was recorded is a conflict: nothing is
+      changed and the reset fails. `--force` takes the recorded state over
+      such paths, and records the project as it is first, so that a reset to
+      `<branch>@{1}` undoes the reset.
     surfaces: [cli, session]
     handler: reset
     see_also: [refs, checkout]
     render:
-      message: "{branch} is now at {ref} ({turns} turns); the previous head is {previous}"
+      message: "{branch} is now at {ref} ({turns} turns); the previous head is {previous}{project_note}"
     examples:
       - args: reset HEAD~2
         text: drop the last exchange
@@ -737,6 +788,11 @@ commands:
       required: [ref]
       additionalProperties: false
       properties:
+        force:
+          type: boolean
+          default: false
+          description: take the recorded project state over paths that changed
+          x-fyai-long: force
         ref:
           type: string
           minLength: 1
@@ -989,15 +1045,24 @@ commands:
           description: join branches that have no common base
 
   - command: gc
-    title: collect the garbage of the arena
+    title: collect the garbage of the arena and of the project storage
     description: |
       Compact the arena. `--keep-reflogs N` also cuts the ref log to the
-      last N entries.
+      last N entries; `--tips` is `--keep-reflogs 1`: each branch keeps only
+      its tip, with the project state and the views of the tip, and the
+      older entries and everything only they reached go. Then remove, from the project storage (`.fyai` of a
+      project), the manifests, the blobs and the view trees that no branch
+      reaches: the project states of the ref log, the views that a branch
+      stores, and the base of a delta manifest. A file younger than `--grace`
+      seconds stays, because a capture that made it can still record it, and so
+      does a storage that a command holds. A removed view or a ref-log entry
+      that was cut frees its files at the next gc.
     surfaces: [cli]
     handler: gc
     render:
       message:
         - "gc: compacted {arena}{?compacted}"
+        - "gc: project storage: {project}{?compacted}"
         - "gc: no arena at {arena}{?missing}"
     flags: [no-storage]
     arguments:
@@ -1009,6 +1074,18 @@ commands:
           minimum: 1
           description: keep only the last N ref-log entries
           x-fyai-meta: N
+        tips:
+          type: boolean
+          default: false
+          description: keep only the tip of each branch and the views it stores, and drop every ref log
+          x-fyai-long: tips
+        grace:
+          type: integer
+          minimum: 0
+          default: 3600
+          description: keep the files of the project storage that are younger than this many seconds
+          x-fyai-long: grace
+          x-fyai-meta: SECONDS
 
   - command: export
     title: write the conversation in the textual export format
@@ -1042,7 +1119,9 @@ commands:
     title: control the trace logs
     description: |
       Show, start, stop, clear, or view the logs under .fyai/logs. TARGET is
-      wire, stream, conversation, mcp, or all.
+      wire, stream, conversation, mcp, transport, or all. The logs never hold a
+      credential: the values of key headers, bearer tokens, and the key itself
+      are whited out when they are written.
     surfaces: [cli, session]
     default: show
     arguments:
@@ -1051,7 +1130,7 @@ commands:
       properties:
         target:
           type: string
-          enum: [wire, stream, conversation, mcp, all]
+          enum: [wire, stream, conversation, mcp, transport, all]
           default: all
           description: the log
           x-fyai-positional: 0
@@ -1062,7 +1141,7 @@ commands:
         description: Show which logs are on.
         handler: log
         render:
-          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}"
+          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}, transport {transport}"
         while_busy: run
       - command: start
         aliases: ["on"]
@@ -1070,7 +1149,7 @@ commands:
         description: Start writing the log.
         handler: log
         render:
-          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}"
+          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}, transport {transport}"
         while_busy: run
       - command: stop
         aliases: ["off"]
@@ -1078,7 +1157,7 @@ commands:
         description: Stop writing the log.
         handler: log
         render:
-          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}"
+          message: "logging: wire {wire}, stream {stream}, conversation {conversation}, mcp {mcp}, transport {transport}"
         while_busy: run
       - command: clear
         title: empty the log
@@ -1301,6 +1380,39 @@ commands:
         render:
           message: "config: imported {file}"
 
+      - command: reset
+        title: return to the built-in configuration
+        description: |
+          Store an empty configuration on the branch, so every key takes
+          its built-in default, and drop the settings that this session
+          changed. The previous configuration stays in the ref log;
+          `config undo` returns to it.
+        handler: config_reset
+        render:
+          message: "config: reset to the built-in defaults"
+
+      - command: undo
+        title: return to an earlier configuration
+        description: |
+          Store the configuration that the branch had N changes ago, 1 by
+          default. A ref-log entry that moved only the conversation is not
+          a change. The undo is a change itself: a second `config undo`
+          returns to where the first started.
+        handler: config_undo
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            count:
+              type: integer
+              minimum: 1
+              default: 1
+              description: the configuration changes to go back
+              x-fyai-positional: 0
+              x-fyai-meta: N
+        render:
+          message: "config: returned {count} change(s) back"
+
       - command: export
         title: write the configuration to a file
         description: |
@@ -1366,6 +1478,470 @@ commands:
               x-fyai-positional: 0
               x-fyai-meta: PATH
               x-fyai-complete: config-path
+
+  - command: view
+    title: create and enter separate project filesystem views
+    description: |
+      Capture a project into immutable CAS objects and use a separate writable
+      OverlayFS view. Commands in a view do not apply changes to the host.
+      The initial Linux implementation materializes an ordinary-file baseline.
+    surfaces: [cli, session]
+    default: list
+    commands:
+      - command: create
+        title: capture a project and create a named view
+        description: |
+          Capture PROJECT, excluding its reserved .fyai directory, and record
+          a named view on the active branch. Reject unsupported metadata and
+          observed concurrent changes. No provider credential is required.
+          The names that start with agent/ belong to the views of sub-agents;
+          a view cannot be created there.
+        handler: view_create
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            durability:
+              type: string
+              enum: [lazy, durable]
+              description: select lazy persistence or a durable filesystem barrier; default from view/durability
+              x-fyai-long: durability
+              x-fyai-meta: POLICY
+            copy_git_objects:
+              type: boolean
+              default: false
+              description: copy Git object bytes instead of borrowing host inodes
+              x-fyai-long: copy-git-objects
+            debug:
+              type: boolean
+              default: false
+              description: show capture progress and the final summary
+              x-fyai-long: debug
+            quiet:
+              type: boolean
+              default: false
+              description: suppress debug progress and the summary unless an output format is requested
+              x-fyai-long: quiet
+            verify:
+              type: boolean
+              default: false
+              description: independently verify copied bytes and hashes serially before publication
+              x-fyai-long: verify
+            name:
+              type: string
+              description: the name of the separate view
+              pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+            project:
+              type: string
+              description: the project directory to capture
+              default: '.'
+              x-fyai-positional: 1
+              x-fyai-meta: PROJECT
+              x-fyai-complete: dir
+        render:
+          document: yaml
+      - command: list
+        title: list the filesystem views of the active branch
+        description: List view names, projects, and states; use --full for stored details.
+        handler: view_list
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            full:
+              type: boolean
+              default: false
+              description: show complete stored view records
+              x-fyai-long: full
+        render:
+          table:
+            title: Filesystem views
+            empty: no views
+            keys: [name, project, state]
+      - command: show
+        title: inspect a named filesystem view
+        description: Show a view's baseline and latest recorded result identity.
+        handler: view_show
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:
+              type: string
+              description: the name of the view to inspect
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+        render:
+          document: yaml
+      - command: update
+        title: replace a view with a fresh host snapshot
+        description: |
+          Capture the host project again and replace the named view with a fresh
+          baseline and empty upper. Discard the view's changes without changing
+          the host project. Refuse the update while the view is in use.
+        handler: view_update
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            durability:
+              type: string
+              enum: [lazy, durable]
+              description: select lazy persistence or a durable filesystem barrier; update inherits the view policy
+              x-fyai-long: durability
+              x-fyai-meta: POLICY
+            copy_git_objects:
+              type: boolean
+              default: false
+              description: copy Git object bytes instead of borrowing host inodes
+              x-fyai-long: copy-git-objects
+            debug:
+              type: boolean
+              default: false
+              description: show capture progress and the final summary
+              x-fyai-long: debug
+            quiet:
+              type: boolean
+              default: false
+              description: suppress debug progress and the summary unless an output format is requested
+              x-fyai-long: quiet
+            verify:
+              type: boolean
+              default: false
+              description: independently verify copied bytes and hashes serially before publication
+              x-fyai-long: verify
+            name:
+              type: string
+              description: the name of the view to replace
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+        render:
+          document: yaml
+      - command: diff
+        title: compare recorded filesystem view snapshots
+        description: |
+          Compare NAME's baseline and recorded result, or the recorded results
+          of NAME and OTHER. Name a view as NAME:PATH to compare only that path
+          and what is beneath it, in the way that `view ls`, `view cp` and
+          `view rm` name a path. The path need not exist on both sides: a file
+          that was added or removed is selected too. NAME and OTHER can also be a reference such as
+          HEAD~1 or main@{2}: it stands for the project state that its ref-log
+          entry recorded (see view/track_project). A reference alone is compared
+          with the head of the branch. Skip .git and .fyai. Show a unified patch, including
+          binary changes, or a changed-path list with --stat. Output formats
+          return structured content and metadata changes with the patch.
+        handler: view_diff
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:
+              type: string
+              description: the view or reference to compare
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+            other:
+              type: string
+              description: compare against the recorded result of this view or reference
+              x-fyai-positional: 1
+              x-fyai-meta: OTHER
+              x-fyai-complete: view
+            unified:
+              type: boolean
+              default: false
+              description: write unified rows, coloured on a terminal
+              x-fyai-short: u
+            stat:
+              type: boolean
+              default: false
+              description: list changed paths instead of emitting a unified patch
+              x-fyai-long: stat
+        render:
+          message: '{patch}'
+      - command: apply
+        title: apply the changes of a view to the project
+        description: |
+          Take the changes that NAME recorded, from its baseline to its result,
+          and write them into the project. NAME can be a reference such as
+          main@{2}, which stands for the project state that its ref-log entry
+          recorded; the change is then from BASE, or from the head of the
+          branch, to that state. Name BASE before NAME. A path that the project still has
+          as the baseline had it takes the result. A path that already equals
+          the result is left as it is. A path that the project and the view
+          changed differently is a conflict: it is reported and not changed.
+          Name paths to apply only those and what is beneath them. Skip .git
+          and .fyai. A written file gets the time of the write. The view stays
+          unchanged; update it to compare again.
+        handler: view_apply
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            dry_run:
+              type: boolean
+              default: false
+              description: report what would change and write nothing
+              x-fyai-long: dry-run
+            base:
+              type: string
+              description: the view or reference that the change starts from
+              x-fyai-long: base
+              x-fyai-meta: BASE
+              x-fyai-complete: view
+            name:
+              type: string
+              description: the view or reference whose changes to apply
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+            paths:
+              type: array
+              items: {type: string}
+              description: the paths to apply, relative to the project; omit to apply every change
+              x-fyai-positional: 1
+              x-fyai-rest: true
+              x-fyai-meta: PATH
+        render:
+          document: yaml
+      - command: remove
+        title: remove a named filesystem view
+        description: |
+          Remove the named view from the active branch. Keep CAS objects and
+          cached runtime files for retained history and garbage collection.
+          Refuse removal while a command is using the view or it is mounted.
+        handler: view_remove
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:
+              type: string
+              description: the filesystem view to remove
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+        render:
+          message: 'Removed view {name}.'
+      - command: ls
+        title: list the files of a view
+        description: |
+          List what a view holds, from the result that it recorded: nothing is
+          mounted. Name a path as NAME:PATH, in the way that scp names a file of a
+          host. A directory lists its entries by name, in the order of ls, and a
+          file lists itself; NAME, NAME:/ and NAME:. are the root of the view. As
+          ls does, a name that starts with a dot is left out unless --all is given,
+          which also lists . and .. . A path that the view does not have is an
+          error.
+        handler: view_ls
+        examples:
+          - args: view ls session:src
+            text: list the directory src of the view session
+          - args: view ls -a session:/
+            text: list the root of the view session, the names with a dot included
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [paths]
+          properties:
+            all:
+              type: boolean
+              default: false
+              description: list the names that start with a dot, and . and ..
+              x-fyai-short: a
+            paths:
+              type: array
+              minItems: 1
+              items: {type: string}
+              description: the views and paths to list, as NAME or NAME:PATH
+              x-fyai-positional: 0
+              x-fyai-meta: NAME[:PATH]
+        render:
+          table:
+            title: View files
+            empty: no files
+            keys: [view, dir, name, kind, mode, size]
+      - command: rm
+        title: remove files in a view
+        description: |
+          Remove paths, and what they hold, in a view. Name each as NAME:PATH. The
+          view records the result, so `view apply` removes the same paths from the
+          project. The project is not changed. A path that the view does not have
+          is an error, unless --force. The names .git and .fyai are never removed.
+        handler: view_rm
+        examples:
+          - args: view rm session:build session:doc/old.md
+            text: remove a directory and a file of the view session
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [paths]
+          properties:
+            force:
+              type: boolean
+              default: false
+              description: ignore a path that the view does not have
+              x-fyai-short: f
+              x-fyai-long: force
+            paths:
+              type: array
+              minItems: 1
+              items: {type: string}
+              description: the paths to remove, each as NAME:PATH
+              x-fyai-positional: 0
+              x-fyai-meta: NAME:PATH
+      - command: cp
+        title: copy files between the project and a view
+        description: |
+          Copy paths between the project and a view. Name the view side as NAME:PATH,
+          in the way that scp names a file of a host; the other side is a path of the
+          project, whatever the current directory is. The sources are all of the
+          project, or all of one view, and the destination is the other. A directory
+          is copied with what it holds, and a path that exists is replaced. A
+          destination that ends in a slash, or is . (the top of the project or of the
+          view), is a directory that takes the sources by their names; any other
+          destination is the new name of one source. Copying
+          into a view records the result there, and the project is not changed.
+          Copying to the project replaces its files with no check of what they
+          held; `view apply` is the copy that compares them. Regular files,
+          directories and symbolic links are copied, and the names .git and .fyai
+          are not. A path that begins with a view name and a colon, but is a path
+          of the project, is written with a leading ./
+        handler: view_cp
+        examples:
+          - args: view cp src/main.c session:src/
+            text: put the file of the project in the directory src of the view
+          - args: view cp session:src/main.c src/main.c
+            text: replace the file of the project with the one of the view
+          - args: view cp session:notes.txt .
+            text: copy the file of the view to the top of the project
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [paths]
+          properties:
+            paths:
+              type: array
+              minItems: 2
+              items: {type: string}
+              description: the sources, then the destination
+              x-fyai-positional: 0
+              x-fyai-meta: SOURCE... DESTINATION
+      - command: sync
+        title: force a filesystem view to persistent storage
+        description: |
+          Flush the view's CAS objects and backing files before recording that
+          its current snapshot is synchronized. Keep its configured durability
+          policy. Refuse synchronization while a command is using the view.
+        handler: view_sync
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:
+              type: string
+              description: the filesystem view to synchronize
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+        render:
+          document: yaml
+      - command: mount
+        title: mount a view for read-only inspection
+        description: |
+          Mount the named view at an empty directory for inspection and comparison.
+          The read-only mount persists in the current mount namespace until unmount.
+          Mount privileges are required; rootless inspection can use an explicitly
+          started unshare -Urnm sh session. Unmount before entering or updating.
+        handler: view_mount
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name, path]
+          properties:
+            name:
+              type: string
+              description: the view to inspect
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+            path:
+              type: string
+              description: an empty mount directory, created when absent
+              x-fyai-positional: 1
+              x-fyai-meta: PATH
+              x-fyai-complete: dir
+        render:
+          document: yaml
+      - command: unmount
+        title: unmount the recorded inspection view
+        description: |
+          Verify the recorded namespace, mount IDs, and source before releasing
+          the inspection mount. Busy mounts are retained. Run in the namespace
+          that owns the mount and unmount before leaving a rootless inspection shell.
+        handler: view_unmount
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:
+              type: string
+              description: the mounted view to release
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+        render:
+          document: yaml
+      - command: enter
+        title: enter a private filesystem view
+        description: |
+          Mount the named view in private namespaces and start a shell in its project
+          directory, or execute the remaining command arguments directly. Standard
+          input, output, and error are inherited on the CLI. In a session, open
+          the command or shell in a terminal tile. Record the result in CAS on exit.
+          The host project stays separate. This operation requires Linux user
+          namespaces, OverlayFS, and Landlock.
+        handler: view_enter
+        arguments:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            verify:
+              type: boolean
+              default: false
+              description: independently verify copied bytes and hashes serially before publication
+              x-fyai-long: verify
+            lockdown:
+              type: boolean
+              default: false
+              description: confine the command as a tool of a session under /session lockdown, for this run only
+              x-fyai-long: lockdown
+            name:
+              type: string
+              description: the name of the view to enter
+              x-fyai-positional: 0
+              x-fyai-meta: NAME
+              x-fyai-complete: view
+            command:
+              type: array
+              items: {type: string}
+              description: the command and arguments to execute; omit to start a shell
+              x-fyai-positional: 1
+              x-fyai-rest: true
+              x-fyai-meta: COMMAND
 
   - command: sandbox
     title: show or set the stored sandbox policy
@@ -1719,6 +2295,10 @@ commands:
             title: Authentication
             columns:
               status: {format: humanize}
+              configured_mode: {name: Configured mode}
+              effective_method: {name: Effective method}
+              plan_usage_authorized: {name: Plan usage authorized}
+              client_id: {name: Client registration}
               account_id: {name: Account}
               plan: {name: Subscription}
               expires_at: {name: Token expires}
@@ -1736,6 +2316,10 @@ commands:
             title: Authentication
             columns:
               status: {format: humanize}
+              configured_mode: {name: Configured mode}
+              effective_method: {name: Effective method}
+              plan_usage_authorized: {name: Plan usage authorized}
+              client_id: {name: Client registration}
               account_id: {name: Account}
               plan: {name: Subscription}
               expires_at: {name: Token expires}
@@ -1743,20 +2327,21 @@ commands:
               storage: {name: Credential storage}
 
       - command: usage
-        title: show the live limits and credits
-        description: Fetch and show the live limits and credits of the subscription.
-        flags: [no-storage, transient]
+        title: show recorded usage and subscription settings
+        description: Show selected-conversation token totals and the ChatGPT settings link for account limits and credit permissions.
+        flags: [storage-optional, transient]
         handler: auth_usage
         render:
-          table: {title: OpenAI subscription usage}
+          table: {title: Recorded usage and ChatGPT plan settings}
 
       - command: login
         title: sign in to the subscription
         description: |
-          Sign in with the browser and a loopback callback. `--device-code`
-          uses the device-code flow, `--no-browser` writes the URL and does
-          not start a browser, and `--manual` reads a pasted redirect URL,
-          for a browser on another machine. `^C` or Escape cancels.
+          Register fyai and authorize ChatGPT plan usage with a browser and
+          a loopback callback. Reuse the active registration, select one with
+          `--account`, or add one with `--new-account`. `--no-browser` writes
+          the URL; `--manual` reads a complete pasted redirect URL. Device-code
+          registration is not supported. `^C` or Escape cancels.
         flags: [no-storage, transient]
         handler: auth_login
         mode: async
@@ -1766,22 +2351,44 @@ commands:
           properties:
             device_code:
               type: boolean
-              description: use the headless device-code flow
+              description: reject the unsupported legacy device-code flow
+            account:
+              type: string
+              description: reuse the issued client ID of a saved account
+              x-fyai-meta: CLIENT_ID
+            new_account:
+              type: boolean
+              description: register another ChatGPT account or workspace
             no_browser:
               type: boolean
               description: write the URL and start no browser
             manual:
               type: boolean
-              description: paste the redirect URL back
-              x-fyai-surfaces: [cli]
+              description: paste the complete redirect URL back without a local browser
         render:
           message: "auth: login succeeded"
+
+      - command: accounts
+        title: list saved ChatGPT registrations
+        description: List saved accounts and workspace registrations without tokens.
+        flags: [no-storage, transient]
+        handler: auth_accounts
+        while_busy: run
+        render:
+          table:
+            title: ChatGPT accounts
+            columns:
+              client_id: {name: Client registration}
+              email: {name: Email}
+              subject: {name: Account}
+              active: {name: Active}
+              signed_in: {name: Signed in}
 
       - command: logout
         title: sign out and remove the credentials
         description: |
           Revoke the login when the provider allows it, and remove the local
-          credentials.
+          tokens. Keep the client registration and host ID for later sign-in.
         flags: [no-storage, transient]
         handler: auth_logout
         render:
@@ -1995,12 +2602,84 @@ commands:
           x-fyai-meta: NAME
 
   - command: page
-    title: show the page of the screen and its state
-    description: Show the page document in use, and the state, source, and regions of the last frame.
-    surfaces: [session]
-    handler: page
-    view: true
-    while_busy: run
+    title: show and review the page of the screen
+    description: |
+      Show the page that draws the screen, or paint and name its areas to
+      see which part of the page document draws which rows.
+    surfaces: [cli, session]
+    default: {session: show}
+    commands:
+      - command: show
+        title: show the page of the screen and its state
+        description: Show the page document in use, and the state, source, and regions of the last frame.
+        surfaces: [session]
+        handler: page
+        view: true
+        while_busy: run
+      - command: review
+        title: paint and name the areas of the screen
+        description: |
+          Give each area of the live page a colour and write its name at its
+          top left: each slot, and each row by the flag that shows it or the
+          page it comes from. Without ON or OFF the review is turned over.
+        surfaces: [session]
+        handler: page_review
+        while_busy: run
+        render:
+          message: "page review: {review}"
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            how:
+              type: string
+              enum: ["on", "off"]
+              description: turn the review on or off
+              x-fyai-positional: 0
+              x-fyai-meta: ON|OFF
+      - command: review
+        title: draw a sample page with its areas painted and named
+        description: |
+          Render the page document with the state SAMPLE, give each area a
+          colour and its name, and list the areas. The slots are empty: a
+          sample has no transcript, tiles, or prompt to draw in them. The
+          document is the embedded one, or the file of --page, which must
+          load as display/page does.
+        surfaces: [cli]
+        handler: page_review_sample
+        flags: [no-storage]
+        render:
+          table:
+            title: Areas of the page
+            keys: [area, kind, row, col, width, height]
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            sample:
+              type: string
+              enum: [prompt, inline, question, popup]
+              default: prompt
+              description: the state of the page
+              x-fyai-positional: 0
+              x-fyai-meta: SAMPLE
+            width:
+              type: integer
+              minimum: 20
+              default: 80
+              description: the columns of the page
+              x-fyai-meta: N
+            height:
+              type: integer
+              minimum: 5
+              default: 24
+              description: the rows of the page
+              x-fyai-meta: N
+            page:
+              type: string
+              description: the page document to review, in place of the embedded one
+              x-fyai-meta: FILE
+              x-fyai-complete: file
 
   - command: sessions
     title: list the live shell sessions and sub-agents
@@ -2013,6 +2692,64 @@ commands:
         title: Active sessions
         empty: no active sessions
         keys: [name, kind, state]
+
+  - command: todo
+    title: show or clear the todo list of the branch
+    description: |
+      The todo list is branch state, as the configuration is: `todo_write`
+      replaces it, `todo` shows it, and `todo clear` drops it. A sub-agent
+      branch inherits a copy of the list of its parent.
+    surfaces: [cli, session]
+    default: show
+    commands:
+      - command: show
+        aliases: [list]
+        title: show the todo list
+        description: Show the todo list of the branch.
+        handler: todo_show
+        view: true
+        while_busy: run
+        render:
+          table:
+            title: Todos
+            empty: no todos
+            keys: [content, status, priority]
+            columns:
+              content: {name: Task, align: left}
+              status: {name: Status, align: left}
+              priority: {name: Priority, align: left}
+      - command: clear
+        title: drop the todo list
+        description: Drop the todo list of the branch.
+        handler: todo_clear
+        while_busy: run
+        render:
+          message: "todos cleared"
+
+  - command: undo
+    title: take back the changes of a group of tool calls
+    description: |
+      Take the project back from what the newest group of tool calls left to what it
+      had before them. A group is a response of the model whose calls ran a program,
+      and whose changes were shown as a diff (see view/tool_diff). A path that still
+      has what the group left takes what it had; a path that you or another call
+      changed since is a conflict and stays as it is. Give N to take back the Nth
+      newest group; the groups of the session are kept, the newest sixteen.
+    surfaces: [session]
+    handler: undo
+    render:
+      message: "{applied} paths restored, {conflicts} left as changed since"
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        back:
+          type: integer
+          minimum: 1
+          default: 1
+          description: which group to take back, 1 for the newest
+          x-fyai-positional: 0
+          x-fyai-meta: N
 
   - command: kill
     title: stop a shell session or sub-agent
@@ -2045,13 +2782,49 @@ commands:
         columns:
           api: {name: API}
 
+  - command: profiles
+    title: list the egress profiles of the credential transport
+    description: |
+      List the egress profiles of the credential transport and whether the
+      agent may use each one. The agent is the session itself, or with
+      `--agent` a sub-agent that it started, by the name it was delegated
+      under, its branch, or its transport execution number. A credential
+      source is named, never its value.
+    surfaces: [session]
+    handler: profiles
+    while_busy: run
+    flags: [transient]
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        agent:
+          type: string
+          minLength: 1
+          description: list for this sub-agent instead of the session
+          x-fyai-meta: AGENT
+    render:
+      table:
+        title: Profiles
+        empty: no profiles
+        keys: [name, granted, url, auth, credential, model, granted_model, tag]
+        columns:
+          name: {name: Profile, align: left}
+          granted: {name: Granted, format: mark}
+          url: {name: URL, align: left}
+          auth: {name: Auth, align: left}
+          credential: {name: Credential, align: left}
+          model: {name: Model, align: left}
+          granted_model: {name: Narrowed to, align: left}
+          tag: {name: Tag, align: left}
+
   - command: usage
-    title: show the live limits and credits
-    description: Fetch and show the live limits and credits of the subscription.
+    title: show recorded usage and subscription settings
+    description: Show selected-conversation token totals and the ChatGPT settings link for account limits and credit permissions.
     surfaces: [session]
     handler: auth_usage
     render:
-      table: {title: OpenAI subscription usage}
+      table: {title: Recorded usage and ChatGPT plan settings}
     flags: [transient]
 
   - command: tools
@@ -2097,6 +2870,148 @@ commands:
       type: object
       additionalProperties: false
       properties: {}
+  - command: reload
+    title: restart the current session
+    description: >-
+      Commit the current branch and restart fyai on it. Live shells and
+      sub-agents must finish or close first. A transient session and a pinned
+      root cannot be reloaded.
+    surfaces: [session]
+    handler: reload
+
+  - command: session
+    title: set the isolation of this session and move work between it and the project
+    description: |
+      The isolation of the session. With no subcommand, show the state.
+      `lockdown` takes the strongest isolation that this host can enforce, and
+      `yolo` takes it all off. A session that runs in a view moves work between
+      its view and the project: `push` writes its changes into the project, and
+      `pull` replaces the view with the project as it is now.
+    surfaces: [session]
+    default: status
+    see_also: [view, reload]
+    commands:
+      - command: new
+        title: start a new session with an empty conversation
+        description: |
+          Start a new `session/` branch with the configuration of the current
+          branch and no conversation, and continue on it. The branch that the
+          session leaves is not changed: `resume` returns to it. `clear` empties
+          the current branch instead. The background work of the session ends.
+        handler: session_new
+        render:
+          message: "new session {branch}"
+      - command: push
+        title: apply the changes of the session to the project
+        description: |
+          Write the changes of a session that runs in a view into the project, as
+          `view apply` does: a path that the project still has as the view began
+          with it takes the result, a path that already equals the result is left
+          alone, and a path that the project and the session changed differently
+          is a conflict, reported and not changed. Name paths to apply only those.
+          The session keeps running on its view. The view cannot reach the project,
+          so the supervisor of the session, which stays outside it, does the work.
+        handler: session_push
+        mode: async
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            dry_run:
+              type: boolean
+              default: false
+              description: report what would change and write nothing
+              x-fyai-long: dry-run
+            paths:
+              type: array
+              items: {type: string}
+              description: the paths to apply, relative to the project; omit to apply every change
+              x-fyai-positional: 0
+              x-fyai-meta: PATH
+        render:
+          document: yaml
+
+      - command: pull
+        title: take the project as it is now into the session
+        description: |
+          Replace the view of the session with a fresh capture of the project, and
+          start the session again on it, on the same branch. The replacement drops
+          the changes of the view, so a session that has some is not replaced:
+          push them first, or give `--discard`. A restart ends the shells and
+          sub-agents of the session, so they must finish first.
+        handler: session_pull
+        mode: async
+        arguments:
+          type: object
+          additionalProperties: false
+          properties:
+            discard:
+              type: boolean
+              default: false
+              description: drop the changes of the view instead of refusing
+        render:
+          message: "the session starts again on a fresh view of the project"
+
+      - command: status
+        title: show the isolation of this session
+        description: |
+          Show the credential transport, the sandbox, the views of sub-agents and
+          the view that the session itself runs in, and whether a restart is still
+          to apply what is stored.
+        handler: session_status
+        while_busy: run
+        render:
+          message:
+            - "credential transport: {transport}"
+            - "sandbox: {sandbox}"
+            - "sub-agents: {agents}"
+            - "session view: {view}"
+            - "{note}"
+
+      - command: lockdown
+        title: take the strongest isolation that this host can enforce
+        description: |
+          Set the isolation keys together: `agent/transport_isolation: auto`, so
+          the provider credentials stay in a separate process; the lockdown
+          sandbox profile, `sandbox_profile: lockdown`, which confines the tools
+          by `sandbox_lockdown` whatever `sandbox` says, and by default denies
+          `~/.ssh` and all network egress where the kernel can restrict it; and
+          `view/isolate_session`, so the session runs in a view
+          of the project, made from the project as it is now, where this host
+          can make one. A sub-agent then shares the view of the session. The
+          views of sub-agents (`agent/isolation`) are not touched: set that key
+          yourself. Nothing changes when the transport cannot run here. The session restarts to
+          start the transport and the view, as `/reload` does, so live shells
+          and sub-agents must finish first. A change of the project that is
+          made later is not in the view: `view update session` takes it.
+          `/session yolo` goes the other way.
+        handler: lockdown
+        render:
+          message:
+            - "lockdown: credential transport {transport}, sandbox {sandbox}, sub-agents {agents}"
+            - "{note}"
+
+      - command: yolo
+        title: take off the isolation of the session
+        description: |
+          Turn off the credential transport and the sandbox:
+          `agent/transport_isolation: none`, `sandbox_profile: normal` and
+          `sandbox: false`, and the view of
+          the session, `view/isolate_session`, when it is on. The views of
+          sub-agents (`agent/isolation`) are not touched.
+          The keys are stored. A session that runs with the credential transport
+          or in a view stays so until fyai starts again: the key lives in the
+          transport, and a restart of the session could not give it back. Start
+          fyai again with the key. The changes of a session in a view are not
+          applied: `view apply session` writes them to the project. `/session
+          lockdown` goes the other way, and restarts the session to start the
+          transport.
+        handler: yolo
+        render:
+          message:
+            - "yolo: credential transport {transport}, sandbox {sandbox}, sub-agents {agents}"
+            - "{note}"
+
 
   - command: agent
     title: run one sub-agent on a task
@@ -2138,6 +3053,36 @@ commands:
           x-fyai-positional: 0
           x-fyai-rest: true
           x-fyai-meta: TASK
+
+  - command: transport
+    title: serve model requests for isolated agents
+    description: |
+      Run the credential transport. It holds the provider credentials and sends
+      the requests of agents that hold none. A supervisor starts it, and it
+      takes its orders on a control channel: a socket that it inherits on
+      descriptor `--control-fd`, framed as one JSON message for each datagram.
+      The protocol is in doc/agent-transport-isolation-sdd.md. It ends when the
+      channel closes. It sets itself not dumpable, closes every other
+      descriptor, and leaves the terminal session. A person does not normally run
+      it.
+    surfaces: [cli]
+    handler: transport
+    early: transport
+    flags: [no-storage]
+    arguments:
+      type: object
+      additionalProperties: false
+      required: [control_fd]
+      properties:
+        control_fd:
+          type: integer
+          minimum: 3
+          description: the descriptor of the control channel
+          x-fyai-meta: FD
+        arena:
+          type: string
+          description: the arena whose logs directory receives the transport log
+          x-fyai-meta: DIR
 
   - command: reasoning-effort
     aliases: [effort]
@@ -2199,6 +3144,31 @@ commands:
     surfaces: [session]
     handler: setting
     setting: {key: temperature}
+    while_busy: bare
+    arguments:
+      type: object
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          description: the new value
+          x-fyai-positional: 0
+          x-fyai-meta: VALUE
+          x-fyai-complete: setting-value
+    render:
+      message: "{setting}: {value}"
+
+  - command: layout
+    title: the layout of the page, or auto
+    description: |
+      With no value, show the layout of the page. With a value, change it:
+      a layout of the page document by name, or auto for the first that the
+      terminal is large enough for. `display/page_layout` is the key; a
+      session-scoped key changes for this session only, any other key is
+      stored.
+    surfaces: [session]
+    handler: setting
+    setting: {key: display/page_layout}
     while_busy: bare
     arguments:
       type: object
@@ -2448,6 +3418,40 @@ commands:
           description: the shell
           x-fyai-positional: 0
           x-fyai-meta: SHELL
+
+  - command: __view-fs
+    title: run an operation of `view cp` and `view rm` in a view
+    description: |
+      The helper that `view cp` and `view rm` run in a view, with the project as
+      its directory. `rm` removes the paths, `pack` writes them to its standard
+      output as a stream, and `unpack` writes a stream from its standard input.
+      It is not for a person.
+    surfaces: [cli]
+    handler: view_fs
+    hidden: true
+    flags: [no-storage]
+    arguments:
+      type: object
+      additionalProperties: false
+      required: [op]
+      properties:
+        force:
+          type: boolean
+          default: false
+          description: ignore a path that is absent
+          x-fyai-long: force
+        op:
+          type: string
+          enum: [rm, pack, unpack]
+          description: the operation
+          x-fyai-positional: 0
+          x-fyai-meta: OPERATION
+        paths:
+          type: array
+          items: {type: string}
+          description: the paths of the operation
+          x-fyai-positional: 1
+          x-fyai-meta: PATH
 
   - command: __complete
     title: list the completion candidates of a command line

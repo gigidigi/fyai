@@ -14,6 +14,7 @@
 #include <libfytimui.h>
 
 #include "fyai.h"
+#include "fyai_chrome.h"
 #include "fyai_diag.h"
 #include "fyai_sink.h"
 #include "fyai_terminal.h"
@@ -61,6 +62,12 @@ struct fyai_workpane_tile {
 	/* The rendered head a page draws, and its rows. */
 	char *head;
 	int head_rows;
+
+	/* A tile of text scrolled back stays on the same rows while the
+	 * content grows: it keeps the first row it shows, not the distance
+	 * from the end. */
+	bool scrolled;
+	int scroll_top;
 
 	/* What the last page gave the screen, which it draws itself. */
 	int page_rows, page_cols;
@@ -283,64 +290,41 @@ void fyai_workpane_destroy(struct fyai_workpane_manager *wm)
 	free(wm);
 }
 
-/* Map "none" to absent chrome; preserve an empty rule string. */
-static const char *workpane_chrome_text(const char *v)
-{
-	if (!v || !strcmp(v, "none"))
-		return NULL;
-	return v;
-}
-
 static unsigned int workpane_controls(const struct fyai_ctx *ctx)
 {
-	const char *v = ctx->cfg->work_controls;
-
 	/* fyai handles header buttons; the library handles the scroll bar. */
-	if (!v || strcmp(v, "full"))
+	if (fyai_chrome_level(ctx) != FYAI_CHROME_FULL)
 		return 0;
 	return FYTIM_WORKPANE_SCROLLBAR | FYTIM_WORKPANE_ARROWS;
 }
 
 bool fyai_workpane_wants_mouse(const struct fyai_ctx *ctx)
 {
-	const char *v = ctx ? ctx->cfg->work_controls : NULL;
-
-	return v && strcmp(v, "none");
+	return fyai_chrome_level(ctx) != FYAI_CHROME_NONE;
 }
 
 int fyai_workpane_cap_source(const struct fyai_workpane_manager *wm,
 			     char *buf, size_t size)
 {
 	const struct fyai_workpane_tile *t;
-	const char *rule;
-	char height[24], hidden[32];
-	int tiles = 0, hid = 0;
+	struct fyai_chrome_cap cap = { 0 };
+	char height[24];
 
 	if (!wm)
 		return snprintf(buf, size, "%s", "");
 	for_each_tile(t, wm) {
-		tiles++;
+		cap.tiles++;
 		if (t->present == FYAI_WORKPANE_PRESENT_HIDDEN)
-			hid++;
+			cap.hidden++;
 	}
 	if (wm->disposition == FYAI_WORKPANE_FIXED)
 		snprintf(height, sizeof(height), "%d rows", wm->fixed_rows);
 	else
 		snprintf(height, sizeof(height), "%s",
 			 workpane_disposition_name(wm->disposition));
-	hidden[0] = '\0';
-	/* A tile the layout hid is never silently gone. */
-	if (hid)
-		snprintf(hidden, sizeof(hidden), " \u00b7 +%d hidden", hid);
-	rule = markdown_glyph(wm->ctx->cfg, "md.rule", "\u2500");
-	return snprintf(buf, size,
-			"<fy-role name=\"chrome\">%s%swork%s%s</fy-role> "
-			"%s%s \u00b7 %d %s \u00b7 %d shown%s "
-			"<fy-role name=\"chrome\"><fy-fill char=\"%s\"/></fy-role>"
-			" ^T focus \u00b7 ^] prompt\n",
-			rule, rule, rule, rule, height,
-			wm->zoomed ? " zoomed" : "", tiles,
-			tiles == 1 ? "tile" : "tiles", tiles - hid, hidden, rule);
+	cap.height = height;
+	cap.zoomed = wm->zoomed != NULL;
+	return fyai_chrome_cap_source(wm->ctx, &cap, buf, size);
 }
 
 /*
@@ -418,14 +402,14 @@ void fyai_workpane_configure(struct fyai_workpane_manager *wm)
 		workpane_cap_update(wm);
 	else {
 		/* One blank row separates the pane from the transcript. */
-		frame = workpane_chrome_text(cfg->work_frame);
+		frame = fyai_chrome_text(cfg->work_frame);
 		if (asprintf(&wm->cap_text, "%s%s", frame ? "\n" : " ",
 			     frame ? : "") < 0)
 			wm->cap_text = NULL;
 		(void)fytim_workpane_set_top(wm->pane, wm->cap_text);
 	}
 	(void)fytim_workpane_set_bottom(wm->pane,
-					workpane_chrome_text(cfg->work_frame));
+					fyai_chrome_text(cfg->work_frame));
 	(void)fytim_workpane_set_tile_sep(wm->pane, cfg->tile_sep);
 	(void)fytim_workpane_set_controls(wm->pane, workpane_controls(wm->ctx));
 	wm->layout_pending = true;
@@ -497,6 +481,10 @@ int fyai_workpane_page_tiles(const struct fyai_workpane_manager *wm,
 		pt->acts = t->regions;
 		pt->nacts = t->nregions;
 		pt->present = (int)t->present;
+		pt->scrolled = t->scrolled;
+		pt->scroll_top = t->scroll_top;
+		pt->items = fyai_chrome_items(wm->ctx, t->kind,
+					      FYAI_CHROME_RUNNING);
 		fyai_ui_surface_chrome(t->surface, &pt->margin, &pt->margin_cols,
 				       &pt->ground, &pt->mix);
 		/* The rows the screen asks for, as the reconcile asks layout. */
@@ -581,6 +569,68 @@ bool fyai_workpane_tile_page_grant(const struct fyai_workpane_manager *wm,
 	return true;
 }
 
+bool fyai_workpane_band_scroll(struct fyai_workpane_manager *wm,
+			       unsigned int slot, int delta, bool pages)
+{
+	struct fyai_workpane_tile *t;
+	int lines = 0, rows, top, max;
+
+	if (!wm)
+		return false;
+	for_each_tile(t, wm)
+		if (!t->surface && t->band && t->slot == slot)
+			break;
+	if (!t || t->surface || !t->band)
+		return false;
+	(void)fytim_workband_content(t->band, &lines);
+	rows = t->page_granted ? t->page_rows : lines;
+	max = fytim_workband_max_rows(t->band);
+	if (!t->page_granted && max > 0 && rows > max)
+		rows = max;
+	if (rows < 1 || lines <= rows)
+		return true;
+	if (pages)
+		delta *= rows;
+	/* The tail follows the content, so the first row shown is derived. */
+	top = t->scrolled ? t->scroll_top : lines - rows;
+	top -= delta;
+	if (top > lines - rows)
+		top = lines - rows;
+	if (top < 0)
+		top = 0;
+	/* Back at the tail, the tile follows what arrives again. */
+	t->scrolled = top < lines - rows;
+	t->scroll_top = top;
+	return true;
+}
+
+void fyai_workpane_bands_follow(struct fyai_workpane_manager *wm)
+{
+	struct fyai_workpane_tile *t;
+
+	if (!wm)
+		return;
+	for_each_tile(t, wm)
+		if (!t->surface)
+			t->scrolled = false;
+}
+
+bool fyai_workpane_surface_slot(const struct fyai_workpane_manager *wm,
+				const struct fytim_surface *sf,
+				unsigned int *slotp)
+{
+	const struct fyai_workpane_tile *t;
+
+	if (!wm || !sf)
+		return false;
+	for_each_tile(t, wm)
+		if (t->surface == sf) {
+			*slotp = t->slot;
+			return true;
+		}
+	return false;
+}
+
 struct fytim_surface *
 fyai_workpane_slot_surface(const struct fyai_workpane_manager *wm,
 			   unsigned int slot)
@@ -597,6 +647,8 @@ fyai_workpane_slot_surface(const struct fyai_workpane_manager *wm,
 
 int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 			    const char *sep, int sep_cols,
+			    const struct fyai_page_layout *lay,
+			    const char *lead,
 			    struct response_buffer *out, int *rowsp)
 {
 	struct fyai_workpane_tile_info info[FYAI_WORKPANE_TILES_MAX];
@@ -604,6 +656,7 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 	struct fyai_page_cell cells[FYAI_WORKPANE_TILES_MAX];
 	struct fyai_workpane_grid g;
 	int n, i, rows = 0, rc;
+	bool side;
 
 	if (!wm)
 		return -1;
@@ -614,7 +667,20 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 	if (n < 1)
 		return 1;
 	memset(&g, 0, sizeof(g));
-	if (wm->zoomed) {
+	if (lay && lay->side) {
+		if (wm->zoomed) {
+			for (i = 0; i < n && order[i]->surface != wm->zoomed;
+			     i++)
+				;
+			if (i < n)
+				order[0] = order[i];
+			if (i < n)
+				n = 1;
+		}
+		fyai_page_side_place(lay, n, wm->zoomed && n == 1, &g);
+		if (n > g.rows)
+			n = g.rows;
+	} else if (wm->zoomed) {
 		/* A zoomed tile is the pane. */
 		for (i = 0; i < n && order[i]->surface != wm->zoomed; i++)
 			;
@@ -634,12 +700,15 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 			g.place[i].row_span = g.place[i].col_span = 1;
 		}
 	}
+	side = lay && lay->side;
 	for (i = 0; i < n; i++) {
 		cells[i].slot = order[i]->slot;
-		cells[i].row = wm->zoomed ? 0 : g.place[i].row;
-		cells[i].col = wm->zoomed ? 0 : g.place[i].col;
-		cells[i].row_span = wm->zoomed ? 1 : g.place[i].row_span;
-		cells[i].col_span = wm->zoomed ? 1 : g.place[i].col_span;
+		cells[i].row = wm->zoomed && !side ? 0 : g.place[i].row;
+		cells[i].col = wm->zoomed && !side ? 0 : g.place[i].col;
+		cells[i].row_span = wm->zoomed && !side ? 1 :
+				    g.place[i].row_span;
+		cells[i].col_span = wm->zoomed && !side ? 1 :
+				    g.place[i].col_span;
 		cells[i].rows = fyai_ui_tile_rows(order[i]->surface,
 						  order[i]->band);
 		cells[i].head_rows = order[i]->head ? order[i]->head_rows : 0;
@@ -657,8 +726,8 @@ int fyai_workpane_page_grid(struct fyai_workpane_manager *wm, int height,
 		if (wm->resolved_max_rows > 0 && rows > wm->resolved_max_rows)
 			height = wm->resolved_max_rows;
 	}
-	rc = fyai_page_grid(wm->ctx, &g, cells, n, height, sep, sep_cols, out,
-			    rowsp);
+	rc = fyai_page_grid_lead(wm->ctx, &g, cells, n, height, sep, sep_cols,
+				 side ? lead : NULL, out, rowsp);
 	fyai_error_check(wm->ctx, !rc, err_out,
 			 "cannot build the work pane page grid");
 	return 0;
@@ -865,7 +934,7 @@ void fyai_workpane_clear_focus(struct fyai_workpane_manager *wm)
 	wm->focused = NULL;
 	/* Chrome and key routing belong to the display; focus does not. */
 	if (fyai_ui_active(wm->ctx)) {
-		fyai_ui_surface_focus(wm->ctx, sf, false);
+		fyai_chrome_focus(wm->ctx, sf, false);
 		(void)fyai_ui_surface_keys(wm->ctx, sf, false, NULL, NULL);
 	}
 	t = workpane_tile(wm, sf);
@@ -937,7 +1006,7 @@ void fyai_workpane_set_focus(struct fyai_workpane_manager *wm,
 		if (fyai_ui_surface_keys(wm->ctx, sf, true, wm->keys_cb,
 					 wm->keys_user))
 			return;
-		fyai_ui_surface_focus(wm->ctx, sf, true);
+		fyai_chrome_focus(wm->ctx, sf, true);
 	}
 	wm->focused = sf;
 	if (t->ops && t->ops->focus_changed)

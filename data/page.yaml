@@ -9,6 +9,7 @@
 #   tight: true        blocks on adjacent rows from here on
 #   slot: {id, rows}   rows that a component draws; no rows, no slot
 #   row: [items]       one row of inline items
+#   blank: true        one blank row
 #   drop: N, body      blocks that go, in order, when the page is too tall
 #   page: NAME         the nodes of a page of `pages`
 #   markup: NAME       UI Markdown that fyai wrote, from the state
@@ -22,11 +23,23 @@
 #   space: N           N blanks that the start of a row keeps
 #   sgr: NAME          an SGR sequence of the theme, from the state
 #   gutter: {mark, cols}  the mark of the state padded to the columns
-#   hold: true         one blank when the row holds no text yet
 #   role: {name, items}   items in a role of the palette
 #   fill: {char}       the columns the row leaves, drawn with the glyph
 #   markup: NAME       UI Markdown that fyai wrote, from the state
 #   act: {action, arg, text}   a label that the user clicks for an action
+
+# The layouts of the page, the first that the terminal is large enough for.
+# A layout names its conditions (min_cols, min_rows) and where the pane
+# stands: in a band of the page, or in a column of `cols` beside the
+# transcript, each tile a panel of `tile_rows`. A side column needs the
+# fullscreen page. A node can switch on layout.name.
+layouts:
+  - name: side
+    min_cols: 170
+    min_rows: 30
+    pane: { place: side, cols: 82, tile_rows: 25 }
+  - name: band
+    pane: { place: band }
 
 page:
   # The page stands inline under the scrollback, or takes the whole screen.
@@ -57,17 +70,28 @@ pages:
   # Inline: the tail of the transcript, then the chrome.
   inline:
     - tight: true
-    - slot: { id: tail, rows: "{tail.rows}" }
+    - if: tail.shown
+      slot: { id: tail, rows: "{tail.rows}" }
+    - if: pane.side
+      markup: pane.grid_source
     - page: chrome
 
   # Fullscreen: committed rows and the live tail share one viewport.
   fullscreen:
     - tight: true
-    - slot: { id: transcript, rows: "{transcript.rows}" }
+    # In a side layout the transcript stands in a grid beside the tiles.
+    - if: transcript.shown
+      slot: { id: transcript, rows: "{transcript.rows}" }
+    - if: pane.side
+      markup: pane.grid_source
     - page: chrome
 
   # The pane, the header, the input area and the status, in either screen.
   chrome:
+    - if: todo.shown
+      drop: 0
+      body:
+        - page: todos
     - if: pane.above
       page: pane
 
@@ -76,8 +100,7 @@ pages:
     - if: header.shown
       drop: 2
       body:
-        - row:
-            - space: 1
+        - blank: true
         # The canvas draws the header row, cut at the edge as the band stack
         # cuts it. A row of Markdown wraps a long header onto a second row.
         - slot: { id: header, rows: 1 }
@@ -98,8 +121,10 @@ pages:
           row:
             - sgr: status.on
             - text: "{status.hint_text}"
-            - hold: true
             - sgr: status.off
+        # The row of the hint stands when it says nothing.
+        - if: status.hint_blank
+          blank: true
         - if: status.row
           row:
             - gutter: { mark: status.activity, cols: "{status.gutter}" }
@@ -109,6 +134,10 @@ pages:
 
     - if: pane.below
       page: pane
+    - if: todo.below
+      drop: 0
+      body:
+        - page: todos
   # The input area, in one mode at a time.
   input:
     - switch: input.mode
@@ -121,6 +150,9 @@ pages:
           keys:
             Up: ask.prev
             Down: ask.next
+            Left: ask.back
+            Right: ask.forward
+            Space: ask.toggle
             Enter: ask.accept
             Escape: ask.dismiss
             "1": "ask.choose:1"
@@ -157,15 +189,30 @@ pages:
     - if: prompt.rules
       page: rule
 
-  # A question to the user: who asks, its options, and the typed answer below.
+  # A question to the user: its header and text, who asks, each option with
+  # its description, and the hint below. Many questions end in a review.
   question:
-    - row:
+    - if: ask.question_shown
+      row:
         - space: 2
         - sgr: header.on
-        - text: "? {ask.question}"
+        - text: "{ask.header}"
         - sgr: header.off
+        - text: "  {ask.question}"
+        - if: ask.progress_shown
+          role:
+            name: chrome
+            items:
+              - text: "  ({ask.progress})"
         - if: ask.waiting_shown
           text: "  ({ask.waiting} more)"
+    - if: ask.review
+      row:
+        - space: 2
+        - sgr: header.on
+        - text: "Review"
+        - sgr: header.off
+        - text: "  Send these answers?"
     - if: ask.from_agent
       row:
         - space: 4
@@ -175,26 +222,66 @@ pages:
               - text: "asked by {ask.from}"
     - each: ask.options
       body:
+        # The option under the cursor stands on the ground of the theme and
+        # carries its bar, which its description shares.
         - if: selected
           row:
             - space: 2
-            - text: "› "
-            - act: { action: ask.choose, arg: "{number}", text: "{number}. {text}" }
+            - role: { name: select.bar, items: [ { text: "{ask.bar}" } ] }
+            - role:
+                name: select.row
+                items:
+                  - space: 1
+                  - act: { action: ask.choose, arg: "{number}", role: select.label, text: "{number}. {box}{text}" }
+                  - fill: {}
         - if: other
           row:
             - space: 4
-            - act: { action: ask.choose, arg: "{number}", text: "{number}. {text}" }
+            - act: { action: ask.choose, arg: "{number}", role: select.label, text: "{number}. {box}{text}" }
+        - if: selected_description
+          row:
+            - space: 2
+            - role: { name: select.bar, items: [ { text: "{ask.bar}" } ] }
+            - role:
+                name: select.row
+                items:
+                  - space: 4
+                  - role:
+                      name: chrome
+                      items:
+                        - text: "{description}"
+                  - fill: {}
+        - if: other_description
+          row:
+            - space: 7
+            - role:
+                name: chrome
+                items:
+                  - text: "{description}"
+    - if: ask.preview_shown
+      row:
+        - space: 4
+        - role:
+            name: chrome
+            items:
+              - text: "Preview \u00b7 {ask.preview_title}"
+    - if: ask.preview_shown
+      slot: { id: preview, rows: "{ask.preview_rows}" }
+    - each: ask.lines
+      body:
+        - row:
+            - space: 4
+            - text: "{header}: {answer}"
     - row:
         - space: 4
         - role:
             name: chrome
             items:
-              - text: "or type an answer"
+              - text: "{ask.hint}"
 
   # The work pane: its cap row goes first when the page is too tall.
   pane:
-    - row:
-        - space: 1
+    - blank: true
     - if: pane.cap
       drop: 0
       body:
@@ -204,6 +291,16 @@ pages:
       markup: pane.grid_source
     - if: pane.slot
       slot: { id: pane, rows: "{pane.rows}" }
+
+  # The todo list of the branch, above the prompt with the work pane.
+  todos:
+    - blank: true
+    - row:
+        - role:
+            name: chrome
+            items:
+              - text: "Todos"
+    - markup: todo.source
 
   # The popup of a fullscreen session: its heading, then the result.
   popup:

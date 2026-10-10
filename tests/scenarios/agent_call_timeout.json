@@ -51,7 +51,7 @@
     {
       "match": {
         "path": "/v1/responses",
-        "body_contains": "timed out after"
+        "body_contains": "agent hang timeout after"
       },
       "response": {
         "id": "resp-agent-parent-2",

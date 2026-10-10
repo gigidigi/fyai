@@ -12,8 +12,14 @@ only while its process runs.
 ### Architecture rules
 
 - Do not add a daemon, resident process, or hidden process state.
-- Store persistent state only in content-addressed libfyaml arenas under
-  `~/.fyai`.
+- Store persistent manifests, references, configuration, and other structured
+  state in content-addressed libfyaml arenas under `~/.fyai`. Project file bytes
+  may also live in immutable content-addressed blob files under the project's
+  `.fyai` directory, and so may the binary project manifests of a filesystem
+  view: the record in the arena holds a reference to each manifest, not its
+  content.
+  Publish blobs and manifest files before arena references; never edit a
+  published file in place.
 - Keep canonical data immutable, deterministic, and address-stable between
   processes.
 - Do not relocate an arena during normal operation.
@@ -137,6 +143,8 @@ initialize each generic field explicitly.
 - `src/fyai_diag.c`: collected diagnostics.
 - `src/utils.c`: HTTP buffers, shell capture, and generic serialization.
 - `src/fyai_workpane.c`: the one owner of work-pane geometry, focus, and zoom.
+- `src/fyai_chrome.c`: the one owner of tile chrome: which controls and scroll
+  bar a tile carries, and its head.
 - `src/fyai_sandbox.c`: Linux Landlock confinement.
 - `src/fyai_oauth.c`: provider-independent OAuth browser flow.
 - `src/fyai_jsonrpc.c`: JSON-RPC over standard I/O and HTTP.
@@ -147,6 +155,20 @@ initialize each generic field explicitly.
 - `src/*.h`: shared structures and internal interfaces.
 - `data/`: embedded configuration schemas and catalogue data.
 - `tests/`: unit tests, functional cases, mock providers, and scenarios.
+
+## Tools
+
+`data/tools.yaml` describes each model tool. `struct fyai_tool_def`
+(`src/fyai_tool_registry.h`) holds the rest: run function, title row, result
+formatter for the user, ordering class, and flags. Define the entry in the file that implements the tool. Do
+not test a tool name in another place; add a field to the entry. See
+`doc/tools-yaml.md`.
+
+An event is a line `[KIND 'NAME' TAIL]` and an optional body, queued for the
+model. The card that echoes it, live and on replay, draws it through
+`fyai_event_pretty()` (`src/fyai_event_fmt.c`); a new producer keeps that
+header form and needs no code of its own. Do not change the text the model
+gets to make the card read better.
 
 ## Commands
 
@@ -621,17 +643,16 @@ display makes them again.
 - A delegated sub-agent does not repaint a transcript. Its screen is the result
   of the call, and the conversation behind it is not something anyone asked to
   see there.
+- A delegated sub-agent draws no header row: the head of its tile in the
+  parent names it already, and its screen is the work.
 - The size is read in the pump, and a turn waits on the provider rather than on
   the terminal, so an interactive session keeps a SIGWINCH source to wake the
   display for it.
 
 ### The page
 
-`display/renderer` selects how the live screen is composed. `page`, the
-default, states the screen as one UI Markdown page. `stack` is the band stack
-of libfytimui: the library draws the header, the prompt between two rules and
-the status. `src/fyai_page.c` owns the page source; the terminal library
-draws its slots.
+The page states the live screen as one UI Markdown page. `src/fyai_page.c` owns
+the page source; the terminal library draws its slots.
 
 - The page is rendered again for each frame, from the state of the session.
   libfytimui decision 0007 measured it: the Markdown is at most 0.16 ms of a
@@ -648,9 +669,6 @@ draws its slots.
   so the ground of a fullscreen page is under the tail too. A tail that the
   library draws over the canvas has no ground, and the terminal background
   shows through it.
-- The page must look as the band stack does. `tests/cases/ui_page_renderer.sh`
-  runs one scenario under both renderers and compares the screens: a change
-  to the stack chrome is a change to the page source too.
 - The chrome is the stack's: a blank row and the header row, the prompt on its
   card (`fytim_prompt_card()`, a slot two rows taller) or between two rules,
   and two status rows - the focus hint or the keys of the completion popup,
@@ -671,11 +689,12 @@ draws its slots.
 - The chrome goes in a stated order when the terminal is short: the cap row
   (`fy-drop order="0"`), the status, the header, then the rules. The prompt
   has no drop.
-- A margin at the start of a row is `&#32;`: Markdown removes a plain blank
-  there, and a non-breaking space reaches the terminal as a different
-  character.
+- A margin at the start of a row is `<fy-space n="N"/>` (`space: N` in the
+  document): Markdown removes a plain blank there, and a non-breaking space
+  reaches the terminal as a different character.
 - The page is one `fy-tight`: a blank row between two parts of the chrome is
-  not part of it.
+  not part of it. A blank row of the chrome is `blank: true`, which is
+  `<fy-space/>` on a line of its own.
 - Text that the configuration or a program wrote goes into the source through
   `page_append_text()`: it is escaped, loses its SGR and its line breaks, and
   loses its leading blanks at the start of a row, where four of them make an
@@ -715,20 +734,63 @@ draws its slots.
   action with its argument. An action is a named function of
   `struct fyai_page_action`. A document that names an unknown action, or binds
   `Ctrl-]`, `Ctrl-T` or `Ctrl-Tab`, does not transcribe.
-- The keys of the active cases are bound with `fytim_set_key_bindings()` when
-  they change, and are cleared when the page renderer stops. A bound key
-  reaches fyai as `FYTIM_EVENT_KEY` and not the editor. A new name of the
-  state goes into `data/page-state.schema.yaml`, which its test checks.
-- A question to the user is a mode of the input area. `fyai_ui_ask()` puts it
-  in the queue of the UI and calls its `done` function with the answer, or
-  with NULL for none; the caller waits in the event loop, not in a nested
-  loop of its own. `ask_user` and the question of a sub-agent take this path
-  when `fyai_ui_ask_available()` says so and no `--answer` remains. The mode
-  is `ask` while nothing is typed, where the number keys choose, and
+- The keys of the active cases are the keys of the library mode `page`, which
+  inherits `prompt`. They are bound with `fytim_mode_bind()` when they change,
+  the mode is selected while there are any, and both are cleared when the page
+  renderer stops. A bound key reaches fyai as `FYTIM_EVENT_KEY`, whose action
+  is the name of the key, and not the editor. A new name of the state goes
+  into `data/page-state.schema.yaml`, which its test checks.
+- `display/keys` binds the keys of the three modes of the library - `prompt`,
+  `completion` and `surface` - to the built-in actions of libfytimui
+  (`fytim_action_name()` lists them), or to "" to unbind a key. A key is a
+  name, or a chord of up to four keys such as `"Escape Escape"`.
+  `ui_keys_configure()` resets each mode to its defaults and binds the keys
+  over them, on every configuration change; a mode that the library rejects,
+  or an action it does not know, is reported and keeps its defaults.
+  `display/chord_timeout_ms` is the time a chord waits. Do not hard-code a key
+  of the prompt in C: the library has it as data. The keys that leave a tile
+  are keys of the `surface` mode: `ui_keys_configure()` binds `Ctrl-T` to
+  `fytim.focus.next` and `Ctrl-]` to the action `fyai.focus.prompt`
+  (`fyai_tools_keys_to_prompt()`) before `display/keys`, so the user can move
+  them. Do not scan the bytes of a surface for them. The library reports them
+  in order with the bytes around them, so what is typed after one reaches the
+  new owner.
+- Questions to the user are a mode of the input area. `src/fyai_ask.c` owns
+  their model: `fyai_ask_normalize()` checks the arguments of `ask_user` and
+  makes the one normalized sequence that the UI, the `user/ask` forward of a
+  sub-agent, and the text fallbacks all read; `fyai_ask_result()` builds the
+  structured result. Do not parse the arguments or build the result anywhere
+  else. `fyai_ui_ask()` puts the questions in the queue of the UI and calls its
+  `done` function with one `struct fyai_ask_reply` for each question, or with
+  NULL for none; the caller waits in the event loop, not in a nested loop of
+  its own. `ask_user` and the questions of a sub-agent take this path when
+  `fyai_ui_ask_available()` says so and no `--answer` remains. The mode is
+  `ask` while nothing is typed, where the number keys choose or toggle, and
   `ask_text` once text is typed, where they type. Escape and `^C` answer
-  nothing. A caller that goes away withdraws its question with
-  `fyai_ui_ask_withdraw()`. Agents put one question at a time, so the page
-  adds `fyai_agents_questions_waiting()` to the questions it says wait.
+  nothing. A caller that goes away withdraws its questions with
+  `fyai_ui_ask_withdraw()`. Agents put one set of questions at a time, so the
+  page adds `fyai_agents_questions_waiting()` to the sets it says wait. The UI
+  copies the text of the questions it shows; the page gets them as
+  `struct fyai_page_ask` and does not read generics. A preview is rendered
+  with `markdown_render()` at the width the indent leaves, kept until the
+  option, the question or the width changes, and drawn in the `preview` slot.
+  The option under the cursor is drawn as the completion popup draws its
+  selected row: the roles `select.row` (the ground of each of its rows, to the
+  edge) and `select.bar` (the bar in its first column, the glyph `select.bar`,
+  shared by the label and the description of the option) of the palette theme.
+  The page document names the roles; do not put a colour for them in C. A
+  theme without them leaves the bar uncoloured and the row bare, so the
+  selection is still marked.
+- A question given `background` or a `name` is an object of the run, as a
+  named wait is. `src/fyai_asks.c` keeps them in `ctx->asks` with a builder of
+  their own, because the turn that asked ends before the user answers. `list`
+  shows them (kind `questions`), `cancel` withdraws one with
+  `fyai_ui_ask_withdraw()`, and `wait` resolves a name to it. When the user
+  answers, the registry queues `[question 'NAME' answered]` and the JSON as an
+  event; a cancel by the model queues nothing, because the model has the
+  result of that call. `ask_user` is an instant tool only for such a call
+  (`in_parent` on its entry says so). A forked child drops the registry in
+  `fyai_ctx_fork_disown()` without withdrawing the questions of the parent.
 - `display/page` names the file of a page document. `fyai_page_create()`
   loads it with `fyai_page_load()`: the file holds a mapping, matches
   `data/page.schema.yaml`, and passes `fyai_page_check()`, which transcribes
@@ -741,6 +803,38 @@ draws its slots.
 - `/page` is a view: it commits the document in use, why a file is not used,
   and the state, source and regions of the last frame to the scrollback. The
   state of a frame lives in the builder of that frame until the next one.
+- A review names the areas of the page. The transcriber starts each row with
+  `<fy-mark id="review:AREA"/>`, which takes no column: AREA is the flag
+  that shows the row, else its page, with the list of an `each` before it
+  and `/blank` after a blank row. `fyai_page_review_paint()` gives each
+  mark and each slot the next colour of the palette series and its name
+  at the top right, where it covers no text. `/page review`
+  paints the live page; `fyai page review SAMPLE` draws a sample state
+  and lists the areas. A mark is not a region of the terminal library.
+- A page document states its layouts in `layouts`: the first that the
+  terminal is large enough for (`min_cols`, `min_rows`) is used, and a node
+  can switch on `layout.name`. The thresholds are the document's; C only
+  evaluates them, in `fyai_page_layout()`, once per frame before the fit,
+  because the layout decides where the pane stands before any tile is
+  granted rows. A `side` pane is a column of `cols` beside the transcript,
+  each tile a panel of `tile_rows`: the pane takes no rows of the page, and
+  `fyai_page_side_place()` and `fyai_page_grid_lead()` write one fy-grid of
+  the transcript and the tiles, because grids do not nest. A side column
+  needs the fullscreen page. `display/work_panels` says when a side
+  layout is taken: `auto` at the size of the document, `on` at any size
+  where its column leaves the transcript room, `off` never.
+  `display/work_panel_cols` and `display/work_panel_rows` replace the
+  `cols` and `tile_rows` of the document when they are not 0.
+  `display/page_layout` (`/layout`) names a layout that is taken at any
+  size, or `auto`; a side layout that cannot stand falls back to `auto`.
+  The header templates name the layout of the last frame as `{layout}`.
+  The UI makes the header again when the layout changes, before the frame
+  reads it: the rows it replaces are the header of that frame. While a
+  column of tiles stands beside it, the transcript takes the render width
+  of its own column (`side_cols` of the UI), else that of the terminal, and
+  every writer of `cfg->render_width` in the UI honours it. A change of that
+  width makes the rows already made again, as a resize does: a column that
+  opens beside the transcript must not clip it.
 - `display/screen: fullscreen`, the default, puts the page on the alternate
   screen when the session starts (`FYTIM_SCREEN_ALT`). There is no scrollback
   there, so the transcript is a view of the page, `src/fyai_transcript_view.c`, drawn into
@@ -761,8 +855,8 @@ draws its slots.
   what arrives, and a view scrolled back keeps its top row. A frame repaints
   only the cells that changed, so a PTY case waits on the screen
   (`wait-screen`), not on a line of bytes.
-- With `display/command_output: transcript`, a slash command is a part of
-  the transcript: its card is drawn, its output is drawn under the card, and
+- With `display/command_output: transcript`, the default, a slash command is
+  a part of the transcript: its card is drawn, its output is drawn under the card, and
   after it runs `fyai_interactive_record_command()` appends a turn with no
   messages and one `command` display record: the line, which replays as its
   card, and the rows its output drew. The card names the command, so no
@@ -771,7 +865,20 @@ draws its slots.
   command beside a turn, or in a session that holds no exchange yet, is not
   stored. A command turn goes with the exchange before it in a merge or a
   rebase, and `~N` counts it.
-- With `pane`, the default, the transcript keeps nothing of a slash command:
+- The output stands on a ground of its own, `markdown_command_ground()`:
+  `display/command_bg` as given, or with `theme` `display/command_bg_mix`
+  percent of the `pane.focus` wash over the ground under the text - the
+  theme's on a fullscreen page with a theme ground, else the background the
+  probe measured. `markdown_ground_rows()` puts the rows on it when they are
+  presented, live and on replay; the record keeps them without it, so a
+  replay takes the settings of its own session.
+- The test harness selects `pane`, which most cases read; a case of the
+  transcript selects `transcript`.
+- `config reset` stores an empty configuration and drops the session layer;
+  `config undo N` stores the configuration of N changes ago, walking the ref
+  log and counting only entries whose configuration differs. Both leave the
+  replaced configuration in the ref log.
+- With `pane`, the transcript keeps nothing of a slash command:
   no card is drawn and nothing is stored. Its output, and every notice and
   diagnostic, goes to the pane. `fyai_ui_pane_end()` shows a
   result of two rows or less above the status, until the input changes or
@@ -819,8 +926,8 @@ draws its slots.
   `popup.border`, else `chrome.rule`; the selected row from `popup.selected`,
   else `pane.focus`, else the card; the typed part of a label from
   `popup.match`, else `prompt`; and the `pane.edge` mark before the selected
-  label. Do not put a colour for them in C. Up and Down select, and Tab and
-  Enter take the selection. `display/completion: auto` opens the popup as
+  label. Do not put a colour for them in C. Up, Down, Tab and Shift-Tab
+  select, and Tab wraps; Enter takes the selection. `display/completion: auto` opens the popup as
   the line is typed, with no Tab (`fytim_set_completion_auto()`).
 - A tile of text - a tool exchange, a notice, the queued-input report - is
   drawn on the canvas too, in the slot `text:N`. The page reads the content,
@@ -837,6 +944,9 @@ draws its slots.
   page is one component: `ui_act()` finds the tile by its slot.
 - A head the page draws is rendered at the granted columns of the tile, as
   the band stack renders it, so a long row is cut in the same place.
+- The title row of a tile is one row: a title that does not fit beside the
+  buttons and the right-hand text loses its end to an ellipsis, or it would
+  wrap and take the buttons to a row of their own.
 - `tests/cases/ui_page_tiles.sh` compares two tiles side by side under both
   renderers.
 - Under the page renderer the head of a shell or agent tile is a tile page
@@ -860,6 +970,48 @@ choose a banded presentation, open with `fyai_sink_band_open()`, repaint with
 `fyai_sink_band_paint()`, and commit the shared band with
 `fyai_sink_band_close()`. Do not call `fyai_ui_*` band functions from a
 producer; the terminal backend owns that.
+
+### Tile chrome
+
+`src/fyai_chrome.c` decides the chrome of every tile of the work pane. An
+owner states the content of the head with `struct fyai_chrome_spec` and calls
+`fyai_chrome_update()`. It does not build a head, a button, or a column of its
+own.
+
+- `fyai_chrome_items()` is the one policy: the tile kind, its phase (running,
+  kept, committed), and `display/work_controls` give a mask of
+  `FYAI_CHROME_BUTTONS`, `FYAI_CHROME_SCROLL`, and `FYAI_CHROME_WHEEL`. Do not
+  read `display/work_controls` anywhere else; use `fyai_chrome_level()`.
+- A committed tile has no buttons: a button there acts on nothing. Its head is
+  also the top of the rows that the surface commit writes, so the transcript
+  keeps the title row.
+- A tile of text scrolls too. The manager keeps `scrolled` and `scroll_top` for
+  it (`fyai_workpane_band_scroll()`): a tile scrolled back keeps the first row
+  it shows while the content grows, until it is back at the end, or until the
+  user types (`fyai_workpane_bands_follow()`, called when the line being typed
+  changes). The page draws the bar only when the content outgrows the rows, and
+  `fyai_chrome_bar_part()` is the one geometry of a bar of text and of a screen.
+  The live stream of a tool call renders `display/tool_history_lines` rows and
+  the band shows `display/tool_preview_lines` of them. The stored exchange keeps
+  the preview, so history is a property of the live view only.
+- `fyai_chrome_frame()` divides a row between margin, scroll bar, and body.
+  The head, the screen, and the scroll-bar acts of the page all use it, so
+  they act on the same columns. The page reads `items` from the tile, not a
+  page-wide flag.
+- `fyai_chrome_body()` gives a tile its unfocused look when an owner opens
+  it, and `fyai_chrome_focus()` is the one place that changes it when the keys
+  move: the ground, the edge marker or reversed margin, and the status hint.
+  The theme primitives stay in `fyai_ui.c`; the policy of which tile gets
+  which hint is the chrome's.
+- `fyai_chrome_panel()` builds the panel of the input header: the pane button
+  and the counts of live user shells, model shells, and sub-agents.
+  `fyai_ui_panel_update()` only stores it. A new kind of live work adds a row to
+  the table of that function.
+- `fyai_chrome_cap_source()` writes the cap row from a summary that the
+  manager gathers: height, tiles, hidden tiles, and zoom. The manager owns the
+  facts; the chrome owns the text and the glyphs.
+- A new kind of tile gets its chrome by a line in the policy, not by a draw
+  path. `tests/fyai_chrome_test.c` states the table.
 
 ### The work pane
 
@@ -1008,6 +1160,9 @@ register, focus, zoom, resize - and sizes nothing itself.
   which reverse video is what makes visible. With no colour configured the
   margin is reversed instead, which is the mark a terminal of sixteen colours
   can carry.
+- `display/focus_mark: edge`, the default, drops the wash: `ui_focus_ground()` gives the
+  prompt, a picker and a focused tile the ground of the terminal, and the
+  edge marker alone says where the keys are. The margin is not reversed.
 - Keyboard focus also uses a one-column edge marker because the background
   wash can be hard to see. Use the palette's `pane.edge` role, or the theme's
   strong style (`ui_edge()`). For a tile, replace the first blank margin
@@ -1061,10 +1216,11 @@ register, focus, zoom, resize - and sizes nothing itself.
   while the program writes, and what the user types shows the live screen
   again. A program on the alternate screen has no history.
 - What the user acts on in the chrome of a tile - the arrows and the thumb of
-  the bar - is not dim. It takes the
-  `tile.sigil.work` role of a palette theme, else the strong style of the
-  theme, through `FYTIM_CHROME_CONTROL` under the band stack and
-  `control_chrome` on the page. The track stays dim chrome.
+  the bar, and the panel button of the header - has the colour of the
+  buttons of the head, the text colour. It takes the `text` role of a
+  palette theme, else the strong style of the theme, through
+  `FYTIM_CHROME_CONTROL` under the band stack and `control_chrome` on the
+  page. The track stays dim chrome.
 - The head of a tile ends in three buttons when the mouse is grabbed:
   `tile:minimize`, `tile:maximize` and `tile:close`. They are acts of the
   head source that `ui_tile_buttons()` writes, so both renderers draw and
@@ -1092,10 +1248,13 @@ register, focus, zoom, resize - and sizes nothing itself.
   chrome: never a colour escape in C.
 - A hidden pane (`fyai_workpane_set_hidden()`) keeps its tiles, grants
   nothing new and takes no keys. A tile given the keys shows the pane again.
-- `Ctrl-T` and `Ctrl-Tab` cycle through tiles in row-major screen order, then
-  the prompt.
-  `fyai_workpane_screen_order()` reads that order from the placement, so a
-  policy of the user's decides it too. A hidden tile takes no keys, and a
+- `Ctrl-T` and `Ctrl-Tab` cycle through what takes the keys in the order the
+  screen shows it, from the top row down and from left to right in a row,
+  then the prompt: tiles and the terminal blocks of the transcript alike.
+  `fyai_tools_focus_next()` sorts them by where the last frame drew them
+  (`fyai_ui_tile_pos()`, `fyai_ui_inline_pos()`); a place the page did not
+  draw goes last. `fyai_workpane_screen_order()` orders the tiles from the
+  placement, so a policy of the user's decides it too. A hidden tile takes no keys, and a
   zoomed tile is the whole cycle.
 - `/zoom` gives one tile the pane and the keys, so the user works in the
   program instead of watching it. The prompt keeps its row while a tile holds
@@ -1116,14 +1275,15 @@ register, focus, zoom, resize - and sizes nothing itself.
   the user was typing into a program, not stopping the model. `^\` and `^Z`
   stay this terminal's, because a program that took them could not be left.
 - The keys of a tile arrive one frame at a time, not one key at a time. A key
-  this program keeps for itself - `Ctrl-Tab`, `Ctrl-T`, and `Ctrl-]` - can
-  thus arrive with
-  what was typed after it, and that input belongs to whoever holds the keys
-  once the key is acted on: another tile, or the prompt. Give the rest of the
-  chunk back with `fyai_ui_keys_return()`, which puts it in front of the input
-  the terminal has sent since, to be read again and routed then. Dropping it
-  loses what the user typed, and a paste or a fast typist makes one chunk of
-  the key and the line under it.
+  this program keeps for itself - `Ctrl-Tab`, `Ctrl-T`, and `Ctrl-]` - is a
+  key of the `surface` mode, which the library reports as an event between the
+  bytes before it and the bytes after it, so the bytes after it go to whoever
+  holds the keys once the key is acted on. A handler that stops taking keys
+  for another reason - a closed browser, a finished action - gives the rest of
+  its chunk back with `fyai_ui_keys_return()`, which puts it in front of the
+  input the terminal has sent since, to be read again and routed then.
+  Dropping it loses what the user typed, and a paste or a fast typist makes
+  one chunk of the key and the line under it.
 - Look a tile's owner up by surface. A program that ended must not leave a
   pointer behind for the next keystroke to follow.
 
@@ -1153,6 +1313,49 @@ wrote at the old size and what it writes at the new one.
   whole-session read returns the stripped log, which is the result of the
   call.
 
+### Inline tool display
+
+`display/tool_display: inline`, the default, draws the live output of a call
+in the transcript, at the call, in place of a tile of the work pane. The test
+harness selects `pane`, which most cases read.
+`fyai_ui_tools_inline()` is the one decision: it applies to a page, and a
+display without one uses the pane.
+`doc/inline-tool-display-plan.md` gives the design and the steps that remain.
+
+- A live call is a block of the transcript view
+  (`fyai_transcript_view_block_set()`): after the live rows, before the
+  tail, in the order the calls opened. A view scrolled back keeps its top
+  row while a block changes.
+- Producers keep the band interface. The terminal backend of the sink puts
+  an independent band in a block, and the UI puts the shared tool band
+  there. Both render the rows that a tile shows.
+- A live block takes the separation that the flow would draw, and changes
+  no flow state. Its commit drops the block and presents the band as a tile
+  commit does, so the stored exchange replaces the same rows.
+- A block shows the last `display/tool_preview_lines` rows. The transcript
+  scrolls it, so the stream keeps no history for it, and the band opens at
+  once: `display/work_open_delay_ms` hides a jump that a block does not make.
+- `fyai_transcript_view_show_block()` scrolls a block into the view.
+- An inline page has no transcript view: the terminal keeps the committed
+  rows. The UI keeps its blocks in a view of their own (`ui_blocks()`), and
+  the page draws them under the tail rows, which count them. When they do
+  not fit, the last rows stay. A row committed while a block runs goes into
+  the scrollback above it.
+- A terminal block, a session or a sub-agent, has
+  `display/inline_terminal_rows` rows and the width of the transcript less
+  the indent of tool output, and follows that width. Its mark blinks on the
+  timer of a tile.
+- A block of text is rendered again at a new width through the repaint of its
+  band: the sink keeps its bands drawn in the transcript, and the UI calls
+  `fyai_sink_bands_reflow()` when the live rows reflow.
+- `Ctrl-T` takes the terminal blocks in the order of the screen with the
+  tiles. A block has no surface, so the canvas of the page takes the keys
+  for it (`fyai_ui_inline_keys()`), with a callback of its own: the pane
+  clears the callback of a tile when it moves the keys. The block draws the
+  edge in its first indent column, a fullscreen view scrolls to it, `^C` goes
+  to its program, and `Ctrl-]` gives the keys back. A block that commits gives
+  them back too.
+
 ### Bang commands
 
 A line that starts with `!` is a command of the user. It is not a model turn.
@@ -1166,6 +1369,22 @@ command.
   A user-owned session has no such limit: the user reads its screen. It is
   not watched for input waits: the model is not told that it waits, because
   that would give the model its output and start a turn.
+- A bang command is not a part of the conversation. Its line is not drawn as
+  a card, and its session records nothing and commits nothing: not
+  its screen, not its output, whether or not a turn runs beside it. When the
+  program ends, its tile stays with the outcome, its buttons and the keys it
+  held, and the status row says that Escape closes it, until the user
+  dismisses it with Escape or `q` in the tile, its close button, or `/kill`.
+  The close button of a running bang tile ends its program and the tile with
+  it; `/kill` ends the program and leaves the tile to read. A full-screen program - one that entered the
+  alternate screen - leaves nothing to read, and its tile goes at once.
+- A program that prints once and ends, such as `ls`, reads the size of its
+  terminal when it starts; `ls` takes the terminal size over `COLUMNS`. The
+  tile of a terminal session is registered before its program starts, so
+  `fyai_ui_layout_now()` solves the page then, and `tool/run` carries the
+  grant as `size`: the terminal opens at the size of its tile. A size the
+  call asks for wins. `COLUMNS` and `LINES` stay unset, because a resize
+  cannot change the environment of a running program.
 - A user-owned tile can take more rows than the shared pane granted it. A tile
   of a tool call keeps the grant.
 - `display/work_zoom_rows` is the height of the work pane. `full` uses the
@@ -1210,18 +1429,32 @@ do not put a colour for a role in C.
   configuration keeps the result and does not probe. The probe sends all its
   queries in one write, with DA1 last, and waits for the DA1 reply. Every
   terminal answers DA1, and answers in order, so a query with no reply before
-  it is not supported. Do not query the terminal anywhere else, and do not
-  decide anything from how long a reply takes. The time limit is 1000 ms;
+  it is not supported. Do not query the terminal anywhere else - libfytimui
+  measures a glyph, below, and is the one exception - and do not decide
+  anything from how long a reply takes. The time limit is 1000 ms;
   `$FYPAL_PROBE_TIMEOUT_MS` changes it. The test harness sets 30000, which a
   driver that answers never reaches.
+- Terminals draw some glyphs at different widths: VTE draws an emoji base
+  with U+FE0F in one column, most terminals in two. libfytimui measures such
+  a glyph while the program runs, not in the probe: the first time it writes
+  one, it asks for the cursor after it, places the next cell absolutely, and
+  records the advance the reply gives. A session that never shows one never
+  asks. A narrower measure repaints the cells of the library and raises
+  `FYTIM_EVENT_GLYPH_WIDTH`. The UI gives libfymd4c the same measures with
+  `fymd_set_glyph_width()`, so Markdown lays out a table as the cells draw
+  it, and on the event it makes its rows again as a width change does,
+  forgetting the rows of the fullscreen view
+  (`fyai_transcript_view_invalidate()`). A PTY case plays VTE with
+  `$FYAI_PTY_EMOJI_VS=narrow`; the driver answers the cursor query from its
+  screen model.
 - `fyai_ui_open()` gives the result to the UI. The capabilities that the
   terminal reported replace the guess from the environment
   (`fytim_set_caps()`), and the keys typed during the probe go to
   `fytim_keys_return()`, before anything the terminal sends later. A reply
   that arrives after the time limit is dropped by the libfytimui input
   parser. A sub-agent and the branch browser preview do not probe.
-- `display/theme_ground=terminal` makes the background of the terminal the
-  ground of the palette with `fypal_ctx_set_ground()`, so the neutral ramp of
+- `display/theme_ground=terminal`, the default, makes the background of the
+  terminal the ground of the palette with `fypal_ctx_set_ground()`, so the neutral ramp of
   the theme keeps its steps over that background. The theme names the ground
   and decides what follows it; fyai holds no colour. The background comes
   from the probe. A background of the other variant is not applied. A PTY
@@ -1489,6 +1722,11 @@ and output routing.
   the `spawn` state in `tool/run`: see `doc/agent-fork-model.md`. Send it
   what it cannot read from the arena. `agent/spawn: fork`, a transient run
   and a pinned root keep the forked child; keep both paths correct.
+- In a view, an agent runtime holds its arena only as a close-on-exec
+  descriptor of a detached mount, adopted with `fyai_fsview_arena_adopt()`.
+  Pass it only to an execution of fyai, with `fyai_fsview_arena_pass()` and
+  `--view-arena-fd`; drop it in any other child with
+  `fyai_fsview_arena_drop()`. Do not mount the arena at a path of the view.
 
 `context: fork` starts at the parent head. `context: fresh` sends only the
 task. In fork mode, add the persona as a user instruction message. Do not add a

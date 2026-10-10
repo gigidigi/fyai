@@ -42,6 +42,7 @@
 #include "fyai_event.h"
 #include "fyai_sink.h"
 #include "fyai_sandbox.h"
+#include "fyai_fsview.h"
 #include "fyai_terminal.h"
 #include "fyai_tools.h"
 #include "fyai_ui.h"
@@ -108,6 +109,18 @@ bool data_is_binary(const char *data, size_t len)
 			return true;
 	}
 	return false;
+}
+
+size_t fyai_utf8_length(const char *s)
+{
+	size_t len = 0;
+
+	/* Each byte that is not a continuation byte starts a code point. */
+	for (; *s; s++) {
+		if (((unsigned char)*s & 0xc0) != 0x80)
+			len++;
+	}
+	return len;
 }
 
 bool data_is_wire_text(const char *data, size_t len)
@@ -716,23 +729,37 @@ shell_capture_deadline(const struct fyai_event *ev)
 	return FYAIEA_CONTINUE;
 }
 
-void fyai_close_fds_from(int lowfd)
+/* Close the descriptors from @from to @to, both included. */
+static void close_fds_range(unsigned int from, unsigned int to)
 {
-	long max_fd, fd;
-	int rc;
+	long max_fd;
+	unsigned int fd;
 
 #if defined(__linux__) && defined(SYS_close_range)
-	rc = (int)syscall(SYS_close_range, (unsigned int)lowfd, ~0U, 0U);
-	if (!rc)
+	if (!syscall(SYS_close_range, from, to, 0U))
 		return;
-#else
-	(void)rc;
 #endif
 	max_fd = sysconf(_SC_OPEN_MAX);
 	if (max_fd < 0)
 		max_fd = 1024;
-	for (fd = lowfd; fd < max_fd; fd++)
+	for (fd = from; fd <= to && fd < (unsigned int)max_fd; fd++)
 		close((int)fd);
+}
+
+void fyai_close_fds_from(int lowfd)
+{
+	close_fds_range((unsigned int)lowfd, ~0U);
+}
+
+void fyai_close_fds_except(int lowfd, int keepfd)
+{
+	if (keepfd < lowfd) {
+		fyai_close_fds_from(lowfd);
+		return;
+	}
+	if (keepfd > lowfd)
+		close_fds_range((unsigned int)lowfd, (unsigned int)keepfd - 1);
+	close_fds_range((unsigned int)keepfd + 1, ~0U);
 }
 
 #ifdef __linux__
@@ -881,6 +908,10 @@ const char *fyai_child_start_text(const struct fyai_child_start *start,
 		return NULL;
 	why = start->err ? strerror(start->err) : "no reason was reported";
 	switch (start->stage) {
+	case FYAI_CHILD_STAGE_VIEW:
+		snprintf(buf, size,
+			 "could not establish the filesystem view: %s", why);
+		break;
 	case FYAI_CHILD_STAGE_WORKDIR:
 		snprintf(buf, size, "cannot enter workdir %s: %s",
 			 workdir ? workdir : "", why);
@@ -947,6 +978,59 @@ static void fyai_child_exec_prepare_signals(void)
 	(void)sigaction(SIGHUP, &sa, NULL);
 }
 
+
+/*
+ * Close every descriptor from @lowfd on except the ones that the spec passes,
+ * which first take the numbers that the child asks for. A copy goes to a number
+ * above every target first, so that no target overwrites a source that is still
+ * to be copied. A status descriptor takes number 3 after the copies: the number
+ * can be that of a source, and a copy made later would read the status pipe.
+ */
+static int child_pass_fds(const struct fyai_child_spec *spec, int lowfd, int status_fd)
+{
+	int tmp[FYAI_CHILD_PASS_MAX], keep[FYAI_CHILD_PASS_MAX], top = lowfd, swap;
+	unsigned int next = (unsigned int)lowfd;
+	size_t i, j;
+
+	for (i = 0; i < spec->pass_n; i++) {
+		keep[i] = spec->pass_as[i];
+		if (keep[i] >= top)
+			top = keep[i] + 1;
+	}
+	for (i = 0; i < spec->pass_n; i++) {
+		tmp[i] = fcntl(spec->pass_fd[i], F_DUPFD_CLOEXEC, top);
+		if (tmp[i] < 0)
+			return -1;
+	}
+	if (status_fd >= 0) {
+		if (dup2(status_fd, 3) < 0)
+			return -1;
+		(void)fcntl(3, F_SETFD, FD_CLOEXEC);
+	}
+	if (!spec->pass_n) {
+		fyai_close_fds_from(lowfd);
+		return 0;
+	}
+	for (i = 0; i < spec->pass_n; i++)
+		if (dup2(tmp[i], spec->pass_as[i]) < 0)
+			return -1;
+	/* The numbers in order, so that the ranges between them can be closed. */
+	for (i = 1; i < spec->pass_n; i++)
+		for (j = i; j > 0 && keep[j - 1] > keep[j]; j--) {
+			swap = keep[j];
+			keep[j] = keep[j - 1];
+			keep[j - 1] = swap;
+		}
+	for (i = 0; i < spec->pass_n; i++) {
+		if ((unsigned int)keep[i] > next)
+			close_fds_range(next, (unsigned int)keep[i] - 1);
+		next = (unsigned int)keep[i] + 1;
+	}
+	/* The copies sit above every number kept, and go with the rest. */
+	close_fds_range(next, ~0U);
+	return 0;
+}
+
 int fyai_child_exec_prepare(struct fyai_ctx *ctx,
 			    const struct fyai_child_spec *spec)
 {
@@ -995,18 +1079,13 @@ int fyai_child_exec_prepare(struct fyai_ctx *ctx,
 		goto err_setup;
 	/* Preserve the close-on-exec status fd while closing inherited fds. */
 	stage = FYAI_CHILD_STAGE_STATUS;
-	if (status_fd >= 0) {
-		if (dup2(status_fd, 3) < 0)
-			goto err_setup;
+	if (child_pass_fds(spec, status_fd >= 0 ? 4 : 3, status_fd))
+		goto err_setup;
+	if (status_fd >= 0)
 		status_fd = 3;
-		(void)fcntl(status_fd, F_SETFD, FD_CLOEXEC);
-		fyai_close_fds_from(4);
-	} else {
-		fyai_close_fds_from(3);
-	}
 	/* Fail closed if any provider credential cannot be removed. */
 	stage = FYAI_CHILD_STAGE_ENV;
-	if (fyai_env_sanitize(spec->env_keep))
+	if (!spec->inherit_env && fyai_env_sanitize(spec->env_keep))
 		goto err_setup;
 	/* Describe the child's terminal and screen dimensions. */
 	if (spec->term)
@@ -1019,6 +1098,12 @@ int fyai_child_exec_prepare(struct fyai_ctx *ctx,
 	} else if (spec->term) {
 		unsetenv("LINES");
 		unsetenv("COLUMNS");
+	}
+	if (spec->view && fyai_fsview_enter(ctx->cfg, spec->view, status_fd,
+					  spec->announce_as > 0 ? spec->announce_as : -1)) {
+		fyai_child_status_report(status_fd, FYAI_CHILD_STAGE_VIEW,
+					 errno);
+		return FYAI_SHELL_EXIT_SANDBOX;
 	}
 	/* Enter the directory before applying confinement. */
 	if (spec->workdir && *spec->workdir && chdir(spec->workdir) < 0) {
@@ -1089,6 +1174,7 @@ static void shell_capture_exec(struct fyai_ctx *ctx, const char *command,
 	spec.out_fd = stdout_pipe[1];
 	spec.err_fd = stderr_pipe[1];
 	spec.ctty_fd = -1;
+	spec.view = opts ? opts->view : NULL;
 	spec.workdir = opts ? opts->workdir : NULL;
 	spec.sandbox = sandbox;
 	spec.status_fd = status_fd;
@@ -2087,5 +2173,36 @@ int mkdir_private(const char *path)
 		return -1;
 	if ((st.st_mode & 077) && chmod(path, 0700))
 		return -1;
+	return 0;
+}
+
+int hex_nibble(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	return -1;
+}
+
+int hex_decode(const char *text, unsigned char *bytes, size_t *count)
+{
+	size_t length = strlen(text), i;
+	int high, low;
+
+	if (length & 1) {
+		errno = EINVAL;
+		return -1;
+	}
+	for (i = 0; i < length / 2; i++) {
+		high = hex_nibble(text[i * 2]);
+		low = hex_nibble(text[i * 2 + 1]);
+		if (high < 0 || low < 0) {
+			errno = EINVAL;
+			return -1;
+		}
+		bytes[i] = (unsigned char)(high << 4 | low);
+	}
+	*count = length / 2;
 	return 0;
 }

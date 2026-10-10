@@ -14,6 +14,23 @@ properties:
     type: object
     additionalProperties:
       $ref: "#/$defs/nodes"
+  layouts:
+    type: array
+    items:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 31 }
+        min_cols: { type: integer, minimum: 0 }
+        min_rows: { type: integer, minimum: 0 }
+        pane:
+          type: object
+          additionalProperties: false
+          properties:
+            place: { enum: [band, side] }
+            cols: { type: integer, minimum: 20 }
+            tile_rows: { type: integer, minimum: 0 }
 
 $defs:
   flag:
@@ -99,6 +116,12 @@ $defs:
         properties:
           if: { $ref: "#/$defs/flag" }
           row: { $ref: "#/$defs/items" }
+      - type: object
+        required: [blank]
+        additionalProperties: false
+        properties:
+          if: { $ref: "#/$defs/flag" }
+          blank: { const: true }
 
   items:
     type: array
@@ -137,12 +160,6 @@ $defs:
             properties:
               mark: { $ref: "#/$defs/flag" }
               cols: { $ref: "#/$defs/number" }
-      - type: object
-        required: [hold]
-        additionalProperties: false
-        properties:
-          if: { $ref: "#/$defs/flag" }
-          hold: { type: boolean }
       - type: object
         required: [role]
         additionalProperties: false
@@ -184,3 +201,4 @@ $defs:
               action: { type: string, minLength: 1 }
               arg: { $ref: "#/$defs/text" }
               text: { $ref: "#/$defs/text" }
+              role: { type: string, minLength: 1 }

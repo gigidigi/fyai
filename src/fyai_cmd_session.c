@@ -20,11 +20,17 @@
 #include "fyai.h"
 #include "fyai_cmd.h"
 #include "fyai_cmd_int.h"
+#include "fyai_agents.h"
+#include "fyai_branch.h"
 #include "fyai_browser.h"
 #include "fyai_sink.h"
 #include "fyai_session.h"
+#include "fyai_storage.h"
 #include "fyai_tools.h"
+#include "fyai_todo.h"
+#include "fyai_transport_boot.h"
 #include "fyai_ui.h"
+#include "utils.h"
 
 #define FYAI_MODULE FYAIEM_SESSION
 
@@ -34,6 +40,48 @@ int fyai_cmd_exit(struct fyai_cmd_call *call, fy_generic *result)
 	(void)result;
 	fyai_ui_quit_request(call->ctx);
 	return 0;
+}
+
+int fyai_cmd_reload(struct fyai_cmd_call *call, fy_generic *result)
+{
+	struct fyai_ctx *ctx = call->ctx;
+	char *branch;
+	int rc;
+
+	(void)result;
+	fyai_error_check(ctx, !ctx->cfg->transient, err,
+			 "reload: transient state cannot survive a restart");
+	fyai_error_check(ctx, !ctx->cfg->root_pinned, err,
+			 "reload: a pinned root cannot be republished");
+	fyai_error_check(ctx, ctx->durable_allocator && ctx->durable_gb, err,
+			 "reload: no arena is open to retain the session");
+	fyai_error_check(ctx, !fyai_tools_active(ctx), err,
+			 "reload: close live shells and sub-agents before restarting");
+	fyai_error_check(ctx, !fyai_agents_attached(ctx), err,
+			 "reload: close attached agents before restarting");
+	fyai_error_check(ctx, !fyai_ui_has_line(ctx), err,
+			 "reload: process queued input before restarting");
+	fyai_error_check(ctx, fyai_exec_self_available(), err,
+			 "reload: executing this binary is not supported here");
+#ifndef __linux__
+	fyai_error_check(ctx,
+			 !ctx->cfg->api_key_explicit || !ctx->cfg->api_key, err,
+			 "reload: this platform cannot pass an explicit API key "
+			 "without storing it");
+#endif
+	branch = strdup(fyai_ctx_branch(ctx));
+	fyai_error_check(ctx, branch, err,
+			 "reload: cannot retain the active branch");
+	ctx->cfg->reload_branch = branch;
+	rc = fyai_publish_state(ctx);
+	if (rc) {
+		ctx->cfg->reload_branch = NULL;
+		free(branch);
+		return -1;
+	}
+	return 0;
+err:
+	return -1;
 }
 
 int fyai_cmd_btw(struct fyai_cmd_call *call, fy_generic *result)
@@ -67,6 +115,29 @@ int fyai_cmd_resume(struct fyai_cmd_call *call, fy_generic *result)
 	return fyai_session_branch_switch(call->ctx, name, false, true);
 }
 
+/* A new `session/` branch that starts empty; the branch left is not changed. */
+int fyai_cmd_session_new(struct fyai_cmd_call *call, fy_generic *result)
+{
+	struct fyai_ctx *ctx = call->ctx;
+	char name[FYAI_BRANCH_NAME_MAX + 1];
+	int rc;
+
+	rc = fyai_branches_refresh(ctx);
+	fyai_error_check(ctx, !rc, err, "session: could not refresh the branches");
+	rc = fyai_branch_session_name(ctx->arena_branches, name, sizeof(name));
+	fyai_error_check(ctx, !rc, err, "session: could not name a new session");
+	rc = fyai_session_branch_switch(ctx, name, true, true);
+	if (rc)
+		return -1;
+	rc = fyai_session_clear(ctx);
+	fyai_error_check(ctx, !rc, err,
+			 "session: could not empty the new session '%s'", name);
+	*result = fy_mapping(call->gb, "branch", fyai_ctx_branch(ctx));
+	return 0;
+err:
+	return -1;
+}
+
 int fyai_cmd_zoom(struct fyai_cmd_call *call, fy_generic *result)
 {
 	const char *name = fyai_cmd_arg_str(call, "name");
@@ -82,12 +153,6 @@ int fyai_cmd_zoom(struct fyai_cmd_call *call, fy_generic *result)
 		  fy_mapping(call->gb, "unknown", (bool)name,
 			     "idle", !name);
 	return 0;
-}
-
-int fyai_cmd_page(struct fyai_cmd_call *call, fy_generic *result)
-{
-	(void)result;
-	return fyai_ui_page_report(call->ctx);
 }
 
 int fyai_cmd_sessions(struct fyai_cmd_call *call, fy_generic *result)
@@ -136,6 +201,46 @@ static fy_generic status_flatten(struct fy_generic_builder *gb,
 	return out;
 }
 
+/*
+ * The sub-agent that @name designates: a transport execution number, or a
+ * name or branch of a live sub-agent of this process. 0 when there is none.
+ */
+static uint64_t profiles_agent(struct fyai_ctx *ctx, const char *name)
+{
+	char *end;
+	unsigned long long n;
+
+	n = strtoull(name, &end, 10);
+	if (*name && !*end)
+		return n;
+	return fyai_tool_agent_transport_exec(ctx, name);
+}
+
+int fyai_cmd_profiles(struct fyai_cmd_call *call, fy_generic *result)
+{
+	const char *agent = fyai_cmd_arg_str(call, "agent");
+	uint64_t id = 0;
+	fy_generic reply;
+
+	if (!call->ctx->tclient) {
+		fyai_error(call->ctx, "profiles: credential isolation is not "
+			   "active in this run");
+		return -1;
+	}
+	if (!fy_str_empty(agent)) {
+		id = profiles_agent(call->ctx, agent);
+		if (!id) {
+			fyai_error(call->ctx, "profiles: no running sub-agent '%s'",
+				   agent);
+			return -1;
+		}
+	}
+	if (fyai_transport_describe(call->ctx, call->gb, id, &reply))
+		return -1;
+	*result = fy_get(reply, "profiles", fy_seq_empty);
+	return 0;
+}
+
 int fyai_cmd_status(struct fyai_cmd_call *call, fy_generic *result)
 {
 	fy_generic data;
@@ -148,4 +253,23 @@ int fyai_cmd_status(struct fyai_cmd_call *call, fy_generic *result)
 	return 0;
 err:
 	return -1;
+}
+
+int fyai_cmd_todo_show(struct fyai_cmd_call *call, fy_generic *result)
+{
+	*result = fyai_todo_rows(call->ctx, call->gb);
+	fyai_error_check(call->ctx, fy_is_valid(*result), err,
+			 "todo: cannot build the todo list");
+	return 0;
+err:
+	return -1;
+}
+
+int fyai_cmd_todo_clear(struct fyai_cmd_call *call, fy_generic *result)
+{
+	(void)result;
+	if (fyai_todo_clear(call->ctx))
+		return -1;
+	*result = fy_mapping(call->gb, "cleared", true);
+	return 0;
 }

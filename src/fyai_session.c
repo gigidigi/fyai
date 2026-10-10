@@ -44,6 +44,7 @@
 #include "fyai.h"
 #include "fyai_auth.h"
 #include "fyai_catalog.h"
+#include "fyai_cost.h"
 #include "fyai_config.h"
 #include "fyai_display.h"
 #include "fyai_event.h"
@@ -54,15 +55,20 @@
 #include "fyai_provider.h"
 #include "fyai_branch.h"
 #include "fyai_browser.h"
+#include "fyai_agent.h"
 #include "fyai_agents.h"
 #include "fyai_session.h"
 #include "fyai_cmd.h"
 #include "fyai_stream.h"
+#include "fyai_transport_boot.h"
+#include "fyai_transport_client.h"
+#include "fyai_xfer.h"
 #include "fyai_ui.h"
 #include "fyai_storage.h"
 #include "fyai_terminal.h"
 #include "fyai_tools.h"
 #include "fyai_turn.h"
+#include "fyai_view.h"
 #include "utils.h"
 
 /*
@@ -93,10 +99,134 @@ static void session_reset_usage(struct fyai_ctx *ctx)
 	ctx->usage_reasoning = 0;
 	ctx->usage_total = 0;
 	ctx->usage_cost = 0.0;
+	ctx->usage_cost_est = 0.0;
 	ctx->usage_calls = 0;
 	ctx->last_call_input = 0;
 	ctx->last_call_output = 0;
 	ctx->last_call_total = 0;
+	ctx->usage_head = ctx->last_message;
+}
+
+static void usage_sum_add(struct fyai_usage_sum *s, fy_generic u)
+{
+	double cost = fy_get(u, "cost", 0.0);
+
+	s->input += fy_get(u, "input", 0LL);
+	s->cached += fy_get(u, "cached", 0LL);
+	s->cache_write += fy_get(u, "cache_write", 0LL);
+	s->output += fy_get(u, "output", 0LL);
+	s->reasoning += fy_get(u, "reasoning", 0LL);
+	s->total += fy_get(u, "total", 0LL);
+	s->cost += cost;
+	if (fy_get(u, "est", (_Bool)false))
+		s->cost_est += cost;
+	s->calls++;
+}
+
+static int usage_value_cmp(const void *a, const void *b)
+{
+	fy_generic_value x = *(const fy_generic_value *)a;
+	fy_generic_value y = *(const fy_generic_value *)b;
+
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/*
+ * A sub-agent that forked from the conversation starts its branch with the
+ * turns of its parent. Those turns carry the usage of the parent, which the
+ * parent counts already, so the walk of an agent stops at the first turn that
+ * the conversation holds.
+ */
+void fyai_usage_agents(struct fyai_ctx *ctx, struct fyai_usage_sum *sum,
+		       int *nagents)
+{
+	struct fyai_turn_stack own = { 0 };
+	fy_generic_value *seen = NULL, v;
+	const char *branch = fyai_ctx_branch(ctx), *nm;
+	struct fyai_branch b;
+	fy_generic entry, cur;
+	size_t i, blen;
+	int rc;
+
+	memset(sum, 0, sizeof(*sum));
+	*nagents = 0;
+	if (!branch || !*branch)
+		return;
+	blen = strlen(branch);
+	rc = fyai_turn_stack_init(&own, ctx->last_message, fy_invalid);
+	fyai_error_check(ctx, !rc, out,
+			 "cannot total the usage of the sub-agents");
+	if (own.count) {
+		seen = malloc(own.count * sizeof(*seen));
+		fyai_error_check(ctx, seen, out,
+				 "cannot total the usage of the sub-agents");
+		for (i = 0; i < own.count; i++)
+			seen[i] = own.items[i].v;
+		qsort(seen, own.count, sizeof(*seen), usage_value_cmp);
+	}
+	fy_foreach_key_value(nm, entry, ctx->arena_branches) {
+		if (fy_str_empty(nm) || !fyai_branch_is_below(nm, branch) ||
+		    strncmp(nm + blen, "/agent:", 7) ||
+		    !fyai_branch_decode(entry, &b))
+			continue;
+		(*nagents)++;
+		fyai_turn_foreach(cur, b.head) {
+			v = cur.v;
+			if (seen && bsearch(&v, seen, own.count, sizeof(v),
+					    usage_value_cmp))
+				break;
+			if (fy_is_valid(fy_get(fyai_turn_meta(cur), "usage")))
+				usage_sum_add(sum, fy_get(fyai_turn_meta(cur),
+							  "usage"));
+		}
+	}
+out:
+	free(seen);
+	if (own.items)
+		fyai_turn_stack_cleanup(&own);
+}
+
+/*
+ * The counters total the usage that the turns of the conversation carry,
+ * and what its sub-agents used on their branches. A head that moved since the
+ * last total, by a resume, a checkout, or a reset, makes the first again from
+ * the stored turns, so a session that starts from stored turns shows what
+ * they cost. A new branch table makes the second again. A sub-agent counts
+ * its own calls only: its stored chain starts with the conversation of its
+ * parent.
+ */
+void fyai_usage_sync(struct fyai_ctx *ctx)
+{
+	struct fyai_usage_sum own;
+	fy_generic cur, u;
+	bool moved;
+
+	if (ctx->cfg->tool_child)
+		return;
+	moved = ctx->usage_head.v != ctx->last_message.v;
+	if (moved) {
+		memset(&own, 0, sizeof(own));
+		fyai_turn_foreach(cur, ctx->last_message) {
+			u = fy_get(fyai_turn_meta(cur), "usage");
+			if (fy_is_valid(u))
+				usage_sum_add(&own, u);
+		}
+		ctx->usage_input = own.input;
+		ctx->usage_cached = own.cached;
+		ctx->usage_cache_write = own.cache_write;
+		ctx->usage_output = own.output;
+		ctx->usage_reasoning = own.reasoning;
+		ctx->usage_total = own.total;
+		ctx->usage_cost = own.cost;
+		ctx->usage_cost_est = own.cost_est;
+		ctx->usage_calls = own.calls;
+		ctx->usage_head = ctx->last_message;
+	}
+	if (moved || ctx->usage_agents_root.v != ctx->arena_branches.v) {
+		fyai_usage_agents(ctx, &ctx->usage_agents,
+				  &ctx->usage_agent_count);
+		ctx->usage_agents_root = ctx->arena_branches;
+	}
 }
 
 int fyai_session_clear(struct fyai_ctx *ctx)
@@ -104,6 +234,7 @@ int fyai_session_clear(struct fyai_ctx *ctx)
 	struct fyai_cfg *cfg = ctx->cfg;
 
 	ctx->last_message = fy_invalid;
+	fyai_background_reset(ctx);
 	fyai_branch_op_set(ctx, FYAI_BRANCH_OP_CLEAR, NULL);
 	session_reset_usage(ctx);
 
@@ -179,8 +310,8 @@ static int session_compact_responses(struct fyai_ctx *ctx, const char *hint)
 				"url", url,
 				"body", request));
 
-	curl_easy_setopt(ctx->curl, CURLOPT_URL, url);
-	curl_easy_setopt(ctx->curl, CURLOPT_POSTFIELDS, body);
+	fyai_xfer_set_endpoint(ctx, url, "compact");
+	fyai_xfer_set_body(ctx, body);
 	req = fyai_buffered_request_submit(ctx, NULL, NULL);
 	fyai_error_check(ctx, req, err_restore,
 			 "compact: cannot submit the Responses request");
@@ -202,8 +333,8 @@ collect:
 	fyai_buffered_request_destroy(req);
 	req = NULL;
 restore:
-	curl_easy_setopt(ctx->curl, CURLOPT_URL, cfg->api_url);
-	curl_easy_setopt(ctx->curl, CURLOPT_POSTFIELDS, NULL);
+	fyai_xfer_set_endpoint(ctx, NULL, NULL);
+	fyai_xfer_set_body(ctx, NULL);
 	if (rc < 0)
 		goto out;
 
@@ -365,8 +496,7 @@ int fyai_session_compact(struct fyai_ctx *ctx, const char *hint)
 	bool tools_save, shell_save;
 	size_t n;
 
-	if ((!cfg->api_key || !*cfg->api_key) &&
-	    !cfg->chatgpt_auth && !cfg->no_auth) {
+	if (!fyai_credential_available(ctx)) {
 		fyai_error(ctx, "compact: no API key or ChatGPT login is available");
 		return -1;
 	}
@@ -376,6 +506,9 @@ int fyai_session_compact(struct fyai_ctx *ctx, const char *hint)
 		return 0;
 	}
 	assert(ctx->transient_gb);
+
+	if (cfg->chatgpt_auth)
+		cfg->response_compaction_supported = false;
 
 	if (fyai_session_compact_v2(cfg))
 		return session_compact_responses_v2(ctx, hint);
@@ -537,6 +670,50 @@ static bool session_chatgpt_capable(const struct fyai_cfg *cfg,
 	return cfg->auth_mode == FYAI_AUTH_CHATGPT || cfg->chatgpt_auth;
 }
 
+/*
+ * The login that the transport holds serves only the models it can. Another
+ * model goes back to the provider's own credential source.
+ */
+static void session_login_ref(struct fyai_cfg *tmp)
+{
+	const char *why;
+
+	if (fyai_auth_uses_transport(tmp) &&
+	    fyai_auth_chatgpt_eligible(tmp, &why))
+		tmp->api_key_ref = NULL;
+}
+
+/*
+ * A change of model leaves the prompt cache behind: the conversation goes to
+ * the new model at the full input price, where the old model would have read
+ * it from its cache. Keep what that costs until the next call ends.
+ */
+static void session_switch_estimate(struct fyai_ctx *ctx,
+				    struct fyai_cfg *to)
+{
+	struct fyai_cfg *cfg = ctx->cfg;
+	struct fyai_context_prompt prompt;
+	struct fyai_switch_cost cost;
+	struct fyai_pricing from_price, to_price;
+
+	ctx->switch_pending = false;
+	if (fy_is_invalid(ctx->last_message) || !cfg->model || !to->model ||
+	    (!strcmp(cfg->model, to->model) &&
+	     !strcmp(cfg->provider ? cfg->provider : "",
+		     to->provider ? to->provider : "")))
+		return;
+	fyai_context_prompt_at(ctx, ctx->last_message, &prompt);
+	if (prompt.prompt <= 0 ||
+	    !fyai_pricing_lookup(cfg, cfg->provider, cfg->model, &from_price) ||
+	    !fyai_pricing_lookup(to, to->provider, to->model, &to_price))
+		return;
+	fyai_pricing_switch(&from_price, &to_price, prompt.prompt, &cost);
+	ctx->switch_prefix = prompt.prompt;
+	ctx->switch_fresh = cost.fresh;
+	ctx->switch_stay = cost.stay;
+	ctx->switch_pending = true;
+}
+
 int fyai_session_model(struct fyai_ctx *ctx, const char *name, bool live)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
@@ -559,8 +736,9 @@ int fyai_session_model(struct fyai_ctx *ctx, const char *name, bool live)
 		return -1;
 	if (fyai_config_messages_gate(&tmp))
 		return -1;
+	session_login_ref(&tmp);
 	/* Only a live session sends the next request with it. */
-	if (live && (!tmp.api_key || !*tmp.api_key) &&
+	if (live && !fyai_transport_have_credential(ctx, &tmp) &&
 	    !session_chatgpt_capable(cfg, &tmp)) {
 		fyai_error(ctx, "model: no API key for provider '%s' (set %s%s)",
 			   tmp.provider ? tmp.provider : "?",
@@ -569,6 +747,7 @@ int fyai_session_model(struct fyai_ctx *ctx, const char *name, bool live)
 		return -1;
 	}
 
+	session_switch_estimate(ctx, &tmp);
 	*cfg = tmp;
 
 	/* Re-derive ChatGPT subscription routing (endpoint + token) for the
@@ -652,8 +831,9 @@ int fyai_session_api(struct fyai_ctx *ctx, const char *arg, bool live)
 	}
 	if (fyai_config_messages_gate(&tmp))
 		return -1;
+	session_login_ref(&tmp);
 	/* Only a live session sends the next request with it. */
-	if (live && (!tmp.api_key || !*tmp.api_key) &&
+	if (live && !fyai_transport_have_credential(ctx, &tmp) &&
 	    !session_chatgpt_capable(cfg, &tmp)) {
 		fyai_error(ctx, "api: no API key for provider '%s' (set %s%s)",
 			   tmp.provider ? tmp.provider : "?",
@@ -961,6 +1141,9 @@ fy_generic fyai_session_status_data(struct fyai_ctx *ctx,
 	struct fyai_context_prompt p;
 	long long window, shown, out_tokens;
 
+	char iso[160];
+
+	fyai_transport_status_text(ctx, iso, sizeof(iso));
 	window = fyai_context_window(ctx);
 	fyai_context_prompt_at(ctx, ctx->last_message, &p);
 	shown = session_projected_tokens(ctx, &p);
@@ -988,6 +1171,8 @@ fy_generic fyai_session_status_data(struct fyai_ctx *ctx,
 		"prompt", fy_gb_internalize(gb, session_prompt_text(ctx, &p)),
 		"output_allowance", session_allowance(gb, cfg, out_tokens),
 		"auth", fyai_auth_status_data(ctx, gb, false),
+		"isolation", fy_value(gb, iso),
+		"view", fy_value(gb, fyai_view_session_name(ctx) ? fyai_view_session_name(ctx) : "none"),
 		"usage", fyai_stats_data(ctx, gb));
 }
 
@@ -1218,16 +1403,18 @@ static void session_token_count(char *buf, size_t size, long long tokens)
 void fyai_session_banner_update(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
-	struct fyai_tmpl_var vars[13], top_vars[13];
-	char *coloured[13];
+	struct fyai_tmpl_var vars[16], top_vars[16];
+	char isolation[64], view[64];
+	char *coloured[14];
 	const struct fyai_tmpl_var *header_vars;
 	bool colour_ok;
 	fy_generic model_entry;
 	char effort[64], summary[64], temp[32], ctxpct[32];
-	char tokens[64], cost[32], cache[64];
+	char tokens[64], cost[96], cache[64], amount[32];
 	/* Wide enough for any long long, so the abbreviation never truncates. */
 	char used_str[24], window_str[24], cached_str[24];
 	long long used;
+	double delta;
 	char *top, *bottom, *cwd, *directory, *branch, *location;
 	char *tilde, *home_real, *cwd_real;
 	const char *home, *pwd;
@@ -1239,6 +1426,10 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	long long window;
 
 	if (!cfg->interactive || !cfg->markdown || !ctx->stdout_tty)
+		return;
+	/* A delegated sub-agent has no header: the head of its tile in the
+	 * parent names it. */
+	if (fyai_agent_delegated(ctx))
 		return;
 	cwd = getcwd(NULL, 0);
 	/*
@@ -1315,8 +1506,22 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 			 used_str, window_str,
 			 (double)used * 100.0 / (double)window);
 	}
-	if (ctx->usage_cost > 0.0)
-		snprintf(cost, sizeof(cost), " · $%.4f", ctx->usage_cost);
+	fyai_usage_sync(ctx);
+	/* What the sub-agents used is a part of the cost of the session. */
+	if (ctx->usage_cost + ctx->usage_agents.cost > 0.0) {
+		fyai_cost_format(amount, sizeof(amount),
+				 ctx->usage_cost + ctx->usage_agents.cost,
+				 ctx->usage_cost_est +
+				 ctx->usage_agents.cost_est > 0.0);
+		snprintf(cost, sizeof(cost), " · %s", amount);
+	}
+	/* The next request has no cache on the model just chosen. */
+	if (ctx->switch_pending) {
+		delta = ctx->switch_fresh - ctx->switch_stay;
+		snprintf(cost + strlen(cost), sizeof(cost) - strlen(cost),
+			 " · cache miss ~%s$%.4f", delta < 0.0 ? "-" : "+",
+			 delta < 0.0 ? -delta : delta);
+	}
 	if (ctx->usage_input > 0) {
 		session_token_count(cached_str, sizeof(cached_str),
 				    ctx->usage_cached);
@@ -1349,6 +1554,19 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	vars[10] = (struct fyai_tmpl_var){ "branch", branch };
 	vars[11] = (struct fyai_tmpl_var){ "cwd", directory };
 	vars[12] = (struct fyai_tmpl_var){ "location", location };
+	vars[13] = (struct fyai_tmpl_var){ "layout", fyai_ui_page_layout(ctx) };
+	/* Empty unless credentials are isolated, like the other optional fields. */
+	isolation[0] = '\0';
+	if (ctx->tclient)
+		snprintf(isolation, sizeof(isolation), " · isolated %s%s",
+			 fyai_transport_effective_level(ctx),
+			 fyai_tclient_alive(ctx->tclient) ? "" : " (down)");
+	vars[14] = (struct fyai_tmpl_var){ "isolation", isolation };
+	/* Empty unless the session itself runs in a view. */
+	view[0] = '\0';
+	if (fyai_view_session_name(ctx))
+		snprintf(view, sizeof(view), " · view %s", fyai_view_session_name(ctx));
+	vars[15] = (struct fyai_tmpl_var){ "view", view };
 	if (fyai_agents_attached(ctx)) {
 		vars[1].val = "agent";
 		vars[2].val = fyai_agents_state(ctx, fyai_agents_attached(ctx));
@@ -1383,6 +1601,16 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 		fyai_warning(ctx, "cannot colour the prompt header");
 	}
 	top_vars[12] = (struct fyai_tmpl_var){ "location", coloured[12] };
+	if (colour_ok) {
+		coloured[13] = session_series_text(cfg, 12, vars[13].val, true);
+		colour_ok = coloured[13] != NULL;
+		if (!colour_ok)
+			fyai_warning(ctx, "cannot colour the layout of the "
+				     "prompt header");
+	}
+	top_vars[13] = (struct fyai_tmpl_var){ "layout", coloured[13] };
+	top_vars[14] = vars[14];
+	top_vars[15] = vars[15];
 	header_vars = colour_ok ? top_vars : vars;
 
 	tmpl = cfg->prompt_bottom && *cfg->prompt_bottom ?
@@ -1399,7 +1627,7 @@ void fyai_session_banner_update(struct fyai_ctx *ctx)
 	free(top_md);
 	free(top);
 	free(bottom);
-	for (i = 0; i < 13; i++)
+	for (i = 0; i < 14; i++)
 		free(coloured[i]);
 	free(location);
 	free(directory);
@@ -1686,6 +1914,11 @@ int fyai_session_slash(struct fyai_ctx *ctx, const char *line)
 	rc = fyai_cmd_session_run(ctx, name, &view);
 	if (own_transient)
 		fyai_cleanup_transient_builder(ctx);
+	if (!rc && ctx->cfg->reload_branch) {
+		fyai_diag_drain(&ctx->cfg->diag);
+		fyai_ui_pane_end(ctx, title, false, true);
+		return 1;
+	}
 
 	/*
 	 * A backend collects rather than prints, so report here - before the

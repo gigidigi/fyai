@@ -34,6 +34,7 @@
 #include "fyai_terminal.h"
 #include "fyai_prof.h"
 #include "fyai_branch.h"
+#include "fyai_view.h"
 #include "fyai_merge.h"
 #include "fyai_catalog.h"
 #include "fyai_config.h"
@@ -160,8 +161,10 @@ static bool generic_same(fy_generic a, fy_generic b)
  */
 static bool root_ref_contained(struct fy_allocator *a, fy_generic v)
 {
-	if (fy_is_invalid(v) || !fy_is_mapping(v))
-		return true;	/* null / inplace: no out-of-place pointer */
+	/* Null, a scalar and an in-place collection, such as the empty
+	 * mapping, hold no pointer out of place. */
+	if (fy_is_invalid(v) || !fy_is_mapping(v) || fy_generic_is_in_place(v))
+		return true;
 	return fy_allocator_contains(a, -1, fy_generic_resolve_collection_ptr(v));
 }
 
@@ -191,6 +194,7 @@ bool fyai_branch_entry_contained(struct fy_allocator *a, fy_generic entry,
 		if (!root_ref_contained(a, b.store) ||
 		    !root_ref_contained(a, b.config) ||
 		    !root_ref_contained(a, b.catalog) ||
+		    !root_ref_contained(a, b.todos) ||
 		    !root_ref_contained(a, b.head) ||
 		    !root_ref_contained(a, b.cwd) ||
 		    !root_ref_contained(a, b.description) ||
@@ -198,6 +202,7 @@ bool fyai_branch_entry_contained(struct fy_allocator *a, fy_generic entry,
 		    !root_ref_contained(a, b.import) ||
 		    !root_ref_contained(a, b.op) ||
 		    !root_ref_contained(a, b.from) ||
+		    !root_ref_contained(a, b.project) ||
 		    !root_ref_contained(a, b.prev))
 			return false;
 		entry = b.prev;
@@ -578,13 +583,13 @@ static int fyai_open_arena(struct fyai_ctx *ctx, const char *arena_dir)
 	if (!ctx->arena_lock_fd_plus_one) {
 		if (asprintf(&lock_path, "%s/.fyai-writer.lock", arena_dir) < 0)
 			return -1;
-		/* Internal tool children carry the same open file description on fd 5. */
+		/* Internal tool children carry the same open file description on fd 8. */
 		if (ctx->cfg && ctx->cfg->tool_child &&
-		    !fstat(5, &inherited) && !stat(lock_path, &target) &&
+		    !fstat(8, &inherited) && !stat(lock_path, &target) &&
 		    inherited.st_dev == target.st_dev &&
 		    inherited.st_ino == target.st_ino) {
-			ctx->arena_lock_fd_plus_one = 6;
-			(void)fcntl(5, F_SETFD, FD_CLOEXEC);
+			ctx->arena_lock_fd_plus_one = 9;
+			(void)fcntl(8, F_SETFD, FD_CLOEXEC);
 			free(lock_path);
 			goto lock_held;
 		}
@@ -769,6 +774,7 @@ int fyai_setup_storage(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct fyai_branch b, lb;
+	bool exists, claimed;
 	struct fyai_root r;
 	char session[FYAI_BRANCH_NAME_MAX + 1];
 	char cwd[PATH_MAX];
@@ -861,8 +867,18 @@ int fyai_setup_storage(struct fyai_ctx *ctx)
 		 * the catalogue of the branch HEAD names, as the catalogue was
 		 * there before the branch was.
 		 */
-		if (!fyai_branch_lookup(r.branches, fyai_ctx_branch(ctx), &b) &&
-		    name && fyai_branch_lookup(r.branches, name, &lb))
+		exists = fyai_branch_lookup(r.branches, fyai_ctx_branch(ctx), &b);
+		/*
+		 * The namespace of the sub-agents belongs to the agent tool: a user
+		 * selects a branch there only when a sub-agent made it, and cannot
+		 * make one by naming it.
+		 */
+		claimed = !exists && cfg->branch_explicit && !cfg->agent_child &&
+			  fyai_branch_name_has_agent(fyai_ctx_branch(ctx));
+		fyai_error_check(ctx, !claimed, err_out,
+				 "branch '%s' is in the namespace of sub-agent branches; "
+				 "only a sub-agent creates one", fyai_ctx_branch(ctx));
+		if (!exists && name && fyai_branch_lookup(r.branches, name, &lb))
 			ctx->arena_catalog = lb.catalog;
 		else
 			ctx->arena_catalog = b.catalog;
@@ -1032,6 +1048,9 @@ static bool storage_session_defer(struct fyai_ctx *ctx)
 	if (ctx->session_persist_empty)
 		return false;
 
+	/* An explicit reload publishes even a session with no exchange. */
+	if (ctx->cfg->reload_branch)
+		return false;
 	if (!ctx->session_unstored ||
 	    strcmp(ctx->session_unstored, fyai_ctx_branch(ctx)))
 		return false;
@@ -1083,10 +1102,21 @@ static fy_generic fyai_branches_commit(struct fyai_ctx *ctx)
 		nb.cwd = fyai_branch_cwd_generic(ctx->gb);
 	nb.description = ctx->branch_desc;
 	nb.agent = ctx->branch_agent;
+	/*
+	 * The todo list lives only in the store: take it from the store the
+	 * entry is built from, or a rebuild drops the new list. A null reads
+	 * as no list.
+	 */
+	nb.todos = fy_get(nb.store, "todos", fy_invalid);
+	if (!fy_is_sequence(nb.todos))
+		nb.todos = fy_invalid;
 	nb.op = fy_value(ctx->gb, op);
 	nb.from = ctx->branch_op_from ?
 		fy_value(ctx->gb, ctx->branch_op_from) : fy_invalid;
 	nb.prev = ctx->branch_prev;
+	/* An entry with no capture of its own keeps the state of its predecessor. */
+	if (fy_is_mapping(ctx->project_state))
+		nb.project = ctx->project_state;
 	fyai_branch_op_set(ctx, NULL, NULL);
 
 	entry = fyai_branch_build(ctx->gb, &nb);
@@ -1520,6 +1550,32 @@ err_out:
 	return -1;
 }
 
+/*
+ * Record the project with an entry that moves the head. A caller that set the
+ * state itself, as reset does, keeps it. A capture that fails is reported and
+ * the entry keeps the state of its predecessor.
+ */
+static void storage_project_state(struct fyai_ctx *ctx)
+{
+	struct fyai_branch prev;
+	fy_generic ref, section;
+
+	if (fy_is_mapping(ctx->project_state) || !fyai_project_state_enabled(ctx) ||
+	    storage_session_defer(ctx))
+		return;
+	fyai_branch_decode(ctx->branch_prev, &prev);
+	if (prev.head.v == ctx->last_message.v)
+		return;
+	if (fyai_project_state_capture(ctx, &ref) || !fy_is_mapping(ref))
+		return;
+	/* A state that did not change is shared with the entry before it. */
+	section = prev.project;
+	if (fy_is_mapping(section) && fy_equal(fy_get(section, "root", ""),
+					       fy_get(ref, "root", "")))
+		return;
+	ctx->project_state = ref;
+}
+
 int fyai_publish_state(struct fyai_ctx *ctx)
 {
 	struct timespec t_reconcile, t_publish;
@@ -1542,6 +1598,7 @@ int fyai_publish_state(struct fyai_ctx *ctx)
 	op = ctx->branch_op;
 	from = ctx->branch_op_from;
 	fyai_prof_stamp(&t_publish);
+	storage_project_state(ctx);
 
 	for (tries = 0; tries < FYAI_STATE_PUBLISH_TRIES; tries++) {
 		fyai_branch_op_set(ctx, op, from);
@@ -1552,6 +1609,7 @@ int fyai_publish_state(struct fyai_ctx *ctx)
 				fyai_prof_count("publish_cas_lost", tries);
 			fyai_prof_since("publish_total", &t_publish);
 			ctx->branch_store = fy_invalid;
+			ctx->project_state = fy_invalid;
 			return 0;
 		}
 		if (rc < 0)
@@ -1560,12 +1618,14 @@ int fyai_publish_state(struct fyai_ctx *ctx)
 		fyai_prof_stamp(&t_reconcile);
 		if (publish_reconcile(ctx)) {
 			ctx->branch_store = fy_invalid;
+			ctx->project_state = fy_invalid;
 			return -1;
 		}
 		fyai_prof_since("publish_reconcile", &t_reconcile);
 	}
 	fyai_prof_count("publish_cas_lost", tries);
 	ctx->branch_store = fy_invalid;
+	ctx->project_state = fy_invalid;
 	/* Report the branch and the exhausted retry count. */
 	if (rc > 0)
 		fyai_error(ctx, "branch '%s' lost the state race %d times; "
@@ -1952,6 +2012,9 @@ int fyai_gc_storage(struct fyai_ctx *ctx)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct fyai_gc_args *args = &cfg->cmd.args.gc;
+	struct fyai_view_gc_stats stats;
+	struct fyai_root r;
+	fy_generic root;
 	int rc;
 
 	if (access(cfg->arena_dir, F_OK)) {
@@ -1967,16 +2030,33 @@ int fyai_gc_storage(struct fyai_ctx *ctx)
 	 * the rewrite and release it again - the compaction needs a quiescent
 	 * arena.
 	 */
+	if (fyai_setup_storage(ctx))
+		return -1;
 	if (args->keep_reflogs >= 1) {
-		if (fyai_setup_storage(ctx))
-			return -1;
 		rc = fyai_reflog_truncate(ctx, args->keep_reflogs);
-		fyai_close_storage(ctx);
 		if (rc) {
+			fyai_close_storage(ctx);
 			fyai_error(ctx, "gc: failed to truncate ref log");
 			return -1;
 		}
+		/* The roots are those of the cut ref log. */
+		root = (fy_generic){ .v = ctx->refs_head };
+		if (fyai_root_decode(root, &r) >= 0)
+			ctx->arena_branches = r.branches;
 	}
+	/*
+	 * The files of the project storage that the arena no longer reaches go
+	 * while the arena is open to read the references, and before the
+	 * compaction needs it quiet.
+	 */
+	rc = fyai_view_gc(ctx, args->grace, &stats);
+	args->manifests = stats.manifests;
+	args->objects = stats.objects;
+	args->runtimes = stats.runtimes;
+	args->bytes = stats.bytes;
+	fyai_close_storage(ctx);
+	if (rc)
+		return -1;
 	rc = fy_durable_arena_gc(cfg->arena_dir);
 	if (rc == 1) {
 		fyai_error(ctx, "gc: arena is busy");

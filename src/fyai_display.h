@@ -36,6 +36,8 @@ size_t fyai_display_source_rows(const struct fyai_cfg *cfg, const char *md,
 int fyai_display_repaint(struct fyai_ctx *ctx, int rows);
 int fyai_export_view(struct fyai_ctx *ctx, const char *path,
 		     const char *ref);
+/* Present a raw patch on pipes and the configured diff renderer on terminals. */
+int fyai_present_diff(struct fyai_ctx *ctx, const char *diff, bool unified);
 /*
  * Show the diff of the exports of two ref-log entries: the unified text on
  * output that is not a terminal; on a terminal the diff view, or with
@@ -70,6 +72,15 @@ int fyai_record_tool_exchange(struct fyai_ctx *ctx, fy_generic tool_call,
  * Present and record a call that the provider ran, such as web_search. It
  * stores a title row with the outcome and no result fragment.
  */
+/*
+ * Present what a group of tool calls changed in the project, as the diff text,
+ * under the calls. It is stored in the open assistant document as a `tool_text`
+ * fragment with the language diff, so a replay draws it again from the record. Does
+ * nothing for an empty diff or without an open document. Return 0, or -1 with the
+ * cause reported.
+ */
+int fyai_present_tool_diff(struct fyai_ctx *ctx, const char *diff);
+
 int fyai_present_hosted_call(struct fyai_ctx *ctx, const char *name,
 			     fy_generic args, bool ok, const char *cause);
 /*
@@ -82,6 +93,14 @@ void fyai_print_login_url(struct fyai_ctx *ctx, const char *lead,
 void fyai_render_tool_result(struct fyai_sink *sink, struct fyai_cfg *cfg,
 			     fy_generic content,
 			     const char *lang, int preview_lines);
+/*
+ * The language of a tool result that is Markdown written for the user by the
+ * format_result function of the tool. The stored fragment keeps that Markdown.
+ */
+#define FYAI_RESULT_MARKDOWN "fyai:markdown"
+/* Draw @len bytes of Markdown as the body of a tool call. */
+void fyai_render_tool_markdown(struct fyai_sink *sink, struct fyai_cfg *cfg,
+			       const char *md, size_t len);
 int fyai_render_display_output(struct fyai_ctx *ctx, const char *tag,
 			       const char *markdown);
 /* Build the title and marked body of a tool call. */
@@ -106,6 +125,19 @@ void fyai_emit_tool_call(struct fyai_ctx *ctx, FILE *mf,
 			 struct fy_generic_builder *gb,
 			 const char *name, fy_generic args, int preview_lines,
 			 struct fyai_md_blocks *blocks);
+/* Title rows of the tools whose head needs the block and patch emitters. */
+void fyai_tool_head_shell(struct fyai_ctx *ctx, FILE *mf,
+			  struct fy_generic_builder *gb, fy_generic args,
+			  int preview_lines, struct fyai_md_blocks *blocks);
+void fyai_tool_head_read_file(struct fyai_ctx *ctx, FILE *mf,
+			      struct fy_generic_builder *gb, fy_generic args,
+			      int preview_lines, struct fyai_md_blocks *blocks);
+void fyai_tool_head_write_file(struct fyai_ctx *ctx, FILE *mf,
+			       struct fy_generic_builder *gb, fy_generic args,
+			       int preview_lines, struct fyai_md_blocks *blocks);
+void fyai_tool_head_apply_patch(struct fyai_ctx *ctx, FILE *mf,
+				struct fy_generic_builder *gb, fy_generic args,
+				int preview_lines, struct fyai_md_blocks *blocks);
 int fyai_tool_preview_lines(const struct fyai_cfg *cfg, const char *name);
 
 /*

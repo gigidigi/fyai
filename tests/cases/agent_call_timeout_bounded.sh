@@ -29,12 +29,12 @@ mock_start agent_call_timeout_scaled.json
 
 # The call requests 1500 units, and the configured maximum is 800 units.
 run_fyai --set display/stream=false --set agent/timeout_ms=0 \
-	 --set agent/max_timeout_ms="$bounded_ms" \
+	 --set agent/max_timeout_ms="$bounded_ms" --set agent/hang_timeout_ms="$requested_ms" \
 	 --set api=responses --set api_url="$MOCK_URL/v1/responses" \
 	 -m mock-model "delegate a task that does not end"
 assert_status 0
 assert_stdout_contains "The sub-agent was stopped."
-assert_any_request "'timed out after $bounded_ms ms' in json.dumps(r)"
+assert_any_request "'agent hang timeout after $((bounded_ms + requested_ms)) ms' in json.dumps(r)"
 assert_any_request "any(item.get('content') == 'x' for item in r['body'].get('input', []))"
 
 mock_stop 3

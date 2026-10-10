@@ -224,9 +224,8 @@ int markdown_fullscreen_ground_sgr(const struct fyai_cfg *cfg,
 		return 0;
 	buf[0] = '\0';
 	if (!cfg || !cfg->markdown || !cfg->palette ||
-	    !cfg->renderer || strcmp(cfg->renderer, "page") ||
 	    !cfg->screen || strcmp(cfg->screen, "fullscreen") ||
-	    (cfg->theme_ground && strcmp(cfg->theme_ground, "theme")) ||
+	    (!cfg->theme_ground || strcmp(cfg->theme_ground, "theme")) ||
 	    !markdown_color_enabled(cfg->color))
 		return 0;
 	n = fypal_ctx_color_sgr(cfg->palette, "ground", FYPAL_LAYER_BG, buf, size);
@@ -284,6 +283,192 @@ bool markdown_focus_ground(const struct fyai_cfg *cfg, uint32_t *rgb)
 		return false;
 	*rgb = s.bg;
 	return true;
+}
+
+/* The rgb ground of @role of the palette into *@rgb; false for none. */
+static bool markdown_role_ground(const struct fyai_cfg *cfg, const char *role,
+				 uint32_t *rgb)
+{
+	const struct fypal_role *r;
+	struct fypal_style s;
+
+	r = fypal_ctx_role(cfg->palette, role);
+	if (!r)
+		return false;
+	fypal_ctx_resolve(cfg->palette, r, &s);
+	if (!FYPAL_COLOR_IS_RGB(s.bg))
+		return false;
+	*rgb = s.bg;
+	return true;
+}
+
+bool markdown_command_ground(const struct fyai_cfg *cfg, uint32_t *rgb)
+{
+	const struct fypal_caps *caps;
+	uint32_t base, tint, v;
+	const char *text;
+	char *end;
+
+	if (!cfg || !rgb || !markdown_color_enabled(cfg->color))
+		return false;
+	text = cfg->command_bg;
+	if (!text || !*text || !strcmp(text, "none"))
+		return false;
+	/* A colour of the user's own is used as it is given. */
+	if (text[0] == '#') {
+		v = (uint32_t)strtoul(text + 1, &end, 16);
+		if (strlen(text) != 7 || *end)
+			return false;
+		*rgb = v;
+		return true;
+	}
+	/* The theme wash is a shade of the ground: it needs 24-bit colour. */
+	if (strcmp(text, "theme") || !cfg->palette)
+		return false;
+	caps = fypal_ctx_caps(cfg->palette);
+	if (!caps || caps->depth < FYPAL_DEPTH_TRUECOLOR)
+		return false;
+	/* The ground under the text: the page fills it from the theme on a
+	 * fullscreen page with a theme ground, else it is the terminal's. */
+	if (cfg->screen && !strcmp(cfg->screen, "fullscreen") &&
+	    (cfg->theme_ground && !strcmp(cfg->theme_ground, "theme")) &&
+	    markdown_role_ground(cfg, "ground", &base)) {
+		;
+	} else if (cfg->terminal.flags & FYPAL_TERM_BACKGROUND) {
+		base = cfg->terminal.background;
+	} else {
+		return false;
+	}
+	if (!markdown_role_ground(cfg, "pane.focus", &tint))
+		return false;
+	*rgb = fypal_mix(base, tint, (double)cfg->command_bg_mix / 100.0);
+	return true;
+}
+
+/* The columns that @len bytes of @p draw, without their escape sequences. */
+static int markdown_visible_cols(const char *p, size_t len)
+{
+	const char *end = p + len;
+	unsigned int cp;
+	size_t n;
+	int cols = 0;
+
+	while (p < end) {
+		if (*p == '\x1b' && p + 1 < end && p[1] == '[') {
+			for (p += 2; p < end && !(*p >= 0x40 && *p <= 0x7e); p++)
+				;
+			if (p < end)
+				p++;
+			continue;
+		}
+		if (*p == '\x1b' && p + 1 < end && p[1] == ']') {
+			for (p += 2; p < end && *p != '\a' &&
+			     !(*p == '\x1b' && p + 1 < end && p[1] == '\\'); p++)
+				;
+			p += p < end && *p == '\a' ? 1 : p < end ? 2 : 0;
+			continue;
+		}
+		n = fymd_utf8_decode(p, (size_t)(end - p), &cp);
+		if (!n)
+			break;
+		cols += fymd_cp_width(cp);
+		p += n;
+	}
+	return cols;
+}
+
+/*
+ * The length of the SGR sequence at @p, of at most @len bytes, when it resets
+ * the background: no parameter, a 0 or a 49. The parameters of a colour, after
+ * 38, 48 or 58, are not read as such. Returns 0 for any other sequence.
+ */
+static size_t markdown_sgr_resets_bg(const char *p, size_t len)
+{
+	size_t i = 2, start;
+	long v, skip = 0;
+	bool resets = false, any = false;
+
+	while (i < len && ((p[i] >= '0' && p[i] <= '9') || p[i] == ';' ||
+			   p[i] == ':'))
+		i++;
+	if (i >= len || p[i] != 'm')
+		return 0;
+	if (i == 2)
+		return 3;	/* ESC [ m */
+	for (start = 2; start < i; ) {
+		v = 0;
+		while (start < i && p[start] >= '0' && p[start] <= '9')
+			v = v * 10 + (p[start++] - '0');
+		/* A sub-parameter belongs to the colour before it. */
+		if (start < i && p[start] == ':') {
+			while (start < i && p[start] != ';')
+				start++;
+		}
+		if (skip < 0) {
+			/* 38;5;N takes one more, 38;2;R;G;B three more. */
+			skip = v == 5 ? 1 : v == 2 ? 3 : 0;
+		} else if (skip > 0) {
+			skip--;
+		} else if (v == 38 || v == 48 || v == 58) {
+			skip = -1;
+		} else if (v == 0 || v == 49) {
+			resets = true;
+		}
+		any = true;
+		if (start < i && p[start] == ';')
+			start++;
+	}
+	return resets || !any ? i + 1 : 0;
+}
+
+int markdown_ground_rows(const struct fyai_cfg *cfg, uint32_t rgb,
+			 const char *text, size_t len,
+			 struct response_buffer *out)
+{
+	const char *p = text, *end = text + len, *nl, *q;
+	char ground[32];
+	size_t n, glen, k, sl;
+	int width, cols, pad;
+
+	width = cfg->render_width > 0 ? cfg->render_width :
+		markdown_render_width();
+	glen = (size_t)snprintf(ground, sizeof(ground), "\x1b[48;2;%u;%u;%um",
+				(rgb >> 16) & 0xff, (rgb >> 8) & 0xff,
+				rgb & 0xff);
+	while (p < end) {
+		nl = memchr(p, '\n', (size_t)(end - p));
+		n = nl ? (size_t)(nl - p) : (size_t)(end - p);
+		if (response_buffer_append_data(out, ground, glen))
+			return -1;
+		/* An SGR that resets the background, a whole reset or 49 alone
+		 * or among other parameters, ends the ground: set it again. */
+		for (q = p, k = 0; k < n; k++) {
+			if (p[k] != '\x1b' || k + 1 >= n || p[k + 1] != '[')
+				continue;
+			sl = markdown_sgr_resets_bg(p + k, n - k);
+			if (!sl)
+				continue;
+			if (response_buffer_append_data(out, q,
+					(size_t)(p + k + sl - q)) ||
+			    response_buffer_append_data(out, ground, glen))
+				return -1;
+			q = p + k + sl;
+			k += sl - 1;
+		}
+		if (response_buffer_append_data(out, q, (size_t)(p + n - q)))
+			return -1;
+		/* The ground runs to the edge of the render, a band. */
+		cols = markdown_visible_cols(p, n);
+		for (pad = width - cols; pad > 0; pad--)
+			if (response_buffer_append_data(out, " ", 1))
+				return -1;
+		if (response_buffer_append_data(out, "\x1b[0m", 4))
+			return -1;
+		if (nl && response_buffer_append_data(out, "\n", 1))
+			return -1;
+		p = nl ? nl + 1 : end;
+	}
+	return 0;
 }
 
 void markdown_palettes_destroy(struct fyai_cfg *cfg)
@@ -488,6 +673,14 @@ const struct fypal_term *fyai_terminal_probe(struct fyai_cfg *cfg)
 	/* A sub-agent draws on a terminal that the parent emulates. */
 	if (cfg->agent_pty)
 		return &cfg->terminal;
+	/*
+	 * Ask the terminal that this run draws on and reads from. A process can
+	 * have a controlling terminal with its output elsewhere, as a build
+	 * machine gives it, and nothing answers there: the probe would wait for
+	 * its time limit.
+	 */
+	if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+		return &cfg->terminal;
 	probe = fypal_probe_create();
 	if (!probe) {
 		fyai_cfg_warning(cfg, "cannot create the terminal probe");
@@ -583,7 +776,7 @@ static struct fypal_ctx *markdown_palette_create(struct fyai_cfg *cfg,
 						 const char *name,
 						 const char *variant)
 {
-	const char *ground = cfg->theme_ground ? cfg->theme_ground : "theme";
+	const char *ground = cfg->theme_ground ? cfg->theme_ground : "terminal";
 	struct fymd_renderer_cfg rcfg;
 	struct fymd_renderer *r;
 	struct fypal_ctx **palettes;
@@ -1519,6 +1712,49 @@ int fyai_render_fenced_marked(struct fyai_ctx *ctx, const char *text,
 out:
 	free(rendered.data);
 	return -1;
+}
+
+int fyai_print_markdown_body(struct fyai_sink *sink, struct fyai_cfg *cfg,
+			     const char *text, size_t len)
+{
+	struct response_buffer out = {0};
+	const char *indent = markdown_tool_output_indent(cfg);
+	char *indented = NULL;
+	size_t ilen = 0, start = 0, end;
+	FILE *mf;
+	int saved, rc;
+
+	if (!len)
+		return 0;
+	saved = fyai_width_reserve_begin(cfg, fyai_indent_cols(indent));
+	rc = markdown_render(cfg, text, len, &out,
+			     markdown_color_enabled(cfg->color),
+			     cfg->theme_variant);
+	fyai_width_reserve_end(cfg, saved);
+	if (rc || !out.data) {
+		free(out.data);
+		return -1;
+	}
+	end = out.len;
+	while (start < end && (out.data[start] == '\n' || out.data[start] == '\r'))
+		start++;
+	while (end > start && (out.data[end - 1] == '\n' ||
+			       out.data[end - 1] == '\r'))
+		end--;
+	if (end > start) {
+		mf = open_memstream(&indented, &ilen);
+		if (mf) {
+			fyai_fwrite_indented(mf, indent, out.data + start,
+					     end - start);
+			fclose(mf);
+			(void)fyai_sink_write(sink, FYAI_SINK_TRANSCRIPT,
+					      indented, ilen);
+			free(indented);
+		}
+	}
+	(void)fyai_sink_write(sink, FYAI_SINK_TRANSCRIPT, "\n", 1);
+	free(out.data);
+	return 0;
 }
 
 int fyai_print_fenced(struct fyai_sink *sink, struct fyai_cfg *cfg,

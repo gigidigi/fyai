@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "fyai.h"
+#include "fyai_transport_boot.h"
 #include "fyai_cmd.h"
 #include "fyai_cmd_int.h"
 #include "fyai_agents.h"
@@ -33,6 +34,8 @@
 #include "fyai_merge.h"
 #include "fyai_secret.h"
 #include "fyai_storage.h"
+#include "fyai_view.h"
+#include "utils.h"
 
 #define FYAI_MODULE FYAIEM_UNKNOWN
 
@@ -41,6 +44,7 @@ int fyai_cmd_reset(struct fyai_cmd_call *call, fy_generic *result)
 	struct fyai_ctx *ctx = call->ctx;
 	const char *ref = fyai_cmd_arg_str(call, "ref");
 	const char *branch;
+	fy_generic project;
 	long long turns;
 	int rc;
 
@@ -50,6 +54,10 @@ int fyai_cmd_reset(struct fyai_cmd_call *call, fy_generic *result)
 				 !fyai_agents_attached(ctx), err,
 				 "branch changes require idle model and tool "
 				 "work");
+	/* The files first: a project that cannot take the state leaves the head where it is. */
+	rc = fyai_project_state_restore(ctx, ref, fyai_cmd_arg_bool(call, "force"), call->gb,
+					&project);
+	fyai_error_check(ctx, !rc, err, "reset: could not restore the project state");
 	rc = fyai_branch_reset(ctx, ref);
 	fyai_error_check(ctx, !rc, err, "reset: could not move the branch "
 			 "head");
@@ -62,7 +70,13 @@ int fyai_cmd_reset(struct fyai_cmd_call *call, fy_generic *result)
 				       FYAI_BRANCH_WALK_MAX);
 	*result = fy_mapping(call->gb, "branch", branch, "ref", ref,
 			     "turns", turns,
-			     "previous", fy_sprintfa("%s@{1}", branch));
+			     "previous", fy_sprintfa("%s@{1}", branch),
+			     "project_note", fy_is_valid(project) ?
+				     fy_stringf(call->gb, "; the project: %s",
+						fy_castp(&project, "")) :
+				     fy_value(call->gb, ""));
+	if (fy_is_valid(project))
+		*result = fy_assoc(call->gb, *result, "project", project);
 	return 0;
 err:
 	return -1;
@@ -293,7 +307,7 @@ static fy_generic list_renderopts(struct fy_generic_builder *gb,
 	if (!strcmp(what, "reflog"))
 		return fy_mapping(gb, "empty", "no ref log",
 			"keys", fy_sequence(gb, "index", "ref", "kind", "from",
-					    "model", "created"),
+					    "model", "created", "project"),
 			"columns", fy_mapping(gb,
 				"ref", fy_mapping(gb, "name", "Ref",
 						  "align", "left"),
@@ -395,11 +409,18 @@ int fyai_cmd_gc(struct fyai_cmd_call *call, fy_generic *result)
 	int rc;
 
 	args->keep_reflogs = fy_get(call->args, "keep_reflogs", -1LL);
+	if (fy_get(call->args, "tips", false))
+		args->keep_reflogs = 1;
+	args->grace = (unsigned int)fy_get(call->args, "grace", 3600LL);
 	rc = fyai_gc_storage(call->ctx);
 	if (rc < 0)
 		return -1;
 	*result = fy_mapping(call->gb, "arena", call->ctx->cfg->arena_dir,
-			     "compacted", rc == 0, "missing", rc == 1);
+			     "compacted", (bool)(rc == 0), "missing", (bool)(rc == 1),
+			     "project", fy_stringf(call->gb, "removed %zu manifests, %zu objects "
+						   "and %zu view trees (%llu bytes)",
+						   args->manifests, args->objects, args->runtimes,
+						   args->bytes));
 	return 0;
 }
 
@@ -440,6 +461,8 @@ int fyai_cmd_log(struct fyai_cmd_call *call, fy_generic *result)
 	}
 	if (fy_any_equal(action, "start", "stop"))
 		fyai_log_set(ctx->cfg, target, fy_equal(action, "start"));
+	/* The wire and the transport logs are written by the transport. */
+	fyai_transport_sync_logging(ctx);
 	data = fyai_log_status_data(ctx, call->gb);
 	*result = call->format == FYAI_CMD_OUT_MARKDOWN ?
 		  log_words(call->gb, data) : data;
@@ -477,4 +500,25 @@ int fyai_cmd_compact(struct fyai_cmd_call *call, fy_generic *result)
 {
 	(void)result;
 	return fyai_session_compact(call->ctx, fyai_cmd_arg_str(call, "hint"));
+}
+
+int fyai_cmd_render(struct fyai_cmd_call *call, fy_generic *result)
+{
+	const char *file = fyai_cmd_arg_str(call, "file");
+	char *md;
+
+	if (fy_str_empty(file) || !strcmp(file, "-"))
+		md = read_all_stdin();
+	else
+		md = read_text_file(file);
+	fyai_error_check(call->ctx, md, err,
+			 "render: cannot read %s", fy_str_empty(file) ||
+			 !strcmp(file, "-") ? "standard input" : file);
+	*result = fy_value(call->gb, (const char *)md);
+	free(md);
+	fyai_error_check(call->ctx, fy_is_valid(*result), err,
+			 "render: cannot keep the Markdown text");
+	return 0;
+err:
+	return -1;
 }
