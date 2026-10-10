@@ -81,6 +81,8 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define FYAI_BYTES_PER_TOKEN 4
 /* Default rendered rows of a tool result shown in the display view. */
 #define DEFAULT_TOOL_PREVIEW_LINES 5
+/* Rows of a running tool call that its tile keeps for scrolling back. */
+#define DEFAULT_TOOL_HISTORY_LINES 40
 /* Interactive history recap: -1 fills the screen, 0 is off, N is a count. */
 #define DEFAULT_RECAP_EXCHANGES (-1)
 #define DEFAULT_TOOL_UPDATE_INTERVAL_MS 33
@@ -99,7 +101,13 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 /* Where an editor runs: a tile of the work pane, or the whole terminal. */
 #define DEFAULT_EDITOR_MODE "pane"
 #define DEFAULT_COMPLETION_MODE "tab"
-#define DEFAULT_COMMAND_OUTPUT "pane"
+#define DEFAULT_CHORD_TIMEOUT_MS 1000
+#define DEFAULT_COMMAND_OUTPUT "transcript"
+#define DEFAULT_COMMAND_BG "theme"
+#define DEFAULT_COMMAND_BG_MIX 6
+#define DEFAULT_TOOL_DISPLAY "inline"
+#define DEFAULT_FOCUS_MARK "edge"
+#define DEFAULT_INLINE_TERMINAL_ROWS 12
 #define DEFAULT_FOCUS_BG "theme"
 #define DEFAULT_FOCUS_BG_MIX 35
 #define DEFAULT_WORK_ZOOM_ROWS "half"
@@ -112,8 +120,6 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 /* Separate adjacent tile columns. */
 #define DEFAULT_TILE_SEP " ┃ "
 #define DEFAULT_WORK_CONTROLS "full"
-/* Compose the live screen with the band stack or a UI Markdown page. */
-#define DEFAULT_RENDERER "page"
 /* Put the page on the alternate screen or in the scrollback. */
 #define DEFAULT_SCREEN "fullscreen"
 /* Mark shell commands and align continuation rows. */
@@ -134,7 +140,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
  * defaults; the bottom row is a {key} template reproducing the classic banner. */
 #define DEFAULT_PROMPT_BOTTOM \
 	" {model} · {provider} · {api}{effort}{summary}{temp}" \
-	"{tokens}{cache}{cost}"
+	"{tokens}{cache}{cost}{isolation}{view}"
 #define DEFAULT_PROMPT_TOP " {location}"
 /* Streaming markdown render cadence / colour / theme defaults. */
 #define DEFAULT_MARKDOWN_MODE "line"	/* oneshot | line | stream */
@@ -182,6 +188,7 @@ enum fyai_api_mode {
 struct fypal_ctx;
 
 struct fyai_cfg {
+	int exit_status; /* Exit status of a successfully executed CLI child. */
 	struct fy_allocator *allocator;
 	struct fy_generic_builder *gb;	/* the builder for the configuration */
 	enum fyai_api_mode api_mode;
@@ -210,6 +217,12 @@ struct fyai_cfg {
 	 * explicit and is re-derived for the new provider.
 	 */
 	bool api_key_explicit;
+	/*
+	 * Where the credential comes from, as the transport names a source:
+	 * "env:NAME", "secret:NAME", or "mem:cli" for --api-key. NULL when the
+	 * provider default applies. The value is never kept here.
+	 */
+	const char *api_key_ref;
 	bool api_key_auto;
 	const char *provider;
 	const char *prompt;
@@ -268,6 +281,7 @@ struct fyai_cfg {
 	int max_tokens;			/* output cap (required by Messages) */
 	int top_logprobs;
 	int tool_preview_lines;
+	int tool_history_lines;		/* rows of a live tool tile to scroll back */
 	int recap_exchanges;		/* interactive history recap exchanges */
 	int tool_update_interval_ms;
 	int retry_max_attempts;		/* provider attempts, 1 = no retry */
@@ -286,12 +300,18 @@ struct fyai_cfg {
 	const char *focus_bg;		/* ground of the focused tile, "" = none */
 	const char *focus_bg_checked;	/* the literal ground already reported */
 	int focus_bg_mix;		/* percent of it mixed into a colour */
+	const char *focus_mark;		/* wash | edge */
 	/* Work-pane configuration. */
 	const char *work_layout;	/* auto | columns | stack */
 	const char *work_position;	/* above-prompt | below-prompt */
 	const char *editor_mode;	/* pane | terminal */
 	const char *completion_mode;	/* tab | auto */
+	int chord_timeout_ms;		/* wait of a chord for its next key */
 	const char *command_output;	/* pane | transcript */
+	const char *command_bg;		/* theme | none | #rrggbb */
+	int command_bg_mix;		/* percent of the theme colour */
+	const char *tool_display;	/* pane | inline */
+	int inline_terminal_rows;	/* rows of an inline terminal */
 	int work_columns;		/* columns when work_layout is columns */
 	/* A side layout of the page document: auto takes it at the size the
 	 * document names, on whatever the size, off never. A panel size of 0
@@ -313,7 +333,6 @@ struct fyai_cfg {
 	const char *tile_frame;		/* chrome under a tile's title row */
 	const char *tile_sep;		/* rule between adjacent columns */
 	const char *work_controls;	/* none | zoom | full */
-	const char *renderer;		/* stack | page */
 	const char *page_path;		/* display/page: a page document file */
 	const char *screen;		/* display/screen: inline | fullscreen */
 	bool agent_pty;			/* this sub-agent has a terminal */
@@ -329,6 +348,8 @@ struct fyai_cfg {
 	int agent_timeout_ms;		/* sub-agent time limit (0 = none) */
 	int agent_max_timeout_ms;	/* bound on a model-asked limit (0 = none) */
 	int agent_hang_timeout_ms;	/* extra time after the advisory limit */
+	bool stdin_consumed;		/* the prompt was read from standard input */
+	const char *agent_transport_isolation;	/* none, auto, level-a or level-b */
 	bool agent_timeout_kill;	/* terminate an agent after the extra time */
 	int agent_max_branch_depth;	/* nesting cap for sub-agent branches */
 	const char *agent_spawn;	/* exec or fork: how a sub-agent child starts */
@@ -342,7 +363,8 @@ struct fyai_cfg {
 	bool parallel_tool_calls;
 	bool enable_builtin_shell;
 	bool enable_sandbox;	/* Landlock-confine shell tool sub-executions */
-	fy_generic sandbox;	/* config sandbox: mapping (allow/deny/network) */
+	fy_generic sandbox;	/* policy in force: mapping (allow/deny/network), or invalid */
+	bool sandbox_lockdown;	/* the policy is the lockdown profile */
 	bool interactive;
 	int debug;
 	bool pretty;
@@ -355,6 +377,7 @@ struct fyai_cfg {
 	bool stream_logging;
 	bool conversation_logging;
 	bool mcp_logging;
+	bool transport_logging;
 	bool whitewash_api_keys;
 	bool logprobs;
 	/*
@@ -409,9 +432,12 @@ struct fyai_cfg {
 	 */
 	bool transient;
 	/* True in a sub-agent child. */
+	int transport_ctl_fd;		/* fyai transport: the control channel */
 	bool agent_child;
 	/* The parent limits a forked tool job. */
 	bool tool_child;
+	/* The command line of this process, kept to run it again in a view. */
+	char *const *argv;
 	/* Serve the agent protocol on standard input and output. */
 	bool agent_rpc;
 	/* Serve a normal arena-backed session over standard I/O. */
@@ -429,6 +455,17 @@ struct fyai_cfg {
 	fy_generic mcp_servers;		/* named server mapping (mapping generic) */
 	int mcp_timeout;			/* seconds (default 30) */
 
+	/* Invocation-local filesystem view paths; never stored in configuration. */
+	const char *view_project;
+	const char *view_scratch;
+	/*
+	 * The arena of an agent runtime in a view: a detached mount that only
+	 * this descriptor reaches, and its /proc/self/fd path. -1 and NULL
+	 * when absent. The descriptor is close-on-exec; only an execution of
+	 * this program receives it.
+	 */
+	int view_arena_fd;
+	const char *view_arena;
 	const char *arena_dir;
 	bool arena_dir_selected;
 	/*
@@ -537,6 +574,20 @@ struct fyai_catalog_update_request;
 struct fyai_event_loop;
 struct fyai_event_source;
 
+/* Token and cost totals of the usage that some turns carry. */
+struct fyai_usage_sum {
+	long long input;
+	long long cached;
+	long long cache_write;
+	long long output;
+	long long reasoning;
+	long long total;
+	double cost;
+	double cost_est;	/* the part of @cost that is estimated */
+	int calls;
+};
+
+struct fyai_ask_pending;
 struct fyai_ctx {
 	struct fyai_cfg *cfg;
 	struct fy_allocator *durable_allocator;
@@ -556,6 +607,31 @@ struct fyai_ctx {
 	/* Release idle-operation scratch storage on the next loop iteration. */
 	bool transient_autorelease;
 	CURL *curl;
+	/* Channel to the credential transport; NULL when this process talks to
+	 * the provider itself. See fyai_xfer.h. */
+	struct fyai_tclient *tclient;
+	int transport_ctl;		/* control channel; -1 if none */
+	pid_t transport_pid;
+	bool transport_owner;		/* this process started the transport */
+	/* This process holds the primary control connection and states the profiles. */
+	bool transport_primary;
+	struct fyai_event_source *transport_src;	/* drains the control channel */
+	uint64_t transport_exec;	/* the execution the transport knows us as */
+	long long transport_seq;
+	char transport_why[160];	/* the cause of a failed control request */
+	/* Profile names that this execution has stated and been granted. */
+	char transport_names[64][64];
+	unsigned int transport_nnames;
+	unsigned int transport_gen;	/* the configuration the supervisor last stated */
+	bool transport_stated;
+	int transport_envfd;		/* read end of a credential grant; <= 2: none */
+	/* The model transfer in progress. */
+	const char *xfer_body;
+	const char *xfer_url;		/* NULL: the endpoint of the configuration */
+	const char *xfer_profile;	/* NULL: "model" */
+	long xfer_status;		/* of the last transfer that finished */
+	long xfer_retry_after;
+	char xfer_error[256];
 	/* Per-invocation curl multi state. */
 	struct fyai_curl_state *curl_state;
 
@@ -624,6 +700,21 @@ struct fyai_ctx {
 	 * branch_prev, or fy_invalid. The publish consumes it.
 	 */
 	fy_generic branch_store;
+	/* The project state that the next entry records, or fy_invalid. */
+	fy_generic project_state;
+	/*
+	 * The groups of tool calls of this session that changed the project and showed it:
+	 * a sequence of {before, after} project states, the newest last. `undo` takes it back.
+	 */
+	fy_generic tool_changes;
+	/* The private storage of the project states of a run in a view exists. */
+	bool tool_diff_storage;
+	/*
+	 * The turn in flight shows what each group of tool calls changed, so a patch
+	 * does not display its own diff. Set from the start of the turn until it ends,
+	 * and cleared when the project states can no longer be taken.
+	 */
+	bool tool_diff_tracking;
 	uint64_t refs_head;
 	struct curl_slist *headers;
 	char *auth_header;
@@ -643,12 +734,19 @@ struct fyai_ctx {
 	void *tty_session;		/* the PTY session running in this process */
 	struct fyai_tool_job *tool_jobs;	/* live jobs, for a resize */
 	struct fyai_btw_run *btw_runs;	/* side questions in this session */
+	struct fyai_agent_bg_run *agent_bg_runs; /* background sub-agents */
+	struct fyai_monitor_run *monitors;	/* running monitors */
 	/* Named terminal sessions, each one a process of its own. The view of
 	 * a session lives here and so outlives the process that drove it. */
 	struct fyai_shell_session *shell_sessions;
 	/* The one owner of work-pane geometry, focus, and zoom. */
 	struct fyai_workpane_manager *workpane;
 	struct fyai_wait *waits;	/* named waits, live for this run */
+	struct fyai_ask_pending *asks;	/* background questions that wait for the user */
+	unsigned int asks_seq;		/* the number of the last question named by default */
+	struct fyai_waiter *waiters;	/* waits that hold a call, active */
+	struct fyai_event_source *waiter_tick;	/* earliest deadline of a waiter */
+	bool waiter_kick;			/* a look at the waiters is queued */
 	/* Events queued for model turns in arrival order. */
 	struct fyai_pending_event *events;
 	struct fyai_pending_event **events_tail;
@@ -688,7 +786,28 @@ struct fyai_ctx {
 	long long usage_reasoning;
 	long long usage_total;
 	double usage_cost;
+	/* The part of usage_cost that is estimated from the catalogue prices. */
+	double usage_cost_est;
 	int usage_calls;
+	/*
+	 * What the sub-agents of the branch used, from their own branches.
+	 * Made again when the branch table or the head changes; @usage_agents_root
+	 * is the branch table that it was made from.
+	 */
+	struct fyai_usage_sum usage_agents;
+	int usage_agent_count;
+	fy_generic usage_agents_root;
+	/* The turn that the counters above total; see fyai_usage_sync(). */
+	fy_generic usage_head;
+	/*
+	 * The cost of a change of model: the next request has no cache on the
+	 * new model. @switch_prefix tokens cost @switch_fresh there, and
+	 * @switch_stay on the model that was left. Pending until a call ends.
+	 */
+	bool switch_pending;
+	long long switch_prefix;
+	double switch_fresh;
+	double switch_stay;
 	/* Last model call's usage (ground truth for context fill). */
 	long long last_call_input;
 	long long last_call_output;
@@ -760,6 +879,9 @@ fy_generic fyai_run_turn(struct fyai_ctx *ctx, fy_generic turn);
 
 /* Queue owned @text for the event-loop owner to submit between turns. */
 int fyai_event_inject(struct fyai_ctx *ctx, char *text);
+/* The same, with the text made from a format. Return 0, or -1 on failure. */
+int fyai_event_injectf(struct fyai_ctx *ctx, const char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
 /*
  * What a queued event reports for. A wait event names its owner: the
  * report reaches the model after the poll that queued it, and the wait
@@ -779,6 +901,24 @@ int fyai_event_inject_owned(struct fyai_ctx *ctx, char *text,
 /* Take the oldest queued event, or NULL. The caller owns it. */
 char *fyai_event_take(struct fyai_ctx *ctx);
 bool fyai_event_queued(const struct fyai_ctx *ctx);
+/* Whether a live event whose text starts with @prefix is queued. */
+bool fyai_event_pending_prefix(struct fyai_ctx *ctx, const char *prefix);
+/*
+ * Copy the oldest live event whose text starts with @prefix, or return NULL.
+ * The event stays queued and is marked as seen by a waiter: every waiter that
+ * asks while the mark stands gets the same event, and the turn loop does not
+ * deliver it. fyai_events_purge_seen() removes the marked events.
+ */
+char *fyai_event_peek_prefix(struct fyai_ctx *ctx, const char *prefix);
+/*
+ * The conversation was replaced (resume, checkout, reset, clear): what the
+ * model started in the old one does not report into the new one. End the
+ * background sub-agents, monitors and named waits, and drop the queued
+ * events. Terminal sessions belong to the user's screen and stay.
+ */
+void fyai_background_reset(struct fyai_ctx *ctx);
+/* Remove the events that waiters have seen. */
+void fyai_events_purge_seen(struct fyai_ctx *ctx);
 /* Take the oldest event with a live owner, dropping stale waits first. */
 char *fyai_event_take_live(struct fyai_ctx *ctx);
 void fyai_events_release(struct fyai_ctx *ctx);
@@ -805,5 +945,18 @@ int fyai_request_state_apply(struct fyai_ctx *ctx);
  * connection cache after fork.
  */
 int fyai_curl_easy_reinit(struct fyai_ctx *ctx);
+
+/*
+ * True if a model request can be authenticated: this image holds a key, a
+ * ChatGPT login, or needs none, or the key is at the credential transport,
+ * which this image cannot see.
+ */
+static inline bool fyai_credential_available(const struct fyai_ctx *ctx)
+{
+	const struct fyai_cfg *cfg = ctx->cfg;
+
+	return (cfg->api_key && *cfg->api_key) || cfg->chatgpt_auth ||
+	       cfg->no_auth || ctx->tclient;
+}
 
 #endif

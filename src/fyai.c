@@ -26,6 +26,8 @@
 #include "fyai.h"
 #include "fyai_cmd.h"
 #include "fyai_agent.h"
+#include "fyai_monitor.h"
+#include "fyai_tool_registry.h"
 #include "fyai_catalog.h"
 #include "fyai_config.h"
 #include "fyai_crash.h"
@@ -37,6 +39,7 @@
 #include "fyai_markdown.h"
 #include "fyai_model.h"
 #include "fyai_provider.h"
+#include "fyai_auth_util.h"
 #include "fyai_output.h"
 #include "fyai_sink.h"
 #include "fyai_session.h"
@@ -45,9 +48,13 @@
 #include "fyai_prof.h"
 #include "fyai_ui.h"
 #include "fyai_tools.h"
+#include "fyai_view.h"
+#include "fyai_asks.h"
 #include "fyai_wait.h"
 #include "fyai_storage.h"
 #include "fyai_stream.h"
+#include "fyai_transport_boot.h"
+#include "fyai_xfer.h"
 #include "fyai_terminal.h"
 #include "fyai_terminal_session.h"
 #include "fyai_tool_spec.h"
@@ -153,7 +160,11 @@ static void fyai_accumulate_usage(struct fyai_ctx *ctx, fy_generic usage)
 	ctx->usage_reasoning += fy_get(usage, "reasoning", 0LL);
 	ctx->usage_total += fy_get(usage, "total", 0LL);
 	ctx->usage_cost += fy_get(usage, "cost", 0.0);
+	if (fy_get(usage, "est", (_Bool)false))
+		ctx->usage_cost_est += fy_get(usage, "cost", 0.0);
 	ctx->usage_calls++;
+	/* The request that paid for the change of model is over. */
+	ctx->switch_pending = false;
 
 	/* Last-call snapshot: ground truth for the /context fill report. */
 	ctx->last_call_input = fy_get(usage, "input", 0LL);
@@ -185,14 +196,15 @@ void fyai_print_usage_stats(struct fyai_ctx *ctx)
 		(void)fyai_report(ctx, " reasoning=%lld", ctx->usage_reasoning);
 	(void)fyai_report(ctx, " total=%lld", ctx->usage_total);
 	if (ctx->usage_cost > 0.0)
-		(void)fyai_report(ctx, " cost=$%.6f", ctx->usage_cost);
+		(void)fyai_report(ctx, " cost=%s$%.6f",
+				  ctx->usage_cost_est > 0.0 ? "~" : "",
+				  ctx->usage_cost);
 	(void)fyai_report(ctx, "\n");
 }
 
 static bool fyai_is_tool_marked(const char *name)
 {
-	return fy_any_equal(name, "shell", "agent", "read_file", "write_file",
-			    "apply_patch");
+	return fyai_tool_has(name, FYAI_TOOL_MARKED);
 }
 
 static fy_generic fyai_finish_tool_call(struct fyai_ctx *ctx, fy_generic turn,
@@ -718,7 +730,7 @@ static int fyai_model_step_submit_request(struct fyai_model_step *step,
 	/* Build + serialize done: this is "time to emit the request". */
 	fyai_prof_since("request_emit", t_emit);
 
-	curl_easy_setopt(ctx->curl, CURLOPT_POSTFIELDS, request_body);
+	fyai_xfer_set_body(ctx, request_body);
 
 	/* The parent surface supplies a delegated sub-agent's activity mark. */
 	step->spinner.enabled = !fyai_ui_active(ctx) &&
@@ -990,6 +1002,14 @@ static int fyai_model_step_start(struct fyai_model_step *step)
 	step->tool_sink.ctx = ctx;
 	step->tool_sink.group = step->tool_group;
 
+	if (cfg->chatgpt_auth) {
+		fyai_error_check(ctx, cfg->api_mode == FYAI_API_RESPONSES &&
+			!cfg->response_chain && cfg->api_url &&
+			!strcmp(cfg->api_url, OPENAI_RESPONSES_URL), out,
+			"ChatGPT plan usage requires the public, stateless Responses endpoint");
+		cfg->stream = true;
+	}
+
 	rc = fyai_model_step_context_check(ctx, turn);
 	fyai_error_check(ctx, !rc, out,
 			 "could not fit the request in the context window");
@@ -1043,6 +1063,8 @@ static int fyai_model_step_start(struct fyai_model_step *step)
 		request = fy_assoc(ctx->transient_gb, request, "top_logprobs",
 				   cfg->top_logprobs);
 	request = fyai_model_step_add_stream_options(ctx, cfg, request);
+	if (cfg->chatgpt_auth)
+		request = fyai_auth_subscription_request(ctx->transient_gb, request);
 	fyai_error_check(ctx, fy_is_valid(request), out,
 			 "could not finish the model request");
 
@@ -1156,9 +1178,7 @@ static void fyai_model_step_request_complete(struct fyai_model_step *step,
 		if (step->want_extents_lp && !cfg->logprobs &&
 		    (fy_is_invalid(diag) ||
 		     fy_is_null(diag))) {
-			status = 0;
-			curl_easy_getinfo(ctx->curl, CURLINFO_RESPONSE_CODE,
-					  &status);
+			status = fyai_xfer_last_status(ctx);
 			if (status >= 400 && status < 500) {
 				ctx->token_extents_off = true;
 				rc = fyai_model_step_retry(step,
@@ -1322,7 +1342,12 @@ struct fyai_turn_run {
 	bool cancel_requested;
 	bool accept_pending_user;
 	const char *histfile;
+	/* The project state before the next group of tool calls, when the diffs are shown. */
+	fy_generic diff_before;
 };
+
+/* A diff that is longer than this is cut: the human reads it, and a full tree is not that. */
+#define FYAI_TOOL_DIFF_LIMIT (256 * 1024)
 
 static bool fyai_turn_run_done(const struct fyai_turn_run *run)
 {
@@ -1378,6 +1403,7 @@ fyai_turn_run_transition(struct fyai_turn_run *run,
 			   fyai_turn_run_state_name(state));
 		if (!fyai_turn_run_done(run))
 			run->state = FYAITRS_FAILED;
+		run->ctx->tool_diff_tracking = false;
 		return -1;
 	}
 	if (run->ctx->cfg->debug)
@@ -1385,6 +1411,8 @@ fyai_turn_run_transition(struct fyai_turn_run *run,
 			   fyai_turn_run_state_name(run->state),
 			   fyai_turn_run_state_name(state));
 	run->state = state;
+	if (state == FYAITRS_DONE || state == FYAITRS_FAILED)
+		run->ctx->tool_diff_tracking = false;
 	if (state == FYAITRS_MODEL)
 		fyai_agents_activity(run->ctx, "running");
 	return 0;
@@ -1486,40 +1514,68 @@ fyai_turn_run_request_failed(struct fyai_turn_run *run, fy_generic response)
 	fyai_turn_run_stop(run, msg);
 }
 
-/* Add queued user lines before the next model request. Commands keep order. */
+/*
+ * Append @text as a user message of the run. An event and a typed line enter
+ * the conversation in the same way.
+ */
+static int fyai_turn_run_append_user(struct fyai_turn_run *run, const char *text)
+{
+	struct fyai_ctx *ctx = run->ctx;
+
+	run->turn = fyai_turn_append(ctx, run->turn,
+		fy_sequence(fyai_make_user_message(ctx, text)));
+	if (fy_is_valid(run->turn))
+		run->turn = fyai_output_record(ctx, run->turn,
+					       FYAI_OUTPUT_USER, text);
+	return fy_is_valid(run->turn) ? 0 : -1;
+}
+
+/*
+ * Add queued events and user lines before the next model request. An event
+ * enters first, as it was queued before the line that is read now. Commands
+ * keep order.
+ */
 static int fyai_turn_run_take_pending_user(struct fyai_turn_run *run)
 {
 	struct fyai_ctx *ctx = run->ctx;
 	const char *head;
-	char *line;
+	char *line, *event;
 	int rc;
 
 	if (!run->accept_pending_user)
 		return 0;
+	/* A stale event is dropped here, so a live one is taken before output ends. */
+	event = fyai_event_take_live(ctx);
 	head = fyai_ui_peek_line(ctx);
-	if (!fyai_interactive_is_user_line(head))
+	if (!event && !fyai_interactive_is_user_line(head))
 		return 0;
 	run->turn = fyai_output_finalize(ctx, run->turn, false);
 	fyai_error_check(ctx, fy_is_valid(run->turn), err,
 			 "could not finish output before pending input");
+	while (event) {
+		fyai_echo_user_turn(ctx, event);
+		rc = fyai_turn_run_append_user(run, event);
+		free(event);
+		event = NULL;
+		fyai_error_check(ctx, !rc, err,
+				 "could not append the pending event");
+		event = fyai_event_take_live(ctx);
+	}
 	while (fyai_interactive_is_user_line(head = fyai_ui_peek_line(ctx))) {
 		line = fyai_ui_take_line(ctx);
 		fyai_error_check(ctx, line, err,
 				 "could not take pending input");
 		fyai_interactive_prepare_user_line(ctx, run->histfile, line);
-		run->turn = fyai_turn_append(ctx, run->turn,
-			fy_sequence(fyai_make_user_message(ctx, line)));
-		if (fy_is_valid(run->turn))
-			run->turn = fyai_output_record(ctx, run->turn,
-						       FYAI_OUTPUT_USER, line);
+		rc = fyai_turn_run_append_user(run, line);
 		free(line);
-		fyai_error_check(ctx, fy_is_valid(run->turn), err,
+		fyai_error_check(ctx, !rc, err,
 				 "could not append pending user input");
 	}
 	rc = fyai_output_begin(ctx, FYAI_OUTPUT_ASSISTANT);
 	fyai_error_check(ctx, !rc, err, "could not resume assistant output");
 	return 0;
 err:
+	free(event);
 	return -1;
 }
 
@@ -1615,6 +1671,35 @@ err:
 	return -1;
 }
 
+/*
+ * Record the project after a group of tool calls that can change files and show
+ * what the group changed. A patch or a file write does not display its own diff
+ * while the turn is tracked, so this one is the only place that shows it. A
+ * failure stops the diffs of the turn and not the turn.
+ */
+static void fyai_turn_run_tool_diff(struct fyai_turn_run *run)
+{
+	struct fyai_ctx *ctx = run->ctx;
+	fy_generic after, text;
+	const char *patch;
+	int rc;
+
+	rc = fyai_project_state_capture(ctx, &after);
+	if (rc || !fy_is_mapping(after)) {
+		ctx->tool_diff_tracking = false;
+		return;
+	}
+	if (!fyai_project_state_diff(ctx, ctx->transient_gb, run->diff_before, after,
+					     FYAI_TOOL_DIFF_LIMIT, &text)) {
+		patch = fy_castp(&text, "");
+		if (*patch) {
+			(void)fyai_present_tool_diff(ctx, patch);
+			fyai_tool_change_record(ctx, run->diff_before, after);
+		}
+	}
+	run->diff_before = after;
+}
+
 static int fyai_turn_run_collect_tools(struct fyai_turn_run *run)
 {
 	struct fyai_ctx *ctx;
@@ -1625,11 +1710,12 @@ static int fyai_turn_run_collect_tools(struct fyai_turn_run *run)
 	size_t total;
 	bool interrupted;
 	bool ok;
-	int rc;
+	int rc, effect;
 
 	ctx = run->ctx;
 	total = fy_len(run->tool_calls);
 	group_index = 0;
+	effect = 0;
 	for (i = 0; i < total; i++) {
 		tool_call = fy_get_at(run->tool_calls, i);
 		if (run->group_parallel !=
@@ -1637,6 +1723,9 @@ static int fyai_turn_run_collect_tools(struct fyai_turn_run *run)
 			continue;
 		if (!run->group_parallel && i != run->exclusive_index)
 			continue;
+		if (ctx->tool_diff_tracking &&
+		    fyai_tool_call_file_effect(ctx, tool_call) > effect)
+			effect = fyai_tool_call_file_effect(ctx, tool_call);
 		result = fy_invalid;
 		ok = false;
 		rc = fyai_tool_job_group_collect(run->tool_group,
@@ -1655,6 +1744,8 @@ static int fyai_turn_run_collect_tools(struct fyai_turn_run *run)
 	run->turn = fy_gb_internalize(ctx->transient_gb, run->turn);
 	fyai_error_check(ctx, fy_is_valid(run->turn), err,
 			 "could not append the tool calls");
+	if (effect)
+		fyai_turn_run_tool_diff(run);
 	if (ctx->ask_abort) {
 		fyai_turn_run_finish(run, fy_null, true);
 		return 0;
@@ -1854,12 +1945,18 @@ fyai_turn_run_submit(struct fyai_ctx *ctx, fy_generic turn)
 	fyai_error_check(ctx, !rc, err_free,
 			 "could not start assistant display output");
 	fyai_interrupt_check(ctx);
+	/* What the user or another program changed between turns is not the turn's. */
+	if (fyai_tool_diff_enabled(ctx)) {
+		rc = fyai_project_state_capture(ctx, &run->diff_before);
+		ctx->tool_diff_tracking = !rc && fy_is_mapping(run->diff_before);
+	}
 	rc = fyai_turn_run_submit_model(run);
 	fyai_error_check(ctx, !rc, err_free,
 			 "could not submit turn");
 	return run;
 
 err_free:
+	ctx->tool_diff_tracking = false;
 	free(run);
 err:
 	return NULL;
@@ -1917,6 +2014,7 @@ static void fyai_turn_run_destroy(struct fyai_turn_run *run)
 				run);
 	fyai_model_step_destroy(run->model_step);
 	fyai_turn_run_drop_tool_group(run);
+	run->ctx->tool_diff_tracking = false;
 	free(run);
 }
 
@@ -1985,8 +2083,12 @@ int fyai_setup_transient_builder(struct fyai_ctx *ctx)
 	struct fy_auto_allocator_cfg trans_cfg = {};
 	struct fy_generic_builder_cfg gb_cfg = {};
 
-	if (ctx->transient_gb)
+	/* An explicit owner adopts a builder that fyai_ctx_transient_gb()
+	 * made: the idle loop must not release it while the owner works. */
+	if (ctx->transient_gb) {
+		ctx->transient_autorelease = false;
 		return 0;
+	}
 	/* now the transient */
 	memset(&trans_cfg, 0, sizeof(trans_cfg));
 	trans_cfg.scenario = FYAST_PER_TAG_FREE_DEDUP;
@@ -2016,7 +2118,12 @@ void fyai_cleanup(struct fyai_ctx *ctx)
 	/* A session cannot outlive the invocation that opened it, and neither
 	 * can a wait: there is no daemon for either to be handed to. */
 	fyai_shell_sessions_release(ctx, false);
+	fyai_asks_release(ctx);
 	fyai_waits_release(ctx);
+	fyai_waiters_release(ctx);
+	fyai_agent_background_close(ctx);
+	fyai_monitor_close(ctx);
+	fyai_tool_diff_cleanup(ctx);
 	fyai_events_release(ctx);
 	fyai_terminal_winch_close(ctx);
 	fyai_event_interrupt_close(ctx);
@@ -2067,6 +2174,7 @@ void fyai_cleanup(struct fyai_ctx *ctx)
 	fyai_ui_close(ctx);
 
 	/* Before the easy handle: the multi still references it. */
+	fyai_transport_detach(ctx);
 	fyai_curl_cleanup(ctx);
 	if (ctx->curl) {
 		curl_easy_cleanup(ctx->curl);
@@ -2140,7 +2248,7 @@ int fyai_request_state_apply(struct fyai_ctx *ctx)
 	/* Anthropic authenticates with x-api-key (no Bearer scheme) and
 	 * requires a protocol version header on every request.  Local no-auth
 	 * servers skip the API-key header entirely. */
-	if (!cfg->chatgpt_auth && !cfg->no_auth) {
+	if (!cfg->chatgpt_auth && !cfg->no_auth && !ctx->tclient) {
 		ctx->auth_header = make_header(cfg->api_mode == FYAI_API_MESSAGES ?
 					       "x-api-key: " : "Authorization: Bearer ",
 					       cfg->api_key);
@@ -2171,7 +2279,7 @@ int fyai_request_state_apply(struct fyai_ctx *ctx)
 			return -1;
 	}
 
-	curl_easy_setopt(ctx->curl, CURLOPT_URL, cfg->api_url);
+	fyai_xfer_set_endpoint(ctx, NULL, NULL);
 	curl_easy_setopt(ctx->curl, CURLOPT_HTTPHEADER, ctx->headers);
 
 	if (cfg->enable_tools || cfg->enable_builtin_shell || cfg->mcp_enabled ||
@@ -2238,6 +2346,7 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->cfg = cfg;
+	ctx->auth.registrations = fy_invalid;
 
 	ctx->stdout_tty = terminal_is_tty(STDOUT_FILENO);
 	if (!terminal_window_size(STDOUT_FILENO, &ctx->tty_rows, &ctx->tty_cols))
@@ -2252,6 +2361,8 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 	ctx->tools = fy_invalid;
 	ctx->tools_spec = fy_invalid;
 	ctx->last_message = fy_invalid;
+	ctx->usage_head = fy_invalid;
+	ctx->usage_agents_root = fy_invalid;
 	ctx->arena_config = fy_invalid;
 	ctx->arena_catalog = fy_invalid;
 	/* A zeroed fy_generic is an empty sequence, not fy_invalid. */
@@ -2260,6 +2371,8 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 	ctx->branch_desc = fy_invalid;
 	ctx->branch_agent = fy_invalid;
 	ctx->branch_store = fy_invalid;
+	ctx->project_state = fy_invalid;
+	ctx->tool_changes = fy_seq_empty;
 	ctx->last_token_extents = fy_invalid;
 	if (fyai_signals_open(ctx))
 		goto err;
@@ -2280,6 +2393,10 @@ int fyai_setup(struct fyai_ctx *ctx, struct fyai_cfg *cfg)
 		goto err;
 
 	if (fyai_curl_easy_reinit(ctx))
+		goto err;
+
+	/* A supervisor sends its model requests through the transport. */
+	if (fyai_transport_attach(ctx))
 		goto err;
 
 	(void)fyai_setup_transient_builder(ctx);
@@ -2388,6 +2505,7 @@ struct fyai_pending_event {
 	char *text;
 	char *owner;
 	enum fyai_event_owner_kind owner_kind;
+	bool seen;		/* a waiter has it: the turn loop leaves it */
 };
 
 /* The context takes @text and @owner; both are freed on every path. */
@@ -2411,6 +2529,7 @@ static int fyai_event_inject_queue(struct fyai_ctx *ctx, char *text,
 		ctx->events_tail = &ctx->events;
 	*ctx->events_tail = ev;
 	ctx->events_tail = &ev->next;
+	fyai_waiters_kick(ctx);
 	return 0;
 
 err:
@@ -2423,6 +2542,21 @@ int fyai_event_inject(struct fyai_ctx *ctx, char *text)
 {
 	return fyai_event_inject_queue(ctx, text, FYAI_EVENT_OWNER_NONE,
 				       NULL);
+}
+
+int fyai_event_injectf(struct fyai_ctx *ctx, const char *fmt, ...)
+{
+	va_list ap;
+	char *text;
+	int rc;
+
+	va_start(ap, fmt);
+	rc = vasprintf(&text, fmt, ap);
+	va_end(ap);
+	fyai_error_check(ctx, rc >= 0, err, "could not format an event");
+	return fyai_event_inject(ctx, text);
+err:
+	return -1;
 }
 
 /* Queue owned @text for the loop owner; the caller gives away @owner. */
@@ -2452,7 +2586,12 @@ char *fyai_event_take(struct fyai_ctx *ctx)
 
 bool fyai_event_queued(const struct fyai_ctx *ctx)
 {
-	return ctx && ctx->events;
+	const struct fyai_pending_event *ev;
+
+	for (ev = ctx ? ctx->events : NULL; ev; ev = ev->next)
+		if (!ev->seen)
+			return true;
+	return false;
 }
 
 /*
@@ -2468,6 +2607,57 @@ static bool fyai_event_owner_live(struct fyai_ctx *ctx,
 	if (ev->owner_kind == FYAI_EVENT_OWNER_AGENT)
 		return fyai_event_agent_live(ctx, ev->owner);
 	return fyai_event_session_live(ctx, ev->owner);
+}
+
+bool fyai_event_pending_prefix(struct fyai_ctx *ctx, const char *prefix)
+{
+	const struct fyai_pending_event *ev;
+	size_t len = strlen(prefix);
+
+	for (ev = ctx ? ctx->events : NULL; ev; ev = ev->next)
+		if (!strncmp(ev->text, prefix, len) &&
+		    fyai_event_owner_live(ctx, ev))
+			return true;
+	return false;
+}
+
+char *fyai_event_peek_prefix(struct fyai_ctx *ctx, const char *prefix)
+{
+	struct fyai_pending_event *ev;
+	size_t len = strlen(prefix);
+	char *text;
+
+	for (ev = ctx ? ctx->events : NULL; ev; ev = ev->next) {
+		if (strncmp(ev->text, prefix, len) ||
+		    !fyai_event_owner_live(ctx, ev))
+			continue;
+		text = strdup(ev->text);
+		if (text)
+			ev->seen = true;
+		return text;
+	}
+	return NULL;
+}
+
+void fyai_events_purge_seen(struct fyai_ctx *ctx)
+{
+	struct fyai_pending_event **link, *ev;
+
+	if (!ctx)
+		return;
+	link = &ctx->events;
+	while ((ev = *link)) {
+		if (!ev->seen) {
+			link = &ev->next;
+			continue;
+		}
+		*link = ev->next;
+		if (!*link)
+			ctx->events_tail = link;
+		free(ev->text);
+		free(ev->owner);
+		free(ev);
+	}
 }
 
 /* Drop every queued wait event owned by @name of @kind. */
@@ -2496,6 +2686,17 @@ static void fyai_events_drop_owner(struct fyai_ctx *ctx,
 		free(ev->owner);
 		free(ev);
 	}
+}
+
+void fyai_background_reset(struct fyai_ctx *ctx)
+{
+	if (!ctx)
+		return;
+	fyai_agent_background_close(ctx);
+	fyai_monitor_close(ctx);
+	fyai_asks_release(ctx);
+	fyai_waits_release(ctx);
+	fyai_events_release(ctx);
 }
 
 void fyai_events_release(struct fyai_ctx *ctx)
@@ -2527,17 +2728,26 @@ void fyai_events_drop_session(struct fyai_ctx *ctx, const char *name)
  */
 char *fyai_event_take_live(struct fyai_ctx *ctx)
 {
-	struct fyai_pending_event *ev;
+	struct fyai_pending_event **link, *ev;
+	char *text;
 
 	if (!ctx)
 		return NULL;
-	while (ctx->events) {
-		ev = ctx->events;
-		if (fyai_event_owner_live(ctx, ev))
-			break;
-		ctx->events = ev->next;
-		if (!ctx->events)
-			ctx->events_tail = &ctx->events;
+	link = &ctx->events;
+	while ((ev = *link)) {
+		if (ev->seen) {
+			link = &ev->next;
+			continue;
+		}
+		*link = ev->next;
+		if (!*link)
+			ctx->events_tail = link;
+		if (fyai_event_owner_live(ctx, ev)) {
+			text = ev->text;
+			free(ev->owner);
+			free(ev);
+			return text;
+		}
 		fyai_diag_tracef("event", "dropped stale %s wait from '%s'",
 				 ev->owner_kind == FYAI_EVENT_OWNER_AGENT ?
 				 "agent" : "session",
@@ -2546,7 +2756,7 @@ char *fyai_event_take_live(struct fyai_ctx *ctx)
 		free(ev->owner);
 		free(ev);
 	}
-	return fyai_event_take(ctx);
+	return NULL;
 }
 
 int fyai_prompt_batch(struct fyai_ctx *ctx)
@@ -3279,7 +3489,8 @@ static int fyai_prompt_interactive_async(struct fyai_ctx *ctx)
 				continue;
 		}
 		/* A side question may complete after its parent turn releases scratch. */
-		if (ctx->btw_runs && !ctx->transient_gb) {
+		if ((ctx->btw_runs || ctx->agent_bg_runs || ctx->monitors) &&
+		    !ctx->transient_gb) {
 			rc = fyai_setup_transient_builder(ctx);
 			fyai_error_check(ctx, !rc, out,
 					 "could not retain side question storage");
@@ -3293,6 +3504,8 @@ out:
 	/* Cancel active work and drain MCP shutdown on every exit path. */
 	state = FYAIAS_STOPPING;
 	fyai_session_btw_close(ctx);
+	fyai_agent_background_close(ctx);
+	fyai_monitor_close(ctx);
 	if (run) {
 		fyai_turn_run_cancel(run);
 		fyai_turn_run_destroy(run);
@@ -3510,8 +3723,7 @@ int fyai_prompt(struct fyai_ctx *ctx)
 	(void)args;
 	assert(ctx);
 
-	if ((!cfg->api_key || !*cfg->api_key) &&
-	    !cfg->chatgpt_auth && !cfg->no_auth) {
+	if (!fyai_credential_available(ctx)) {
 		fyai_error(ctx, "no API key or ChatGPT login is available");
 		return -1;
 	}
@@ -3585,6 +3797,12 @@ int fyai_run(struct fyai_cfg *cfg)
 	rc = fyai_apply_config_ops(&ctx);
 	fyai_cfg_error_check(cfg, !rc, err_out, "config operation failed");
 
+	rc = fyai_view_session_bootstrap(&ctx);
+	fyai_cfg_error_check(cfg, rc >= 0, err_out, "could not run the session in a view");
+	if (rc > 0) {
+		rc = 0;
+		goto out;
+	}
 	rc = fyai_execute(&ctx);
 	fyai_cfg_error_check(cfg, !rc, err_out, "fyai execution failed");
 	if (cfg->reload_branch) {

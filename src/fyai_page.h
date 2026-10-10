@@ -35,10 +35,45 @@ struct fyai_page_action {
  * of the palette. hint is Markdown that fyai or the user configuration wrote;
  * activity may carry SGR, which is removed.
  */
+/* One option of a question in the input area. */
+struct fyai_page_ask_option {
+	const char *label;
+	const char *description;
+	bool checked;		/* a many-choice question holds the option */
+};
+
+/* One line of the review that ends a series of questions. */
+struct fyai_page_ask_review {
+	const char *header;
+	const char *answer;
+};
+
+/* The question that the input area shows. All text is borrowed. */
+struct fyai_page_ask {
+	const char *header;		/* the short label of the question */
+	const char *question;
+	const char *from;		/* the sub-agent that asks, or NULL */
+	const struct fyai_page_ask_option *options;
+	size_t noptions;
+	size_t selected;		/* the option under the cursor */
+	bool multi;			/* more than one option can be chosen */
+	const char *bar;		/* the glyph of the bar of the selected option */
+	size_t index, count;		/* question index of count, from 0 */
+	/* The review step: every answer given, before they are sent. */
+	bool review;
+	const struct fyai_page_ask_review *lines;
+	size_t nlines;
+	int waiting;			/* the questions after these */
+	/* The rendered rows of the preview of the option under the cursor. */
+	const char *const *preview;
+	int npreview;
+	const char *preview_title;	/* the label of that option */
+};
+
 struct fyai_page_state {
 	struct fyai_ctx *ctx;	/* diagnostic context for source construction */
 	const char *header;
-	/* The header rendered to one row of SGR, as the band stack draws it. */
+	/* The header rendered to one row of SGR. */
 	const char *header_row;
 	/* The panel at the right edge of the header row, SGR fyai wrote, its
 	 * columns, and its button, from the first column of the panel. */
@@ -54,6 +89,11 @@ struct fyai_page_state {
 	 * NULL for one pane slot the terminal library lays out. */
 	const char *pane_source;
 	int tail_rows;	/* drawn by the view in fullscreen */
+	/* The rows of the calls drawn at their place in the transcript, which
+	 * an inline page draws under the tail: @tail_rows counts them. The
+	 * rows are borrowed for the frame. */
+	const char *const *block_lines;
+	int block_nlines;
 	/* A fullscreen page draws committed rows and the live tail in one region. */
 	bool fullscreen;
 	int transcript_rows;
@@ -69,6 +109,15 @@ struct fyai_page_state {
 	/* The rows of a short result, which stand above the status. */
 	const char *const *note_lines;
 	int note_nlines;
+	/*
+	 * The rows of the todo list of the branch, which stand above the
+	 * prompt. UI Markdown that fyai wrote from the stored list, borrowed
+	 * for the frame. NULL when the branch holds no list.
+	 */
+	const char *todo_source;
+	/* The rows @todo_source takes, and whether the panel is shown. */
+	int todo_rows;
+	bool todo_shown;
 	int pane_rows;
 	bool pane_below;
 	int prompt_rows;
@@ -94,15 +143,9 @@ struct fyai_page_state {
 	/* The SGR of what the user acts on in the chrome of a tile: the marks,
 	 * the arrows and the thumb of its bar. */
 	const char *control_chrome;
-	bool tile_bar;		/* draw a scroll bar beside each screen */
 	const char *input_mode;	/* the mode of the input area, or "prompt" */
 	/* The question of the input area in an ask mode, or NULL. */
-	const char *ask_question;
-	const char *ask_from;		/* the sub-agent that asks, or NULL */
-	const char *const *ask_options;
-	size_t ask_noptions;
-	size_t ask_selected;
-	int ask_waiting;		/* the questions after this one */
+	const struct fyai_page_ask *ask;
 	/* The actions that the document may name, and where the keys of its
 	 * active modes go, or NULL. */
 	const struct fyai_page_action *actions;
@@ -139,13 +182,16 @@ struct fyai_page_tile {
 	uint32_t ground;	/* FYTIM_COLOR_DEFAULT for no ground */
 	int mix;		/* percent of @ground in a colour of the program */
 	int content_rows;	/* the rows the screen asks for */
+	unsigned int items;	/* FYAI_CHROME_*: the chrome the tile carries */
+	bool scrolled;		/* a tile of text stays on @scroll_top */
+	int scroll_top;		/* the first row of its content it shows */
+	bool overflow;		/* set by the page: more content than rows */
+	int bar_top;		/* set by the page: the row of the bar in the slot */
 	int present;		/* enum fyai_workpane_present */
 	/* Set by the page: the rows and the columns the screen was given. */
 	int granted_rows, granted_cols;
 };
 
-/* Whether the configuration asks for the page renderer. */
-bool fyai_page_requested(const struct fyai_cfg *cfg);
 /* Rows the chrome of @st takes: the header, the prompt block, the status
  * rows and the cap row. */
 int fyai_page_chrome_rows(const struct fyai_page_state *st);
@@ -323,6 +369,15 @@ const char *fyai_page_document_path(const struct fyai_page *pg);
  */
 int fyai_page_report(const struct fyai_page *pg, struct response_buffer *md);
 void fyai_page_destroy(struct fyai_page *pg);
+/*
+ * The place of the region @id in the last frame: its first row and column
+ * into *@rowp and *@colp, and its rows into *@heightp when it is not NULL.
+ * False when the last frame had no such region.
+ */
+bool fyai_page_region(const struct fyai_page *pg, const char *id, int *rowp,
+		      int *colp, int *heightp);
+/* The surface the page draws on, or NULL before its first frame. */
+struct fytim_surface *fyai_page_canvas(const struct fyai_page *pg);
 
 /*
  * Build, render and give the page of this frame to @ft, at @cols by @rows.

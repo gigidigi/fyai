@@ -16,6 +16,7 @@
 #include <strings.h>
 
 #include "fyai_provider.h"
+#include "fyai_cost.h"
 #include "fyai_tool_spec.h"
 #include "fyai_tools.h"
 
@@ -279,7 +280,9 @@ fy_generic fyai_extract_usage(struct fyai_ctx *ctx, fy_generic doc)
 	long long output;
 	long long input;
 	long long total;
+	struct fyai_pricing price;
 	double cost;
+	bool estimated;
 
 	usage = fy_get(doc, "usage");
 	if (fy_is_invalid(usage))
@@ -326,6 +329,14 @@ fy_generic fyai_extract_usage(struct fyai_ctx *ctx, fy_generic doc)
 		total = input + output;
 	/* Some providers (e.g. OpenRouter) report a per-call dollar cost. */
 	cost = fy_get(usage, "cost", 0.0);
+	/* The others are priced from the catalogue, at the model of the call. */
+	estimated = false;
+	if (cost <= 0.0 &&
+	    fyai_pricing_lookup(cfg, cfg->provider, cfg->model, &price)) {
+		cost = fyai_pricing_cost(&price, input, cached, cache_write,
+					 output);
+		estimated = cost > 0.0;
+	}
 
 	out = fy_mapping(
 		"input", input,
@@ -334,7 +345,9 @@ fy_generic fyai_extract_usage(struct fyai_ctx *ctx, fy_generic doc)
 		"output", output,
 		"reasoning", reasoning,
 		"total", total,
-		"cost", cost);
+		"cost", cost,
+		"est", estimated,
+		"model", cfg->model ? cfg->model : "");
 
 	out = fy_gb_internalize(ctx->transient_gb, out);
 	return provider_result(ctx, out, "could not extract the response usage");
@@ -536,6 +549,14 @@ bool fyai_provider_error_transient(fy_generic err)
 
 	code = fy_get(err, "code");
 	type = fy_get(err, "type");
+	if (fy_any_equal(code, "subscription_sharing_usage_limit_exceeded",
+		"subscription_sharing_user_not_eligible", "subscription_sharing_invalid_user",
+		"subscription_sharing_unsupported_capability", "subscription_sharing_route_not_supported",
+		"chatpass_v2_scope_not_authorized", "chatpass_v2_invalid_authorization_context"))
+		return false;
+	if (fy_any_equal(code, "subscription_sharing_usage_unavailable",
+		"subscription_sharing_user_unavailable"))
+		return true;
 	if (fy_any_equal(code, "rate_limit_exceeded", "server_error",
 			 "service_unavailable"))
 		return true;
@@ -568,6 +589,22 @@ static fy_generic fyai_shell_outcome_sanitized(struct fy_generic_builder *gb,
 }
 
 /* @m, a shell_call_output item, with every outcome of its output sanitized. */
+/*
+ * A tool result that is a structure goes on the wire as its JSON text: every grammar
+ * takes a string as the output of a function call, and an object is a request error.
+ */
+static fy_generic wire_tool_text(struct fyai_ctx *ctx, fy_generic output)
+{
+	const char *text;
+
+	if (!fy_is_valid(output) || fy_is_null(output))
+		return fy_value(ctx->transient_gb, "");
+	if (!fy_is_mapping(output))
+		return output;
+	text = emit_json_string(ctx->transient_gb, output);
+	return fy_value(ctx->transient_gb, text ? text : "");
+}
+
 static fy_generic fyai_shell_output_sanitized(struct fyai_ctx *ctx,
 					      fy_generic m)
 {
@@ -668,6 +705,9 @@ fy_generic fyai_responses_input(struct fyai_ctx *ctx, fy_generic messages)
 
 		/* Other native Responses items (function_call,
 		 * function_call_output, message, ...): pass through. */
+		if (fy_equal(type, "function_call_output"))
+			m = fy_assoc(ctx->transient_gb, m, "output",
+				     wire_tool_text(ctx, fy_get(m, "output", fy_invalid)));
 		if (fy_is_string(type)) {
 			input = fy_append(ctx->transient_gb, input, m);
 			continue;
@@ -691,7 +731,7 @@ fy_generic fyai_responses_input(struct fyai_ctx *ctx, fy_generic messages)
 						"call_id", fy_get(m, "tool_call_id", ""),
 						"output",
 						fy_is_valid(content) && !fy_is_null(content) ?
-							content :
+							wire_tool_text(ctx, content) :
 							fy_value("")));
 			continue;
 		}
@@ -815,7 +855,7 @@ fy_generic fyai_chat_input(struct fyai_ctx *ctx, fy_generic messages)
 		if (fyai_item_type_is_call_output(type)) {
 			tmp = fy_mapping("role", "tool",
 					 "tool_call_id", fy_get(m, "call_id", ""),
-					 "content", fy_get(m, "output", ""));
+					 "content", wire_tool_text(ctx, fy_get(m, "output", fy_invalid)));
 			out = fy_append(ctx->transient_gb, out, tmp);
 			continue;
 		}
@@ -832,6 +872,9 @@ fy_generic fyai_chat_input(struct fyai_ctx *ctx, fy_generic messages)
 			continue;
 
 		/* Already Chat-shaped. */
+		if (fy_equal(fy_get(m, "role"), "tool") && fy_is_mapping(fy_get(m, "content", fy_invalid)))
+			m = fy_assoc(ctx->transient_gb, m, "content",
+				     wire_tool_text(ctx, fy_get(m, "content", fy_invalid)));
 		out = fy_append(ctx->transient_gb, out, m);
 	}
 

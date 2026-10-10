@@ -32,8 +32,11 @@ FYAI_TEST_ENTRY(cmd, usage, cmd_usage)
 FYAI_TEST_ENTRY(cmd, help, cmd_help_text)
 FYAI_TEST_ENTRY(cmd, complete, cmd_complete_words)
 FYAI_TEST_ENTRY(cmd, complete_session, cmd_complete_session)
+FYAI_TEST_ENTRY(cmd, sorted, cmd_sorted)
+FYAI_TEST_ENTRY(cmd, complete_view, cmd_complete_view)
 FYAI_TEST_ENTRY(cmd, immediate, cmd_immediate)
 FYAI_TEST_ENTRY(cmd, group_args, cmd_group_args)
+FYAI_TEST_ENTRY(cmd, view_session_args, cmd_view_session_args)
 FYAI_TEST_ENTRY(cmd, config_args, cmd_config_args)
 FYAI_TEST_ENTRY(cmd, history_args, cmd_history_args)
 FYAI_TEST_ENTRY(cmd, complete_config, cmd_complete_config)
@@ -215,6 +218,19 @@ int cmd_parse_cli(void)
 	rc = cmd_test_parse(&t, FYAI_CMD_CLI, "branch describe x one two", &p);
 	FYAI_TCHECK(!rc && arg_is(p.args, "text", "one two"));
 
+	rc = cmd_test_parse(&t, FYAI_CMD_CLI,
+			    "view enter demo printf '%s' 'two words' --help "
+			    "--output=json", &p);
+	FYAI_TCHECK(!rc && !p.help && p.format == FYAI_CMD_OUT_MARKDOWN);
+	FYAI_TCHECK(fy_equal(fy_get(p.args, "command", fy_invalid),
+			     fy_sequence("printf", "%s", "two words", "--help",
+					 "--output=json")));
+	rc = cmd_test_parse(&t, FYAI_CMD_CLI, "view enter demo", &p);
+	FYAI_TCHECK(!rc && !p.help);
+	rc = cmd_test_parse(&t, FYAI_CMD_CLI, "view enter demo -- sh -c true", &p);
+	FYAI_TCHECK(!rc && fy_equal(fy_get(p.args, "command", fy_invalid),
+		fy_sequence("sh", "-c", "true")));
+
 	/* A variadic positional takes every word; -- ends the options. */
 	rc = cmd_test_parse(&t, FYAI_CMD_CLI, "__complete -- branch -a ''", &p);
 	FYAI_TCHECK(!rc && fy_len(fy_get(p.args, "words", fy_invalid)) == 3);
@@ -383,6 +399,108 @@ static unsigned int complete(enum fyai_cmd_surface s, const char *line,
 	return d;
 }
 
+/* Whether the lines of @buf, a candidate list, are in ascending order. */
+static bool cands_sorted(const char *buf)
+{
+	const char *line = buf, *next;
+	size_t n, m;
+	int d;
+
+	while ((next = strchr(line, '\n')) && next[1]) {
+		n = (size_t)(next - line);
+		m = strcspn(next + 1, "\n");
+		d = strncmp(line, next + 1, n < m ? n : m);
+		if (d > 0 || (!d && n > m))
+			return false;
+		line = next + 1;
+	}
+	return true;
+}
+
+/* Usage, help, and completion list commands in ascending order. */
+int cmd_sorted(void)
+{
+	struct cmd_test t;
+	struct cands c;
+	struct response_buffer out = { 0 };
+	const char *top[] = { "" };
+	const char *sub[] = { "branch", "" };
+	const char *branch[] = { "branch" };
+	const char *a, *b;
+	int rc;
+
+	cmd_test_open(&t);
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_complete(NULL, FYAI_CMD_CLI, 1, top, cands_add, &c);
+	FYAI_TCHECK(c.len && cands_sorted(c.buf));
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_complete(NULL, FYAI_CMD_SESSION, 1, top, cands_add, &c);
+	FYAI_TCHECK(c.len && cands_sorted(c.buf));
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_complete(NULL, FYAI_CMD_CLI, 2, sub, cands_add, &c);
+	FYAI_TCHECK(strstr(c.buf, "list\n") && cands_sorted(c.buf));
+	rc = fyai_cmd_help_source(&t.cfg, FYAI_CMD_CLI, 1, branch, &out);
+	FYAI_TCHECK(!rc && strstr(out.data, "`fyai branch "
+				  "{delete|describe|list|new|rename|show} ...`"));
+	free(out.data);
+	memset(&out, 0, sizeof(out));
+	rc = fyai_cmd_help_source(&t.cfg, FYAI_CMD_CLI, 0, top, &out);
+	FYAI_TCHECK(!rc && out.data);
+	if (!rc && out.data) {
+		a = strstr(out.data, "`fyai branch`");
+		b = strstr(out.data, "`fyai catalog`");
+		FYAI_TCHECK(a && b && a < b);
+	}
+	free(out.data);
+	cmd_test_close(&t);
+	return 0;
+}
+
+int cmd_complete_view(void)
+{
+	struct cmd_test t;
+	struct fyai_ctx ctx = { 0 };
+	struct cands c;
+	fy_generic views;
+	const char *commands[] = { "show", "update", "diff", "remove",
+				   "sync", "mount", "unmount", "enter" };
+	const char *words[] = { "view", NULL, "te" };
+	size_t i;
+
+	cmd_test_open(&t);
+	ctx.cfg = &t.cfg;
+	views = fy_mapping(t.gb, "test-view",
+			   fy_mapping(t.gb, "project", "/project"),
+			   "other-view", fy_mapping(t.gb, "project", "/other"),
+			   "test-invalid", 42LL);
+	ctx.branch_prev =
+		fy_mapping(t.gb, "store", fy_mapping(t.gb, "views", views));
+	for (i = 0; i < ARRAY_SIZE(commands); i++) {
+		words[1] = commands[i];
+		memset(&c, 0, sizeof(c));
+		fyai_cmd_complete(&ctx, FYAI_CMD_CLI, 3, words, cands_add, &c);
+		FYAI_TCHECK(!strcmp(c.buf, "test-view\n"));
+	}
+	words[1] = "create";
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_complete(&ctx, FYAI_CMD_CLI, 3, words, cands_add, &c);
+	FYAI_TCHECK(!strstr(c.buf, "test-view"));
+	words[1] = "enter";
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_complete(NULL, FYAI_CMD_CLI, 3, words, cands_add, &c);
+	FYAI_TCHECK(!c.len);
+	ctx.branch_prev = fy_mapping(
+		t.gb, "store",
+		fy_mapping(t.gb, "views",
+			   fy_mapping(t.gb, "team-view",
+				      fy_mapping(t.gb, "project", "/team"))));
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_complete(&ctx, FYAI_CMD_CLI, 3, words, cands_add, &c);
+	FYAI_TCHECK(!strcmp(c.buf, "team-view\n"));
+	cmd_test_close(&t);
+	return 0;
+}
+
 int cmd_complete_words(void)
 {
 	struct cands c;
@@ -441,20 +559,24 @@ int cmd_complete_session(void)
 
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/bra", cands_add, &c);
-	FYAI_TCHECK(!strcmp(c.buf, "/branch\n/branches\n"));
+	FYAI_TCHECK(!strcmp(c.buf, "/branch \n/branches \n"));
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/branch  sw", cands_add, &c);
-	FYAI_TCHECK(!strcmp(c.buf, "/branch  switch\n"));
+	FYAI_TCHECK(!strcmp(c.buf, "/branch  switch \n"));
 	/* A value comes from the schema of the item the key names. */
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/config set mcp/enabled ", cands_add,
 				  &c);
-	FYAI_TCHECK(!strcmp(c.buf, "/config set mcp/enabled true\n"
-			    "/config set mcp/enabled false\n"));
+	FYAI_TCHECK(!strcmp(c.buf, "/config set mcp/enabled true \n"
+			    "/config set mcp/enabled false \n"));
 	/* The popup of the session completes a help path the same way. */
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/help config se", cands_add, &c);
-	FYAI_TCHECK(!strcmp(c.buf, "/help config set\n"));
+	FYAI_TCHECK(!strcmp(c.buf, "/help config set \n"));
+	/* A path segment goes on in the same word: it takes no space. */
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_session_complete(NULL, "/config set mc", cands_add, &c);
+	FYAI_TCHECK(!strcmp(c.buf, "/config set mcp/\n"));
 	/* --output is not a session option. */
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/branch delete --o", cands_add, &c);
@@ -498,13 +620,35 @@ int cmd_group_args(void)
 	rc = cmd_test_parse(&t, FYAI_CMD_CLI, "auth anthropic", &p);
 	FYAI_TCHECK(!rc && arg_is(p.args, "provider", "anthropic"));
 
-	/* A session-only option is not a verb option. */
-	expect_error(&t, FYAI_CMD_SESSION, "auth login --manual",
-		     "unknown option '--manual'");
+	rc = cmd_test_parse(&t, FYAI_CMD_SESSION, "auth login --manual", &p);
+	FYAI_TCHECK(!rc && !strcmp(p.path, "auth login"));
+	FYAI_TCHECK(fy_get(p.args, "manual", false));
 	cmd_test_close(&t);
 
 	complete(FYAI_CMD_CLI, "auth ", &c);
 	FYAI_TCHECK(strstr(c.buf, "login\n") && strstr(c.buf, "status\n"));
+	return 0;
+}
+
+int cmd_view_session_args(void)
+{
+	struct fyai_cmd_parsed p;
+	struct cmd_test t;
+	int rc;
+
+	cmd_test_open(&t);
+	rc = cmd_test_parse(&t, FYAI_CMD_SESSION, "view", &p);
+	FYAI_TCHECK(!rc && !strcmp(p.path, "view list"));
+	rc = cmd_test_parse(&t, FYAI_CMD_SESSION, "view list --full", &p);
+	FYAI_TCHECK(!rc && fy_get(p.args, "full", false));
+	rc = cmd_test_parse(&t, FYAI_CMD_SESSION,
+			    "view enter demo sh -c 'printf two words'", &p);
+	FYAI_TCHECK(!rc && !strcmp(p.path, "view enter"));
+	FYAI_TCHECK(arg_is(p.args, "name", "demo"));
+	FYAI_TCHECK(fy_len(fy_get(p.args, "command")) == 3);
+	FYAI_TCHECK(fy_equal(fy_get_at(fy_get(p.args, "command"), 2),
+			     "printf two words"));
+	cmd_test_close(&t);
 	return 0;
 }
 
@@ -639,9 +783,13 @@ int cmd_setting_scope(void)
 	/* A setting completes from the schema of its key. */
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/effort m", cands_add, &c);
-	FYAI_TCHECK(strstr(c.buf, "/effort medium\n"));
+	FYAI_TCHECK(strstr(c.buf, "/effort medium \n"));
+	/* An alias completes as a word of its own. */
+	memset(&c, 0, sizeof(c));
+	fyai_cmd_session_complete(NULL, "/eff", cands_add, &c);
+	FYAI_TCHECK(!strcmp(c.buf, "/effort \n"));
 	memset(&c, 0, sizeof(c));
 	fyai_cmd_session_complete(NULL, "/markdown o", cands_add, &c);
-	FYAI_TCHECK(!strcmp(c.buf, "/markdown on\n/markdown off\n"));
+	FYAI_TCHECK(!strcmp(c.buf, "/markdown on \n/markdown off \n"));
 	return 0;
 }

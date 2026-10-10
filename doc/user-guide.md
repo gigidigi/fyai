@@ -78,13 +78,47 @@ For OpenAI Responses requests, an eligible ChatGPT subscription may be used inst
 
 ```sh
 fyai auth openai login
-fyai auth openai login --device-code
+fyai auth openai login --no-browser
 fyai auth openai status
 fyai auth openai usage
 fyai config set auth chatgpt
 ```
 
 `auth: auto` prefers an available API key and otherwise falls back to a saved ChatGPT login. `auth: api-key` disables that fallback. `auth: chatgpt` selects subscription access explicitly.
+
+The first login registers fyai with OpenAI and requests permission to use your
+ChatGPT plan. No client ID from a developer dashboard is required. fyai saves
+an opaque host ID before login and saves the issued client ID for later login
+and token refresh. It verifies the ID token and the granted plan-usage scope.
+Old Codex-compatible credentials require a new login.
+
+Use `fyai auth accounts` to list saved registrations. Use
+`fyai auth login --account CLIENT_ID` to authorize one again, or
+`fyai auth login --new-account` to register another account or workspace.
+Logout clears the active registration's tokens and retains its client ID and
+the host ID. A failed login does not replace another account's credentials.
+
+For a browser on another machine, use `fyai auth login --manual` and paste the
+complete callback URL. In a session, use `/auth login --manual`. Open the
+link in your local browser and paste the callback URL from its address bar
+even if the loopback page cannot load. No SSH port forwarding is required.
+A bare authorization code is not accepted. The
+subscription registration flow does not support device-code login.
+
+Subscription requests use the public Responses API with streaming enabled and
+server-side storage disabled. They send the full required history and group
+local tools in a namespace. They do not use ChatGPT's private backend endpoints
+or fall back to an API key after a subscription failure. See
+[OpenAI's registration documentation](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+and [preview limits](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+The [authentication flow](chatgpt-auth.md) documents registration, refresh,
+logout, and credential ownership with Mermaid diagrams.
+
+`fyai auth status` shows the configured mode, effective method, and plan
+permission. `fyai auth usage` shows selected-conversation token totals and links to
+ChatGPT Settings, where you can review
+app limits and control whether the app may use credits after plan limits.
+
 
 ### Run the first task
 
@@ -453,7 +487,7 @@ fyai \
 
 ```sh
 fyai auth openai login
-fyai auth openai login --device-code
+fyai auth openai login --no-browser
 fyai auth openai status
 fyai auth openai info
 fyai auth openai usage
@@ -651,6 +685,16 @@ sub-agent that ended is not typed into. Call `agent` with its name instead.
 `shell/input_poll_ms` sets how often the parent asks the state of a program.
 The value 0 stops the question.
 
+### Listing what the model owns
+
+`list` gives the model the objects that it can name in another call: `agents`
+(the sub-agents it started, running or ended), `views` (the views that isolated
+sub-agents left), `shells` (its open terminal sessions), `waits` (its pending
+named waits), `monitors` (its running monitors) and `questions` (the questions
+it put to the user in the background that still wait for an answer). A row has the name that the model gave the object. The tool lists
+only what the calling agent owns: your views and branches, and the objects of
+other agents, are not rows. Branches are not a kind.
+
 ### Telling the time, and waiting
 
 The system instructions are frozen when a conversation starts, so they cannot
@@ -667,8 +711,10 @@ wait{name: "build", seconds: 30}     # returns at once and fires later
 ```
 
 A named wait does not hold the turn. The call returns when the wait is armed,
-and the model continues. When the wait fires, the model receives a turn of its
-own, which no person typed:
+and the model continues. When the wait fires, the model receives a report that
+no person typed. A report that arrives while the model works joins the same turn
+before the next model request, after the active tool calls finish. A report that
+arrives while the session is idle starts a turn of its own:
 
 ```text
   │ start the build and come back to it
@@ -684,6 +730,72 @@ a call that sends `until: ""` beside `seconds` asks for the seconds.
 
 A wait lives for one invocation, as a terminal session does. No daemon can
 receive it, so a wait that did not fire is dropped when the run ends.
+
+### Waiting for what the model started
+
+`wait` with `for` holds the turn until something the model started ends. It
+takes the name of a background sub-agent, a terminal session or a named wait,
+or a list of up to 16 names:
+
+```text
+wait{for: "review"}                            # until one thing ends
+wait{for: ["a", "b", "c"], mode: "all"}        # until every one ends
+wait{for: ["a", "b"], mode: "any", seconds: 60}  # the first, or 60 seconds
+```
+
+`mode: any` is the default. `seconds` or `until` set the longest wait; the
+call then returns the reports it has and names what still runs. A report that
+the wait returns is not given again in a later turn. A sub-agent or session
+that stops to ask for input ends its part of the wait.
+
+Waits in one response run at the same time, and an event that several of them
+wait for reaches each of them: both results hold the report. A wait does not
+poll. The event loop wakes it when an event is queued, when what it waits for
+changes, or at its time limit, and the interface and interrupts stay live.
+
+Background work belongs to the conversation that started it. `/clear`,
+`/resume`, `/checkout` and `/reset` end the background sub-agents, monitors and
+named waits of the old conversation and drop its queued events, so nothing
+reports into the new one. Terminal sessions stay, as they are on the screen.
+
+### Monitors
+
+The `monitor` tool watches a long-running command. The command runs in the
+background as a shell call, with the confinement, the environment and the
+time limit of one. Each complete line that it prints reaches the model as an
+event between its tool calls, and the end of the command is the last event:
+
+```text
+  │ [monitor 'ci'] build: step 3 of 9 passed
+  │ [monitor 'ci' ended]
+```
+
+The default time limit is five minutes and the most is thirty. Both output
+streams are events, so the command should print only the lines that the model
+acts on. A monitor that sends more than 200 events is stopped. `wait` with
+`for` holds the turn until a monitor reports, `list` shows the running ones,
+and `cancel` stops one.
+
+### Background sub-agents and cancel
+
+An `agent` call with `background: true` starts the sub-agent and returns at
+once. When the sub-agent ends, the model receives its final report as a turn of
+its own, as it does for a named wait:
+
+```text
+  │ [agent 'review' finished]
+  <final report of the sub-agent>
+```
+
+A sub-agent that fails reports `[agent 'NAME' failed: CAUSE]`. A background
+sub-agent lives for one invocation and is stopped when the run ends.
+
+The `cancel` tool ends background work by name: a pending wait, a running
+sub-agent (with every process it started), a monitor, a question that waits for
+the user, or an open terminal session. Give `kind` (`wait`, `agent`, `monitor`,
+`question` or `shell`) when one name refers to more than one
+object. A session is killed at once; use `shell_close` when the program must
+save its work. The user can stop a sub-agent with `/kill`.
 
 ### A terminal for the user: `fyai term`
 
@@ -788,11 +900,71 @@ The tile header of a sub-agent shows the branch, the model, the execution id,
 and the running time after the agent description. While a turn runs, the input
 pane header shows the running time of the turn.
 
+### Questions to the user
+
+The `ask_user` tool puts one to four questions to the user. Each question has
+a `header` of at most 12 characters, the question text, and two to four options.
+An option has a `label`, a `description`, and optionally a `preview`. The user
+can always type an answer of their own, so the model does not offer an
+"Other" option. A question with `multi_select` allows more than one choice.
+
+In an interactive session the questions take the input area. One question is
+shown at a time, with its position when there are several:
+
+| Key | Action |
+|---|---|
+| Up, Down | move the cursor over the options |
+| `1` to `9` | choose an option, or toggle it in a many-choice question |
+| Space | toggle the option under the cursor, or choose it |
+| Enter | take the typed text or the option under the cursor and go on |
+| Left, Right | go to the question before, or after one that is answered |
+| Escape, `^C` | decline every question |
+
+After the last of several questions a review lists every answer. Enter sends
+them, Left goes back to change one, and Escape declines. Text typed in place of
+the options is the answer; in a many-choice question it adds to the options
+that were toggled.
+
+A `preview` is Markdown. While the option is under the cursor, the page draws
+it under the options, and a fenced `mermaid` block is drawn as a diagram. Only
+a question that allows one choice has previews.
+
+The model receives the answers as JSON. Every question has an `id`, which is
+`q1`, `q2` and so on unless the model named it, and every option has an `id`,
+which is its label unless the model named it:
+
+```json
+{"status": "answered", "answers": [
+  {"id": "q1", "header": "Scope", "question": "How wide?",
+   "selected": ["medium"], "other": "but not the parser"}]}
+```
+
+`status` is `declined` when the user gave no answer. Without a terminal page,
+`ask_user` writes each question as text, and a number or a list of numbers
+separated by commas chooses; `--answer` supplies one answer for each question
+in order, and a blank answer declines.
+
+A call with `background: true`, or with a `name`, does not hold the turn. It
+returns at once with the name of the question (`ask-1`, `ask-2` and so on when
+the model gave none), and the user answers when ready. The model then has the
+same tools as for other background work: `list` with kind `questions`, `cancel`
+to withdraw it, and `wait` with `for` to hold a call for the answers. `wait`
+with `poll: true` looks once and reports what has ended and what still runs.
+The answers arrive in a turn of their own when nothing waits for them:
+
+```text
+  │ [question 'ask-1' answered]
+  {"status": "answered", "answers": [...]}
+```
+
+Without a terminal page a background call is asked at once like any other.
+
 ### A question from a sub-agent
 
 A sub-agent has a terminal, but no person is at it. Its `ask_user` call
-therefore goes to the parent, which has the user. The question names the
-sub-agent that asked it, and it carries the options that the sub-agent offered.
+therefore goes to the parent, which has the user. The questions name the
+sub-agent that asked them, and they carry the options that the sub-agent offered.
+A sub-agent always waits for the answers; `background` does not apply to it.
 The answer of the user comes back as the result of that call, and the sub-agent
 continues.
 
@@ -829,12 +1001,31 @@ sandbox:
     - { path: /ro/data, mode: ro }
     - { path: /src, mode: edit }
   network:
-    ports: [443]
+    tcp: { ports: [443], bind_ports: [] }
+    udp: { ports: [], bind_ports: [] }
 ```
 
 The `.fyai` arena is denied to sandboxed tools. Landlock is best-effort on unsupported systems; the portable tool policy remains in force.
 
-Supported path modes include `rw`, `ro`, `edit`, and `append`. Supplying `network` restricts outbound TCP ports; an empty port list denies all configured egress.
+Supported path modes include `rw`, `ro`, `edit`, and `append`. `network.tcp.ports` and `network.udp.ports` list permitted destination ports independently. `bind_ports` under each protocol lists permitted local ports. An empty list denies that operation; omitting a protocol leaves it unrestricted in the normal profile. UDP sends also permit an ephemeral source bind. TCP needs Landlock ABI 4 and UDP needs ABI 10. On older ABIs fyai reports that the requested UDP restriction is unavailable. Local Unix sockets remain available.
+
+`sandbox_profile` selects the policy: `normal` uses `sandbox`, and `lockdown` uses
+`sandbox_lockdown` and enables the sandbox whatever `sandbox` says. `/session
+lockdown` selects the lockdown profile and `/session yolo` selects `normal`. The
+profile is stored, so a restart of the session keeps it, and it leaves the
+`sandbox` policy as it was. `sandbox_lockdown` takes `deny`, `allow` and `network`
+as `sandbox` does. A key that it omits keeps its default: `deny` lists `~/.ssh`,
+the secret location of the platform, and `network` has an empty port list, which
+denies TCP connects and binds and, on Landlock ABI 10 or newer, UDP sends and binds. On older ABIs UDP remains unrestricted. A kernel without network rights leaves egress open. Each omitted protocol entry keeps its lockdown default.
+
+```yaml
+sandbox_profile: lockdown
+sandbox_lockdown:
+  deny: [~/.ssh, ~/.aws]
+  network:
+    tcp: { ports: [443], bind_ports: [] }
+    udp: { ports: [], bind_ports: [] }
+```
 
 ### Secret handling
 
@@ -890,8 +1081,10 @@ fyai context
 ```
 
 Interactive `/stats` reports cumulative usage over the selected conversation
-chain, including turns from earlier invocations. `/usage` queries live
-subscription limits and credits where supported.
+chain, including turns from earlier invocations. `/usage` shows recorded
+conversation token totals and links to ChatGPT Settings for account-wide app
+limits and credit permissions. Remaining plan allowance is unavailable through
+the documented direct-client API; local totals do not measure that allowance.
 
 ### Logging
 
@@ -1004,7 +1197,7 @@ A line beginning with `//` is sent to the model verbatim with one slash removed.
 | `/context` | Report context fill |
 | `/status` | Show model, provider, auth, context, and usage overview |
 | `/stats` | Show cumulative token usage for the selected conversation chain |
-| `/usage` | Show live subscription limits and credits |
+| `/usage` | Show recorded token totals and ChatGPT usage settings |
 | `/catalog ...` | Inspect or edit the catalogue of the branch |
 | `/diff [-u] [from [to]]` | Compare two reflog entries |
 | `/tools [agent] [--brief\|--full]` | List catalogue agent tools |
@@ -1053,14 +1246,10 @@ remaining settings below are session-only.
 
 Use `/help` in the running binary for the current command and setting spellings.
 
-`display/renderer` selects how the live screen is composed. `page`, the
-default, states the screen as one UI Markdown page: `stack` is the chrome of
-the terminal library. The page holds the transcript tail, the work pane, the
-header, the prompt between two rules and the status. On a short terminal the
-page loses the status first, then the header, then the rules, and keeps the
-prompt. A
-build without page support uses `stack` and says so. Refer to
-`doc/markdown-ui-plan.md`.
+The live screen is one UI Markdown page. The page holds the transcript tail,
+the work pane, the header, the prompt between two rules and the status. On a
+short terminal the page loses the status first, then the header, then the
+rules, and keeps the prompt. Refer to `doc/markdown-ui-plan.md`.
 
 An interactive session opens fullscreen (`display/screen: fullscreen`), with
 the work pane at half the terminal (`display/work_zoom_rows: half`) and the
@@ -1078,8 +1267,8 @@ fyai -i --set display/theme=ember:auto --set display/theme_ground=theme
 ```
 
 The page fills default backgrounds with the theme's ground colour and keeps
-card and code backgrounds. `display/theme_ground=terminal` leaves the page
-background to the terminal and adapts the palette to that background.
+card and code backgrounds. `display/theme_ground=terminal`, the default, leaves
+the page background to the terminal and adapts the palette to that background.
 
 `ember:auto` is the default `display/theme` when fyai is built with
 libfypalette. A build without it uses `default:auto`.
@@ -1162,7 +1351,7 @@ Global parsing stops at the first non-option. A known token is dispatched as a v
 | `--color MODE` | `auto`, `off`, or `on` |
 | `--theme THEME` | Select markdown theme |
 | `--interactive`, `-i` | Start interactive mode |
-| `--answer TEXT` | Pre-supply an `ask_user` answer; repeatable |
+| `--answer TEXT` | Pre-supply the answer to one `ask_user` question; repeatable |
 | `--debug`, `-d` | Increase diagnostic verbosity |
 
 ## 12. Architecture and operational notes

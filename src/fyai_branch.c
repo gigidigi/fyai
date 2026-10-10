@@ -216,6 +216,17 @@ bool fyai_branch_name_ref_valid(const char *name)
 	return branch_name_valid(name, true);
 }
 
+bool fyai_branch_name_has_agent(const char *name)
+{
+	const char *comp;
+	size_t len = strlen(FYAI_BRANCH_AGENT_PREFIX);
+
+	for (comp = name; comp && *comp; comp = strchr(comp, '/') ? strchr(comp, '/') + 1 : NULL)
+		if (!strncmp(comp, FYAI_BRANCH_AGENT_PREFIX, len))
+			return true;
+	return false;
+}
+
 bool fyai_branch_is_below(const char *name, const char *parent)
 {
 	size_t plen;
@@ -335,9 +346,11 @@ bool fyai_branch_decode(fy_generic entry, struct fyai_branch *b)
 	b->op = fy_invalid;
 	b->from = fy_invalid;
 	b->prev = fy_invalid;
+	b->project = fy_invalid;
 	b->store = fy_invalid;
 	b->config = fy_invalid;
 	b->catalog = fy_invalid;
+	b->todos = fy_invalid;
 	b->created = fy_invalid;
 	b->cwd = fy_invalid;
 	b->description = fy_invalid;
@@ -356,6 +369,7 @@ bool fyai_branch_decode(fy_generic entry, struct fyai_branch *b)
 	b->op = fyai_branch_member(entry, "op");
 	b->from = fyai_branch_member(entry, "from");
 	b->prev = fyai_branch_member(entry, "prev");
+	b->project = fyai_branch_member(entry, "project");
 	return fyai_branch_decode_store(store, b);
 }
 
@@ -368,6 +382,7 @@ bool fyai_branch_decode_store(fy_generic store, struct fyai_branch *b)
 	b->store = store;
 	b->config = fyai_branch_member(store, "config");
 	b->catalog = fyai_branch_member(store, "catalog");
+	b->todos = fyai_branch_member(store, "todos");
 	b->created = fyai_branch_member(store, "created");
 	b->cwd = fyai_branch_member(store, "cwd");
 	b->description = fyai_branch_member(store, "description");
@@ -428,6 +443,7 @@ fy_generic fyai_branch_store_build(struct fy_generic_builder *gb,
 	store = fy_is_mapping(b->store) ? b->store : fy_map_empty;
 	store = store_member_set(gb, store, "config", b->config);
 	store = store_member_set(gb, store, "catalog", b->catalog);
+	store = store_member_set(gb, store, "todos", b->todos);
 	store = store_member_set(gb, store, "created", b->created);
 	store = store_member_set(gb, store, "cwd", b->cwd);
 	store = store_member_set(gb, store, "description", b->description);
@@ -560,6 +576,17 @@ static fy_generic store_merge3(struct fy_generic_builder *gb, fy_generic base,
 		return ours;
 	if (store_value_same(base, ours))
 		return theirs;
+	/*
+	 * The todo list is one value: a rewrite on either side wins over the
+	 * base without a key-by-key merge. Two rewrites conflict, and the
+	 * value of this run is kept.
+	 */
+	if (!strcmp(path, "todos")) {
+		*conflictsp = fy_append(gb, *conflictsp, fy_value(gb, path));
+		if (fy_is_invalid(*conflictsp))
+			*failp = true;
+		return ours;
+	}
 	/* A sequence of named items, such as the models, merges by name. */
 	if (fy_is_sequence(ours) && fy_is_sequence(theirs) &&
 	    depth < STORE_MERGE_DEPTH_MAX) {
@@ -643,18 +670,22 @@ fy_generic fyai_branch_store_merge(struct fy_generic_builder *gb,
 fy_generic fyai_branch_build(struct fy_generic_builder *gb,
 			     const struct fyai_branch *b)
 {
-	fy_generic store;
+	fy_generic store, entry;
 
 	store = fyai_branch_store_build(gb, b);
 	if (fy_is_invalid(store))
 		return fy_invalid;
-	return fy_mapping(gb,
-			  "head", fyai_generic_or_null(b->head),
-			  "updated", fyai_generic_or_null(b->updated),
-			  "op", fyai_generic_or_null(b->op),
-			  "from", fyai_generic_or_null(b->from),
-			  "prev", fyai_generic_or_null(b->prev),
-			  "store", store);
+	entry = fy_mapping(gb,
+			   "head", fyai_generic_or_null(b->head),
+			   "updated", fyai_generic_or_null(b->updated),
+			   "op", fyai_generic_or_null(b->op),
+			   "from", fyai_generic_or_null(b->from),
+			   "prev", fyai_generic_or_null(b->prev),
+			   "store", store);
+	/* An entry that records no project state has no such member. */
+	if (fy_is_mapping(b->project))
+		entry = fy_assoc(gb, entry, "project", b->project);
+	return entry;
 }
 
 /* Cap on ref-log entries reported for one branch. */
@@ -1508,6 +1539,7 @@ int fyai_branch_adopt(struct fyai_ctx *ctx, const char *name, bool keep_head)
 	ctx->branch_desc = b.description;
 	ctx->branch_agent = b.agent;
 	ctx->branch_prev = b.entry;
+	fyai_background_reset(ctx);
 	return 0;
 
 err_out:
@@ -1564,6 +1596,7 @@ int fyai_branch_reset(struct fyai_ctx *ctx, const char *spec)
 
 	/* The previous head remains available as "<branch>@{1}". */
 	ctx->last_message = head;
+	fyai_background_reset(ctx);
 	fyai_branch_op_set(ctx, FYAI_BRANCH_OP_RESET, NULL);
 	if (fyai_publish_state(ctx))
 		return -1;

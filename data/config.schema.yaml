@@ -11,6 +11,92 @@ description: >-
   Configuration settings for fyai. The document resides in an arena; see
   config.yaml.sample for the key list and defaults.
 properties:
+  view:
+    type: object
+    description: Configure project filesystem views.
+    properties:
+      durability:
+        type: string
+        enum: [lazy, durable]
+        default: lazy
+        description: >-
+          Set the default persistence policy for new views. lazy skips backing
+          filesystem flushes and may lose snapshots after power loss; durable
+          flushes the backing filesystem before publishing snapshot references.
+      scratch_dir:
+        type: string
+        default: ""
+        description: >-
+          Set the directory that a view replaces with a private tmpfs. An empty
+          value selects $TMPDIR, else /tmp. The path must be absolute and exist,
+          and must not lie inside the project.
+      track_project:
+        type: boolean
+        default: false
+        description: >-
+          Record the state of the project with each ref-log entry that moves
+          the head of a branch, when the arena is in the .fyai directory of the
+          project. A reference to a point of a branch then names the files of
+          that point: `view diff` takes it, and `reset` restores it. Each entry
+          costs a scan of the project, and a state that did not change is
+          shared with the entry before it. Linux only.
+      tool_diff:
+        type: boolean
+        default: false
+        x-fyai-scope: session
+        description: >-
+          Show what each group of tool calls changed in the project, as a diff
+          under the calls, so a change that a shell command made is as visible
+          as a patch. The project state is recorded before the turn and after
+          each group of calls, with the paths that view/ignore and view/gitignore
+          leave out left out. Each group costs a scan of the project. A call
+          that can change files is followed: a patch, a file write, a shell, a
+          terminal session, a sub-agent or a tool of a server. A patch and a
+          file write then name their files and leave the change to this diff.
+          The arena must be in the .fyai directory of the project. A session that runs in a view
+          (view/isolate_session) shows them too. Linux only.
+      undo_depth:
+        type: integer
+        minimum: 1
+        default: 16
+        x-fyai-scope: session
+        description: >-
+          Set how many groups of tool calls that view/tool_diff shows stay
+          available to `/undo`. Each group holds two project states, so the
+          depth limits the storage that a session keeps. The oldest group is
+          dropped first.
+      ignore:
+        type: array
+        items:
+          type: string
+        default: []
+        description: >-
+          List the paths that the user and the project do not see of a view. A
+          view holds the whole project, build artifacts included, because the
+          agent that works in it needs them; an ignored path is left out of
+          its diff, its list of changes and its apply, and of the state that
+          view/track_project and view/tool_diff record. Each entry is a line of
+          a gitignore file: a trailing slash selects directories, a slash in
+          the pattern anchors it to the project root, ! negates, and ** matches
+          any number of directories. These rules outrank the .gitignore files.
+      gitignore:
+        type: boolean
+        default: true
+        description: >-
+          Apply the .gitignore files of the project, and its .git/info/exclude,
+          as view/ignore does, as `git status` leaves out what they name. The
+          rules of view/ignore are applied first. The files are read from the
+          project when a diff or an apply needs them. The global Git ignore file
+          is not read. The .git directory is never ignored.
+      isolate_session:
+        type: boolean
+        default: false
+        description: >-
+          Run each session and prompt in the view named session of the
+          project. The invocation captures the project, runs again inside the
+          view, and records the result. Its changes stay in the view until
+          `view apply` writes them to the project. Linux only. It needs a
+          writable arena and no credential isolation.
   auth:
     type: string
     enum: [auto, api-key, chatgpt]
@@ -356,6 +442,15 @@ properties:
         description: >-
           Terminate a sub-agent after hang_timeout_ms. Disable this to report
           advisory overruns without terminating agents.
+      isolation:
+        type: string
+        enum: [none, view]
+        default: none
+        description: >-
+          Select where sub-agents run. none shares the project with the parent.
+          view runs each sub-agent in a private view of the project: its
+          changes stay in the view until the user applies them. The call can
+          override this with the `isolated` parameter.
       personas:
         type: object
         description: >-
@@ -425,6 +520,21 @@ properties:
           continues the forked image of the parent. A transient run, a pinned
           root, and a platform without a supported executable-image path
           always use `fork`.
+      transport_isolation:
+        type: string
+        enum: [none, auto, level-a, level-b]
+        default: none
+        description: >-
+          Keep provider credentials out of every agent and tool process. A
+          separate transport process holds the credentials and sends the
+          requests of admitted agents. `none` keeps the credentials in the
+          agents. `level-b` admits an agent by PID and pidfd only, which
+          bounds no descendant, and is the only level that runs now.
+          `level-a`, which adds a cgroup v2 subtree, is not built yet and
+          stops the invocation. `auto` takes the highest level that runs
+          and reports it, which is `level-b`. A level that the host cannot
+          enforce stops the invocation. A change in a running session restarts it.
+          Linux only. Experimental.
       max_branch_depth:
         type: integer
         minimum: 1
@@ -487,17 +597,139 @@ properties:
           network:
             type: object
             description: >-
-              Restrict network egress to listed TCP ports. Omit this mapping
-              to leave egress open; an empty ports list denies all egress.
+              Restrict selected network protocols. Omit a protocol to leave it
+              unrestricted. TCP needs Landlock ABI 4; UDP needs ABI 10.
+            properties:
+              tcp:
+                type: object
+                description: Restrict TCP connects to listed destination ports.
+                properties:
+                  ports:
+                    type: array
+                    description: Allowed TCP destination ports; empty denies TCP connects.
+                    items:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                  bind_ports:
+                    type: array
+                    description: Allowed local TCP bind ports; omit to leave binds unrestricted.
+                    items:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+              udp:
+                type: object
+                description: Restrict UDP sends to listed destination ports.
+                properties:
+                  ports:
+                    type: array
+                    description: Allowed UDP destination ports; empty denies UDP sends.
+                    items:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                  bind_ports:
+                    type: array
+                    description: Allowed local UDP bind ports; ephemeral binds are allowed for permitted sends.
+                    items:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+  sandbox_profile:
+    type: string
+    enum: [normal, lockdown]
+    default: normal
+    description: >-
+      Select the sandbox policy that confines shell-tool executions. `normal`
+      uses `sandbox`. `lockdown` uses `sandbox_lockdown` and enables the sandbox
+      whatever `sandbox` says. `/session lockdown` selects `lockdown` and
+      `/session yolo` selects `normal`.
+  sandbox_lockdown:
+    type: object
+    description: >-
+      Set the sandbox policy of the `lockdown` profile, apart from `sandbox`.
+      It is always enabled. A key that this mapping omits keeps its default: the
+      secret locations of the platform are denied and available Landlock
+      network rights are restricted.
+      The `sandbox` mapping describes each key.
+    properties:
+      deny:
+        type: array
+        default: ["~/.ssh"]
+        description: >-
+          Deny access to the specified paths. Paths can be project-relative,
+          absolute, or home-relative. The .fyai arena is always denied. A path
+          that does not exist is left out.
+        items:
+          type: string
+      allow:
+        type: array
+        description: Grant access to paths outside the project.
+        items:
+          anyOf:
+            - type: string
+              description: Grant read and write access to this path.
+            - type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                  description: Name the path for this sandbox grant.
+                mode:
+                  type: string
+                  enum: [rw, ro, edit, append]
+                  description: >-
+                    Select the access mode for this path. rw is the default;
+                    ro allows read and execute; edit modifies existing files
+                    without create or delete; append writes without truncation.
+      network:
+        type: object
+        description: >-
+          Restrict TCP connects and UDP sends independently. Omitted protocol
+          entries retain their lockdown default of an empty destination list.
+          TCP needs Landlock ABI 4; UDP needs ABI 10.
+        properties:
+          tcp:
+            type: object
+            description: Restrict TCP connects to listed destination ports.
             properties:
               ports:
                 type: array
-                description: List TCP ports allowed for network egress.
+                default: []
+                description: Allowed TCP destination ports; empty denies TCP connects.
                 items:
                   type: integer
                   minimum: 1
                   maximum: 65535
-                  description: Set one allowed TCP port number.
+              bind_ports:
+                type: array
+                default: []
+                description: Allowed local TCP bind ports; empty denies TCP binds.
+                items:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+          udp:
+            type: object
+            description: Restrict UDP sends to listed destination ports.
+            properties:
+              ports:
+                type: array
+                default: []
+                description: Allowed UDP destination ports; empty denies UDP sends.
+                items:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+              bind_ports:
+                type: array
+                default: []
+                description: Allowed local UDP bind ports; ephemeral binds are allowed for permitted sends.
+                items:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
   logprobs:
     type: boolean
     default: false
@@ -559,6 +791,13 @@ properties:
         type: boolean
         default: false
         description: Log MCP lifecycle and JSON-RPC request metadata.
+      transport:
+        type: boolean
+        default: false
+        description: >-
+          Log the credential transport: admissions, rejected messages, request
+          and response events, and its wire traffic. Credentials are always
+          whited out; `whitewash_api_keys` does not apply to this log.
   display:
     x-fyai-scope: session
     type: object
@@ -587,6 +826,16 @@ properties:
         minimum: 0
         default: 5
         description: Set the number of tool-result preview rows.
+      tool_history_lines:
+        type: integer
+        minimum: 0
+        default: 40
+        description: >-
+          Set how many rows of the output of a running tool call its tile
+          keeps, which the scroll bar and the wheel move back through. The tile
+          shows tool_preview_lines of them, and the stored exchange keeps the
+          preview. A value that is not above tool_preview_lines keeps no
+          history.
       tool_update_interval_ms:
         type: integer
         minimum: 0
@@ -614,6 +863,14 @@ properties:
           empty value draws no ground and reverses the tile margin to mark
           focus. fyai reports an explicit colour if the theme text is hard
           to read on it.
+      focus_mark:
+        type: string
+        enum: [wash, edge]
+        default: edge
+        description: >-
+          Select how the input area that has the keys is marked. edge draws
+          the edge column alone, and the ground stays that of the terminal.
+          wash also draws focus_bg under it.
       focus_bg_mix:
         type: integer
         minimum: 0
@@ -653,14 +910,75 @@ properties:
           Select when the completion popup opens. tab opens it on Tab; auto
           opens it when the current input has candidates. A candidate still
           requires an explicit selection.
+      keys:
+        type: object
+        description: >-
+          Bind keys of the prompt. Each member names a mode of the terminal
+          library - prompt, completion or surface - and maps keys to
+          actions. A key is a name such as Up, Escape, Ctrl-g or Ctrl-Shift-t,
+          or a chord of up to four keys apart by blanks, such as "Ctrl-x
+          Ctrl-e" or "Escape Escape". An action is a name of the library,
+          such as fytim.history.prev, fytim.redraw, fytim.edit,
+          fytim.interrupt, fytim.quit, fytim.focus.next or
+          fytim.complete.next, or an empty string to unbind a key. The mode
+          surface also takes fyai.focus.prompt, which gives the keys of a tile
+          back to the prompt. A key that
+          the config does not name keeps the binding it has. The mode prompt
+          keeps a key that leaves the program. The mode surface binds single
+          keys only.
+        additionalProperties:
+          type: object
+          additionalProperties:
+            type: string
+      chord_timeout_ms:
+        type: integer
+        minimum: 0
+        default: 1000
+        description: >-
+          Set the time in milliseconds that a chord of keys, such as a double
+          tap of Escape, waits for its next key. 0 waits for ever.
       command_output:
         type: string
         enum: [pane, transcript]
-        default: pane
+        default: transcript
         description: >-
           Select where slash-command output appears. pane shows it in a popup or a
           tile, and the transcript keeps nothing of it. transcript draws the
           command and its output in the transcript, and stores both there.
+      command_bg:
+        type: string
+        default: theme
+        description: >-
+          Set the background of slash-command output in the transcript. theme
+          mixes command_bg_mix percent of the palette's pane.focus colour into
+          the ground under the text, which needs a palette and 24-bit colour.
+          #rrggbb sets an explicit colour. An empty value or none draws no
+          background.
+      command_bg_mix:
+        type: integer
+        minimum: 0
+        maximum: 100
+        default: 6
+        description: >-
+          Set how much of the theme colour command_bg theme mixes into the
+          ground under the text, in percent.
+      tool_display:
+        type: string
+        enum: [pane, inline]
+        default: inline
+        description: >-
+          Select where the live output of a shell or agent call appears. pane
+          shows it in a tile of the work pane. inline draws it in the
+          transcript at the position of the call. An inline page draws it
+          under the live tail until it is committed to the scrollback. A
+          display without a page uses pane.
+      inline_terminal_rows:
+        type: integer
+        minimum: 1
+        default: 12
+        description: >-
+          Set the rows of a terminal that tool_display inline draws in the
+          transcript.
       editor:
         type: string
         enum: [pane, terminal]
@@ -786,17 +1104,6 @@ properties:
           keeps the screens off it. It is what divides two programs; the
           session_margin gutter runs down the inside of one. An empty
           string draws none.
-      renderer:
-        type: string
-        enum: [stack, page]
-        default: page
-        description: >-
-          Select how the live screen is composed. stack draws the fixed chrome of the
-          terminal library: the header, the prompt between two rules and the
-          status. page states the screen as one UI Markdown page whose slots
-          hold the transcript tail, the work pane and the prompt. page needs a
-          libfytimui and a libfymd4c that support pages; without them stack is
-          used and the session reports the fallback.
       page:
         type: string
         default: ""
@@ -816,8 +1123,7 @@ properties:
           scrollback of the terminal. fullscreen takes the alternate screen: the
           transcript is a view of the page that the wheel, PageUp and PageDown
           scroll, and the terminal shows what it showed before when the session
-          ends. It applies only with display/renderer page, when the session
-          starts.
+          ends. It takes effect when the session starts.
       work_controls:
         type: string
         enum: [none, zoom, full]
@@ -826,7 +1132,8 @@ properties:
           Select tile mouse controls. none draws none. zoom ends the head of
           a tile in buttons that minimize, maximize and close it. full adds a
           scroll bar and its arrows, which, with the wheel over the tile,
-          move its view back through the history of its program. Anything
+          move its view back through the history of its program, or through
+          the output of a running tool call. Anything
           but none grabs the mouse for the whole session, which takes
           selection and copy from the terminal. With the grab, a click on a
           tile gives it the keys and a click off the tiles gives them back to
@@ -881,10 +1188,10 @@ properties:
       theme_ground:
         type: string
         enum: [theme, terminal]
-        default: theme
+        default: terminal
         description: >-
           Select the background used by a palette theme. theme uses the ground of
-          the theme. terminal asks the terminal for its background and makes
+          the theme. terminal, the default, asks the terminal for its background and makes
           it the ground of the theme, so the neutral colours - the card,
           rules, faint, dim and ink text - keep their steps over the real
           background. The hue colours do not change. It applies when the
@@ -1001,24 +1308,34 @@ properties:
         description: >-
           Set the top row of the interactive prompt. It is a {key} template over the
           session vars (model, provider, api, effort, summary, temp, ctx,
-          tokens, cache, cost, branch, cwd, location, layout).
+          tokens, cache, cost, branch, cwd, location, layout, isolation, view).
           Empty uses the built-in branch and working-directory row.
-          A custom template replaces it. May carry SGR colour escapes.
+          A custom template replaces it. May carry SGR colour escapes. Add
+          {isolation} to show the credential isolation here; the default
+          bottom row already ends with it.
       prompt_bottom:
         type: string
-        default: " {model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}"
+        default: " {model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}{isolation}{view}"
         description: >-
           Set the bottom status row of the prompt. It is a {key} template that
           replaces the built-in banner. Empty reproduces
-          "{model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}".
+          "{model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}{isolation}{view}".
           {branch} is the invocation branch, {cwd} is its working directory,
           and {location} combines both. {layout} is the layout of the page
-          in use. The default top row shows location;
+          in use. {isolation} is " · isolated LEVEL" while credential isolation
+          is on, and empty otherwise; `/status` gives the detail. {view} is
+          " · view session" while the session runs in a view
+          (view/isolate_session), and empty otherwise. The default top row shows location;
           the bottom row retains model and usage information.
           {tokens} is the used and maximum context tokens with the percent,
           {cache} is the cached input tokens with the hit percent, and {cost}
-          is the session cost. {ctx} keeps the short percent-only form. May
-          carry SGR colour escapes.
+          is the session cost, from the stored conversation. A call that the
+          provider did not price is priced from the catalogue, at the model of
+          the call, and a total that holds such a call starts with "~". After
+          a change of model, {cost} also gives the estimated cost of the
+          prompt cache that the change leaves behind, until the next call
+          ends. {ctx} keeps the short percent-only form. May carry SGR colour
+          escapes.
       pretty:
         type: boolean
         default: false

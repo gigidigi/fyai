@@ -203,7 +203,7 @@ if(NOT TARGET libfyaml::libfyaml)
     set(BUILD_TESTING OFF)
     FetchContent_Declare(libfyaml
         GIT_REPOSITORY https://github.com/pantoniou/libfyaml
-        GIT_TAG d1fb28dfae3fa159c0633bd772d91262fa43bf62
+        GIT_TAG b545aebc996bedc0733259ba488dcf89150af8e5
     )
     FetchContent_MakeAvailable(libfyaml)
     set(BUILD_TESTING "${_FYAI_BUILD_TESTING}")
@@ -224,16 +224,16 @@ endif()
 # FYAI_STATIC_DEPS is on. libfypalette comes first: libfymd4c and
 # libfymermaid consume it.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FyDeps.cmake)
-fyai_fy_dep(libfypalette 3cc484148aeb10d7c7f3a3772173c42c51dad567)
-fyai_fy_dep(libfymd4c df8293f6502a897a2931d1fb0aa792d74986f574)
+fyai_fy_dep(libfypalette c7adaec1d31819beb7b6355334b4c8d597d7bf32)
+fyai_fy_dep(libfymd4c f0d6ea376626c02ca4e8976a0b90d7499d093bd4)
 
 if(FYAI_STATIC_DEPS AND TARGET libfyaml::fyaml_static)
     set_target_properties(libfyaml::fyaml_static PROPERTIES
         INTERFACE_LINK_LIBRARIES "Threads::Threads;m")
 endif()
 
-fyai_fy_dep(libfymermaid b3b72b5ee5caceea5ff890fa57e1689537b2f5c0)
-fyai_fy_dep(libfytimui 0aa28cd2d61c18bf5490722024db20039842c521)
+fyai_fy_dep(libfymermaid 59727e84ce577af7854b37f3f89213b368604c04)
+fyai_fy_dep(libfytimui 4677f7a0a571f1d4d1180d30244b7d08c366ac77)
 # libfyvterm: the terminal emulator behind the terminal view and the terminal
 # rendering tests.
 fyai_fy_dep(libfyvterm b71ae17bd756d95291f352648f5adbc3633ee266)
@@ -402,6 +402,18 @@ endif()
 message(STATUS "fyai: crash backtrace ${FYAI_HAVE_BACKTRACE}")
 
 set(FYAI_SOURCES
+    src/fyai_cas.c
+    src/fyai_scratch.c
+    src/fyai_ignore.c
+    src/fyai_view_fs.c
+    src/fyai_manifest.c
+    src/fyai_wire.c
+    src/fyai_project.c
+    src/fyai_project_diff.c
+    src/fyai_project_capture.c
+    src/fyai_fsview.c
+    src/fyai_view_apply.c
+    src/fyai_view_gc.c
     ${FYAI_EVENT_SOURCES}
     src/fyai_crash.c
     src/fyai_display.c
@@ -413,12 +425,17 @@ set(FYAI_SOURCES
     src/fyai_agent.c
     src/fyai_desktop.c
     src/fyai_agents.c
+    src/fyai_ask.c
+    src/fyai_event_fmt.c
+    src/fyai_asks.c
+    src/fyai_todo.c
     src/fyai_branch.c
     src/fyai_merge.c
     src/fyai_diff.c
     src/fyai_diag.c
     src/fyai_log.c
     src/fyai_markdown.c
+    src/fyai_chrome.c
     src/fyai_ui.c
     src/fyai_workpane.c
     src/fyai_page.c
@@ -444,15 +461,29 @@ set(FYAI_SOURCES
     src/fyai_schema.c
     src/fyai_tools.c
     src/fyai_tool_spec.c
+    src/fyai_tool_registry.c
+    src/fyai_monitor.c
+    src/fyai_tool_template.c
     src/fyai_turn.c
     src/utils.c
     src/fyai_catalog.c
+    src/fyai_cost.c
     src/fyai_config.c
     src/fyai_curl.c
+    src/fyai_xfer.c
+    src/fyai_transport.c
+    src/fyai_transport_msg.c
+    src/fyai_transport_server.c
+    src/fyai_transport_ctl.c
+    src/fyai_transport_verb.c
+    src/fyai_transport_client.c
+    src/fyai_transport_cfg.c
+    src/fyai_transport_boot.c
     src/fyai_auth.c
     src/fyai_oauth.c
     src/fyai_auth_util.c
     src/fyai_secret.c
+    src/fyai_redact.c
     src/fyai_cmd.c
     src/fyai_cmd_auth.c
     src/fyai_cmd_branch.c
@@ -466,7 +497,11 @@ set(FYAI_SOURCES
     src/fyai_cmd_misc.c
     src/fyai_cmd_store.c
     src/fyai_cmd_view.c
+    src/fyai_cmd_fsview.c
 )
+
+configure_file(scripts/git-remote-fyai git-remote-fyai COPYONLY)
+install(PROGRAMS scripts/git-remote-fyai DESTINATION bin/)
 
 add_executable(fyai
     src/main.c
@@ -544,6 +579,14 @@ if(BUILD_TESTING)
 
     file(GLOB FYAI_TEST_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fyai_*_test.c")
+    # The transport channels are message sockets that only Linux has.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(FYAI_TEST_TRANSPORT_MOCK tests/fyai_transport_mock.c)
+    else()
+        list(FILTER FYAI_TEST_SOURCES EXCLUDE REGEX
+            "/fyai_transport_(server_|client_|ctl_)?test\\.c$")
+        set(FYAI_TEST_TRANSPORT_MOCK "")
+    endif()
     set(FYAI_TESTS "")
     foreach(_test_source ${FYAI_TEST_SOURCES})
         file(STRINGS "${_test_source}" _test_entry_lines
@@ -599,6 +642,7 @@ if(BUILD_TESTING)
         ${FYAI_TEST_SOURCES}
         tests/fyai_test_registry.c
         tests/fyai_test_scratch.c
+        ${FYAI_TEST_TRANSPORT_MOCK}
         tests/fyai_test_main.c
         "${FYAI_TEST_REGISTER_C}"
     )
@@ -668,6 +712,14 @@ if(BUILD_TESTING)
     set(FYAI_CASE_TIMEOUT_tool_terminate 120)
     set(FYAI_CASE_TIMEOUT_tool_timeout 120)
     set(FYAI_CASE_TIMEOUT_ui_page_layouts 240)
+    # The transport cases wait on states with generous failure bounds: a slow
+    # runner can stall for minutes, and a pass does not wait for the bound.
+    set(FYAI_CASE_TIMEOUT_transport_verb 300)
+    set(FYAI_CASE_TIMEOUT_transport_bootstrap 300)
+    set(FYAI_CASE_TIMEOUT_transport_persona 300)
+    set(FYAI_CASE_TIMEOUT_transport_reload 300)
+    set(FYAI_CASE_TIMEOUT_transport_indicator 300)
+    set(FYAI_CASE_TIMEOUT_transport_indicator_pty 300)
 
     # Every deadline in the suite is multiplied by this. A sanitized build, or
     # a suite run with many jobs at once, takes several times as long for the
@@ -699,6 +751,10 @@ if(BUILD_TESTING)
             FIXTURES_REQUIRED fyai_binary
             ENVIRONMENT "FYAI_BIN=$<TARGET_FILE:fyai>;PYTHON=${Python3_EXECUTABLE};TESTS_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests;FYAI_ASAN=${HAVE_ASAN};FYAI_TIMEOUT_SCALE_DEFAULT=${FYAI_TIMEOUT_SCALE}"
         )
+        # The latency guard measures an idle engine, not competing test jobs.
+        if(case_name STREQUAL "perf_pathological")
+            set_tests_properties(fyai/case_${case_name} PROPERTIES RUN_SERIAL TRUE)
+        endif()
         # Only the PTY cases that have actually starved each other on
         # slow runners take the lock: interactive turn legs, live
         # resizes, tool interrupts, and termination. The rest assert

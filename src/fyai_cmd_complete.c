@@ -93,6 +93,20 @@ static void kind_branch(struct complete_req *r)
 	kind_branch_filtered(r, false, NULL);
 }
 
+static void kind_view(struct complete_req *r)
+{
+	struct fyai_branch branch;
+	fy_generic view;
+	const char *name;
+
+	if (!r->ctx || !fyai_branch_decode(r->ctx->branch_prev, &branch))
+		return;
+	fy_foreach_key_value(name, view, fy_get(branch.store, "views", fy_invalid)) {
+		if (!fy_str_empty(name) && fy_is_mapping(view))
+			cand(r, name, fy_get(view, "project", ""));
+	}
+}
+
 static void kind_agent_branch(struct complete_req *r)
 {
 	kind_branch_filtered(r, true, NULL);
@@ -233,15 +247,18 @@ static bool config_is_object(fy_generic node)
 static void config_paths(struct complete_req *r, const char *suffix)
 {
 	fy_generic node, child, d;
-	const char *key;
+	const char *key, *tail;
 	size_t base;
 
 	node = config_node(r, r->partial, &base);
 	fy_foreach_key_value(key, child, fy_get(node, "properties",
 						  fy_invalid)) {
+		if (!key)
+			continue;
 		d = fy_get(child, "description", fy_invalid);
+		tail = config_is_object(child) ? "/" : (suffix ? suffix : "");
 		cand(r, fy_sprintfa("%.*s%s%s", (int)base, r->partial, key,
-				    config_is_object(child) ? "/" : suffix),
+				    tail),
 		     gstr(&d));
 	}
 }
@@ -548,6 +565,7 @@ static const struct {
 	void (*fn)(struct complete_req *r);
 } complete_kinds[] = {
 	{ "branch",		kind_branch },
+	{ "view",		kind_view },
 	{ "agent-branch",	kind_agent_branch },
 	{ "session",		kind_session },
 	{ "ref",		kind_ref },
@@ -638,19 +656,100 @@ static void complete_options(struct complete_req *r, struct fyai_cmd_prop *props
 	cand(r, "--help", "show the help of the command");
 }
 
+/* A word that names a command, with the title of the command. Both are owned. */
+struct cmd_word {
+	char *name;
+	char *title;
+};
+
+struct cmd_words {
+	struct cmd_word *v;
+	size_t n, cap;
+};
+
+static int cmd_words_push(struct cmd_words *ws, const char *name,
+			  const char *title)
+{
+	struct cmd_word *v;
+	size_t cap;
+
+	if (ws->n == ws->cap) {
+		cap = ws->cap ? ws->cap * 2 : 64;
+		v = realloc(ws->v, cap * sizeof(*v));
+		if (!v)
+			return -1;
+		ws->v = v;
+		ws->cap = cap;
+	}
+	ws->v[ws->n].name = strdup(name);
+	ws->v[ws->n].title = strdup(title);
+	if (!ws->v[ws->n].name || !ws->v[ws->n].title) {
+		free(ws->v[ws->n].name);
+		free(ws->v[ws->n].title);
+		return -1;
+	}
+	ws->n++;
+	return 0;
+}
+
+/*
+ * Collect the name of @def and its aliases. An alias is a word that names
+ * the command, so it completes as one.
+ */
+static int cmd_words_add(struct cmd_words *ws, fy_generic def)
+{
+	fy_generic gname, gtitle;
+	const char *alias;
+	int rc;
+
+	gname = fy_get(def, "command", fy_invalid);
+	gtitle = fy_get(def, "title", fy_invalid);
+	rc = cmd_words_push(ws, gstr(&gname), gstr(&gtitle));
+	fy_foreach(alias, fy_get(def, "aliases", fy_invalid))
+		rc |= cmd_words_push(ws, alias, gstr(&gtitle));
+	return rc;
+}
+
+static int cmd_word_cmp(const void *a, const void *b)
+{
+	return strcmp(((const struct cmd_word *)a)->name,
+		      ((const struct cmd_word *)b)->name);
+}
+
+/* Offer the collected words in order, and release them. */
+static void cmd_words_emit(struct complete_req *r, struct cmd_words *ws)
+{
+	size_t i;
+
+	qsort(ws->v, ws->n, sizeof(*ws->v), cmd_word_cmp);
+	for (i = 0; i < ws->n; i++) {
+		cand(r, ws->v[i].name, ws->v[i].title);
+		free(ws->v[i].name);
+		free(ws->v[i].title);
+	}
+	free(ws->v);
+	memset(ws, 0, sizeof(*ws));
+}
+
 static void complete_subcommands(struct complete_req *r, fy_generic group,
 				 fy_generic surfaces)
 {
-	fy_generic sub, name, title;
+	struct cmd_words ws = { 0 };
+	fy_generic sub, *subs;
+	size_t n, i;
 
-	fy_foreach(sub, fy_get(group, "commands", fy_invalid)) {
+	subs = fyai_cmd_defs_sorted(fy_get(group, "commands", fy_invalid),
+				    "command", &n);
+	for (i = 0; i < n; i++) {
+		sub = subs[i];
 		if (!fyai_cmd_def_on(sub, surfaces, r->surface) ||
 		    fy_get(sub, "hidden", false))
 			continue;
-		name = fy_get(sub, "command", fy_invalid);
-		title = fy_get(sub, "title", fy_invalid);
-		cand(r, gstr(&name), gstr(&title));
+		if (cmd_words_add(&ws, sub))
+			fyai_error(r->ctx, "cannot collect the commands to complete");
 	}
+	free(subs);
+	cmd_words_emit(r, &ws);
 }
 
 /* The next positional argument of the innermost group on the path. */
@@ -810,8 +909,9 @@ unsigned int fyai_cmd_complete(struct fyai_ctx *ctx,
 	};
 	struct complete_req r;
 	struct fyai_cmd_walk w;
-	fy_generic reg, def, name, title;
-	size_t start;
+	struct cmd_words ws = { 0 };
+	fy_generic reg, def, *defs;
+	size_t start, nd, d;
 	bool done;
 
 	if (!nwords || !fy_is_valid(fyai_cmd_registry()))
@@ -836,14 +936,18 @@ unsigned int fyai_cmd_complete(struct fyai_ctx *ctx,
 	}
 	if (start + 1 == nwords) {
 		reg = fyai_cmd_registry();
-		fy_foreach(def, fy_get(reg, "commands", fy_invalid)) {
+		defs = fyai_cmd_defs_sorted(fy_get(reg, "commands",
+						   fy_invalid), "command", &nd);
+		for (d = 0; d < nd; d++) {
+			def = defs[d];
 			if (!fyai_cmd_def_on(def, fy_invalid, surface) ||
 			    fy_get(def, "hidden", false))
 				continue;
-			name = fy_get(def, "command", fy_invalid);
-			title = fy_get(def, "title", fy_invalid);
-			cand(&r, gstr(&name), gstr(&title));
+			if (cmd_words_add(&ws, def))
+				fyai_error(ctx, "cannot collect the commands to complete");
 		}
+		free(defs);
+		cmd_words_emit(&r, &ws);
 		goto out;
 	}
 	if (fyai_cmd_walk(surface, nwords - start, words + start,
@@ -881,9 +985,15 @@ struct session_cands {
 static void session_cand(void *arg, const char *value, const char *desc)
 {
 	struct session_cands *sc = arg;
+	size_t len = strlen(value);
+	bool more = len && (value[len - 1] == '/' || value[len - 1] == '=');
 
-	sc->add(sc->arg, fy_sprintfa("%.*s%s", (int)sc->keep, sc->line, value),
-		desc);
+	/*
+	 * A taken candidate ends the word, so the next one can follow at once. A
+	 * path segment or an assignment goes on in the same word.
+	 */
+	sc->add(sc->arg, fy_sprintfa("%.*s%s%s", (int)sc->keep, sc->line, value,
+				     more ? "" : " "), desc);
 }
 
 void fyai_cmd_session_complete(struct fyai_ctx *ctx, const char *buf,
@@ -928,9 +1038,9 @@ void fyai_cmd_complete_help_topics(const char *const *path, size_t npath,
 				   const char *partial,
 				   fyai_cmd_candidate_fn add, void *arg)
 {
-	fy_generic reg, level, def, found, topic, name, title;
+	fy_generic reg, level, def, found, topic, name, title, *defs;
 	size_t len = strlen(partial);
-	size_t i;
+	size_t i, nd, d;
 
 	reg = fyai_cmd_registry();
 	/* A command path descends into the commands of each group it names. */
@@ -949,7 +1059,10 @@ void fyai_cmd_complete_help_topics(const char *const *path, size_t npath,
 			return;
 		level = found;
 	}
-	fy_foreach(def, fy_get(level, "commands", fy_invalid)) {
+	defs = fyai_cmd_defs_sorted(fy_get(level, "commands", fy_invalid),
+				    "command", &nd);
+	for (d = 0; d < nd; d++) {
+		def = defs[d];
 		if (fy_get(def, "hidden", false))
 			continue;
 		name = fy_get(def, "command", fy_invalid);
@@ -957,15 +1070,20 @@ void fyai_cmd_complete_help_topics(const char *const *path, size_t npath,
 		if (!strncmp(gstr(&name), partial, len))
 			add(arg, gstr(&name), gstr(&title));
 	}
+	free(defs);
 	/* A topic stands alone: it is not a step of a command path. */
 	if (npath)
 		return;
-	fy_foreach(topic, fy_get(reg, "topics", fy_invalid)) {
+	defs = fyai_cmd_defs_sorted(fy_get(reg, "topics", fy_invalid),
+				    "topic", &nd);
+	for (d = 0; d < nd; d++) {
+		topic = defs[d];
 		name = fy_get(topic, "topic", fy_invalid);
 		title = fy_get(topic, "title", fy_invalid);
 		if (!strncmp(gstr(&name), partial, len))
 			add(arg, gstr(&name), gstr(&title));
 	}
+	free(defs);
 }
 
 /* ---- the verbs ------------------------------------------------------------ */

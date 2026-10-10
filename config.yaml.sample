@@ -135,6 +135,15 @@ agent:
   # exec starts another fyai process; fork continues the child process.
   # Transient runs and pinned roots use fork.
   spawn: exec
+  # Experimental, Linux only. Keep provider credentials in a separate
+  # transport process; agent and tool processes are not given them. One of none,
+  # auto, level-a (cgroup v2 subtree; not built yet) and level-b (PID and
+  # pidfd only). auto takes level-b for now.
+  transport_isolation: none
+  # Linux only. none shares the project with the parent. view runs each
+  # sub-agent in a private view of the project; its changes stay in the view
+  # until the user applies them.
+  isolation: none
   # Maximum depth of sub-agent branch paths, including ordinary components.
   max_branch_depth: 8
   # Maximum admitted agents in this invocation's descendant tree.
@@ -184,11 +193,27 @@ builtin_shell: false
 #       - { path: /src, mode: edit }        # Modify existing files.
 #       - { path: /logs, mode: append }     # Write without truncation.
 #       # Modes: rw (default), ro, edit, append.
-#     network:              # Restrict egress to listed TCP ports.
-#       ports: [443]        # Omit network to allow egress; [] denies egress.
+#     network:              # Restrict TCP and UDP independently.
+#       tcp: { ports: [443], bind_ports: [] }
+#       udp: { ports: [], bind_ports: [] } # Omit either protocol to leave it unrestricted.
 # `fyai sandbox on` stores this policy:
-# sandbox: { enabled: true, deny: [secrets, ~/.ssh], network: { ports: [443] } }
+# sandbox: { enabled: true, deny: [secrets, ~/.ssh], network: { tcp: { ports: [443], bind_ports: [] }, udp: { ports: [], bind_ports: [] } } }
 sandbox: false
+# The profile that confines shell executions: normal uses `sandbox` above, and
+# lockdown uses `sandbox_lockdown` and enables the sandbox. `/session lockdown`
+# selects lockdown and `/session yolo` selects normal.
+sandbox_profile: normal
+# The lockdown profile takes deny, allow and network as `sandbox` does.
+# A key that it omits keeps this default:
+# sandbox_lockdown:
+#   deny: [~/.ssh]        # The secret locations of the platform.
+#   network:
+#     tcp:
+#       ports: []       # No TCP connects.
+#       bind_ports: []  # No TCP binds.
+#     udp:
+#       ports: []       # No UDP sends on ABI 10.
+#       bind_ports: []  # No UDP binds on ABI 10.
 
 logprobs: false
 top_logprobs: -1
@@ -208,6 +233,7 @@ logging:
   stream: false
   conversation: false
   mcp: false
+  transport: false
 
 # --- Display / theming ------------------------------------------------------
 #
@@ -217,9 +243,6 @@ display:
   stream: true            # Present model output as it arrives.
   # Exchanges replayed at session start: -1 fills the screen; 0 skips replay.
   recap_exchanges: -1
-  # page composes the screen as UI Markdown; stack uses terminal-library
-  # chrome. A build without page support uses stack.
-  renderer: page
   # fullscreen uses the alternate screen and a scrollable transcript view;
   # inline uses terminal scrollback.
   screen: fullscreen
@@ -228,6 +251,8 @@ display:
   page: ""
   # Rendered rows shown for a bounded tool result.
   tool_preview_lines: 5
+  # Rows of a running tool call that its tile keeps to scroll back through.
+  tool_history_lines: 40
   # Minimum period between tool redraws; 0 redraws every update.
   tool_update_interval_ms: 33
   # Tool result detail: none, brief, default, or full.
@@ -246,7 +271,7 @@ display:
   theme: ember:auto
   # Palette ground: theme fills default backgrounds of fullscreen pages;
   # terminal uses the detected terminal background.
-  theme_ground: theme
+  theme_ground: terminal
   # Table border: theme, grid, or none.
   table_border: theme
   # Markdown separators: turn_separator separates history exchanges;
@@ -262,6 +287,11 @@ display:
   # fields such as {location} and {model}; prompt_bottom replaces the banner.
   # Empty strings select built-in prompt defaults. Templates may contain SGR
   # escapes. Palette themes color template values in series order.
+  # {isolation} is " · isolated LEVEL" while credential isolation is on and
+  # empty otherwise; the default bottom row ends with it, and a template for
+  # either row can place it.
+  # {view} is " · view session" while the session runs in a view
+  # (view/isolate_session), and empty otherwise.
   prompt: "  > "
   prompt_top: " {location}"
   # Initial /branches view: tree or gitgraph; g cycles the available views.
@@ -279,7 +309,7 @@ display:
   # Gitgraph label fit: legend moves labels, shrink compresses, clip crops.
   # Tree layout clips long labels for every fit policy.
   diagram_fit: legend
-  prompt_bottom: " {model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}"
+  prompt_bottom: " {model} · {provider} · {api}{effort}{summary}{temp}{tokens}{cache}{cost}{isolation}{view}"
   # Work-pane tile arrangement: auto, columns, stack, main-top, or main-left.
   work_layout: auto
   work_columns: 0
@@ -299,9 +329,26 @@ display:
   work_position: above-prompt
   # Completion popup: tab opens on Tab; auto opens when typing finds matches.
   completion: tab
-  # Slash-command output: pane shows a tile or popup without storing it;
-  # transcript draws and stores the command and output.
-  command_output: pane
+  # Keys of the prompt, by mode (prompt, completion, surface): a key or a
+  # chord of keys to an action of the terminal library, or "" to unbind it.
+  # A chord such as "Escape Escape" waits chord_timeout_ms for its next key.
+  # keys:
+  #   prompt:
+  #     Ctrl-r: fytim.redraw
+  #     Ctrl-d: ""
+  chord_timeout_ms: 1000
+  # Slash-command output: transcript draws and stores the command and output;
+  # pane shows a tile or popup without storing it.
+  command_output: transcript
+  # Ground of command output in the transcript: theme mixes command_bg_mix
+  # percent of the theme focus colour into the ground; #rrggbb or none.
+  command_bg: theme
+  command_bg_mix: 6
+  # Live output of a shell or agent call: inline draws it in the transcript
+  # at the call; pane shows a tile of the work pane.
+  tool_display: inline
+  # Rows of a terminal that tool_display inline draws in the transcript.
+  inline_terminal_rows: 12
   # Editor location for /edit, config edit, and log views: pane or terminal.
   # Without an interactive UI, the editor uses the terminal.
   editor: pane
@@ -315,6 +362,8 @@ display:
   # focus_bg_mix controls the percentage mixed into program-colored cells.
   focus_bg: theme
   focus_bg_mix: 35
+  # Focus mark: edge draws the edge column alone; wash also draws focus_bg.
+  focus_mark: edge
   # Pane chrome: work_frame surrounds the pane, tile_frame ends each tile,
   # tile_sep divides columns, and session_margin precedes terminal rows.
   # work_cap replaces the upper frame with pane and tile status.
@@ -370,3 +419,25 @@ branch:
   # or replay unpublished turns with rebase or merge. Other branches do not
   # conflict.
   on_conflict: abort
+
+# New project views trade crash durability for fast capture by default.
+view:
+  durability: lazy
+  # Directory that a view replaces with a private tmpfs. Empty selects $TMPDIR,
+  # else /tmp.
+  scratch_dir: ""
+  # Record the project state with each ref-log entry that moves a head.
+  track_project: false
+  # Run each session and prompt in the view named session of the project.
+  # Its changes stay in the view until `view apply session` takes them.
+  # Show what each group of tool calls changed in the project, as a diff under
+  # the calls, and let `/undo` take it back. A patch names its files only.
+  tool_diff: false
+  # The number of groups of tool calls that `/undo` can take back.
+  undo_depth: 16
+  # Paths that the diff and the apply of a view leave out, as lines of a gitignore
+  # file. A view holds the whole project.
+  ignore: []
+  # Also leave out what the .gitignore files of the project ignore.
+  gitignore: true
+  isolate_session: false

@@ -123,8 +123,9 @@ rebuild replaced the binary on disk. On macOS, `_NSGetExecutablePath()` names
 the executable; if that file is replaced before `execv()`, the replacement is
 used. The new process opens the arena and serves the tool channel on
 descriptors 3 and 4 through `fyai_tool_child_exec_serve()`. It resolves no
-credentials at startup: it resolves them when the parent state arrives. It
-applies the sandbox before it serves the call.
+credentials at startup: it resolves them when the parent state arrives. The
+tool sandbox does not confine it: it publishes to the arena that the sandbox
+denies. Each tool that it runs applies the sandbox in its own child.
 
 ### What the parent sends
 
@@ -181,3 +182,13 @@ needs `branch_config` only for a session that is not stored yet: for any other
 branch it reads the same value from the arena. Send `branch_config` only in
 that case, or send only the keys that differ from `config`. Either change
 halves the worst case.
+
+## An isolated sub-agent
+
+With `isolated` on the call, or `agent/isolation: view`, the parent captures
+the project into a view before it spawns the child. The child, forked or
+executed, enters the view first: it runs in new mount and PID namespaces, with
+the project overlay and the arena mounted at their own paths, and with
+`FYAI_VIEW` set. Nothing it starts makes another view. The parent captures the
+result after it reaps the child. See section 11.5 of
+`agent-filesystem-views-sdd.md`.

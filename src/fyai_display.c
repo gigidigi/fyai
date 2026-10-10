@@ -21,10 +21,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "fyai_cost.h"
 #include "fyai_branch.h"
 #include "fyai_diff.h"
+#include "fyai_session.h"
 #include "fyai_config.h"
 #include "fyai_display.h"
+#include "fyai_event_fmt.h"
+#include "fyai_tool_registry.h"
 #include "fyai_markdown.h"
 #include "fyai_output.h"
 #include "fyai_provider.h"
@@ -871,6 +875,82 @@ static int fyai_diff_view(struct fyai_ctx *ctx, const char *diff)
 	return rc;
 }
 
+#define FYAI_DIFF_TAB 8
+
+/*
+ * Return @diff with each tab of a hunk row replaced by blanks up to the next
+ * tab stop of the file text, which starts after the one-column row marker.
+ * The diff view measures a tab as one column, and a terminal places it at a
+ * stop that depends on the column where the row starts: either way the row is
+ * not the width the view lays out for it. The caller frees the result.
+ */
+static char *fyai_diff_expand_tabs(struct fyai_ctx *ctx, const char *diff)
+{
+	struct response_buffer out = {0};
+	const char *line, *nl, *p, *end;
+	size_t len, col, pad;
+	bool hunk;
+	int rc;
+
+	hunk = false;
+	rc = 0;
+	for (line = diff; !rc && *line; line = nl ? nl + 1 : end) {
+		nl = strchr(line, '\n');
+		len = nl ? (size_t)(nl - line) : strlen(line);
+		end = line + len;
+		if (!strncmp(line, "diff ", 5))
+			hunk = false;
+		else if (!strncmp(line, "@@", 2))
+			hunk = true;
+		if (!hunk || !(*line == ' ' || *line == '+' || *line == '-') ||
+		    !memchr(line, '\t', len)) {
+			rc = response_buffer_append_data(&out, line, len);
+		} else {
+			rc = response_buffer_append_data(&out, line, 1);
+			col = 0;
+			for (p = line + 1; !rc && p < end; p++) {
+				if (*p != '\t') {
+					/* Count code points, not UTF-8 continuation bytes. */
+					if (((unsigned char)*p & 0xc0) != 0x80)
+						col++;
+					rc = response_buffer_append_data(&out, p, 1);
+					continue;
+				}
+				pad = FYAI_DIFF_TAB - col % FYAI_DIFF_TAB;
+				col += pad;
+				while (!rc && pad--)
+					rc = response_buffer_append_data(&out, " ", 1);
+			}
+		}
+		if (!rc && nl)
+			rc = response_buffer_append_data(&out, "\n", 1);
+	}
+	fyai_error_check(ctx, !rc, err, "diff: out of memory expanding tabs");
+	return out.data ? out.data : strdup("");
+err:
+	free(out.data);
+	return NULL;
+}
+
+int fyai_present_diff(struct fyai_ctx *ctx, const char *diff, bool unified)
+{
+	char *text;
+	int rc;
+
+	if (!ctx->stdout_tty || !markdown_color_enabled(ctx->cfg->color))
+		return fyai_sink_write(ctx->sink, FYAI_SINK_NOTICE, diff,
+				     strlen(diff));
+	/* The unified rows are for tools: they keep the bytes of the patch. */
+	if (unified || !ctx->cfg->markdown)
+		return fyai_diff_present(ctx, diff);
+	text = fyai_diff_expand_tabs(ctx, diff);
+	if (!text)
+		return -1;
+	rc = fyai_diff_view(ctx, text);
+	free(text);
+	return rc;
+}
+
 int fyai_export_diff(struct fyai_ctx *ctx, const char *from, const char *to,
 		     bool unified)
 {
@@ -894,22 +974,41 @@ int fyai_export_diff(struct fyai_ctx *ctx, const char *from, const char *to,
 		rc = 0;
 		goto out;
 	}
-	/*
-	 * A file or a pipe takes the unified text as it is. A terminal shows
-	 * the diff view, or with @unified the unified rows in colour.
-	 */
-	if (!ctx->stdout_tty || !markdown_color_enabled(ctx->cfg->color))
-		rc = fyai_sink_write(ctx->sink, FYAI_SINK_NOTICE, diff,
-				     strlen(diff));
-	else if (unified || !ctx->cfg->markdown)
-		rc = fyai_diff_present(ctx, diff);
-	else
-		rc = fyai_diff_view(ctx, diff);
+	rc = fyai_present_diff(ctx, diff, unified);
 out:
 	free(diff);
 	free(b);
 	free(a);
 	return rc;
+}
+
+/*
+ * The turns come newest first. A call on another model than the call after it
+ * (@call) found no cache for the conversation: what it read at full price,
+ * the cache of its model would have charged at the cache price. Add that to
+ * @cost, and return true, when @older ran on another model than @call.
+ */
+static bool stats_model_change(struct fyai_ctx *ctx, fy_generic older,
+			       fy_generic call, double *cost)
+{
+	struct fyai_pricing price;
+	fy_generic om, cm;
+	char model[128];
+	long long lost;
+
+	om = fy_get(older, "model", fy_invalid);
+	cm = fy_get(call, "model", fy_invalid);
+	if (!fy_is_string(om) || !fy_is_string(cm) || fy_equal(om, cm))
+		return false;
+	snprintf(model, sizeof(model), "%s", fy_castp(&cm, ""));
+	lost = fy_get(older, "input", 0LL);
+	if (lost > fy_get(call, "input", 0LL))
+		lost = fy_get(call, "input", 0LL);
+	lost -= fy_get(call, "cached", 0LL);
+	if (lost > 0 && fyai_pricing_lookup(ctx->cfg, ctx->cfg->provider,
+					    model, &price))
+		*cost += (double)lost * (price.input - price.cache_read) / 1e6;
+	return true;
 }
 
 fy_generic fyai_stats_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb)
@@ -927,10 +1026,16 @@ fy_generic fyai_stats_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb)
 	long long reasoning;
 	long long total;
 	double cost;
+	double cost_est;
 	double ratio;
 	double arena_ratio;
+	double switch_cost;
+	struct fyai_usage_sum agents;
+	int nagents;
+	fy_generic newer;
 	bool have_arena;
 	int calls;
+	int switches;
 
 	memset(&arena, 0, sizeof(arena));
 	have_arena = ctx->durable_allocator &&
@@ -946,14 +1051,21 @@ fy_generic fyai_stats_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb)
 	reasoning = 0;
 	total = 0;
 	cost = 0.0;
+	cost_est = 0.0;
 	ratio = 0.0;
 	arena_ratio = 0.0;
+	switch_cost = 0.0;
 	calls = 0;
+	switches = 0;
+	newer = fy_invalid;
 
 	fyai_turn_foreach(cur, ctx->last_message) {
 		u = fy_get(fyai_turn_meta(cur), "usage");
 		if (fy_is_invalid(u))
 			continue;
+		if (stats_model_change(ctx, u, newer, &switch_cost))
+			switches++;
+		newer = u;
 		input += fy_get(u, "input", 0);
 		cached += fy_get(u, "cached", 0);
 		cache_write += fy_get(u, "cache_write", 0);
@@ -961,6 +1073,8 @@ fy_generic fyai_stats_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb)
 		reasoning += fy_get(u, "reasoning", 0);
 		total += fy_get(u, "total", 0);
 		cost += fy_get(u, "cost", 0.0);
+		if (fy_get(u, "est", (_Bool)false))
+			cost_est += fy_get(u, "cost", 0.0);
 		calls++;
 	}
 	if (input)
@@ -987,6 +1101,23 @@ fy_generic fyai_stats_data(struct fyai_ctx *ctx, struct fy_generic_builder *gb)
 					"chunks", chunks,
 					"generation", generation) :
 				fy_null);
+	/* Only a conversation that has them carries these. */
+	fyai_usage_agents(ctx, &agents, &nagents);
+	if (nagents > 0) {
+		out = fy_assoc(gb, out, "agents", fy_gb_mapping(gb,
+				"count", (long long)nagents,
+				"calls", (long long)agents.calls,
+				"total", agents.total,
+				"cost", agents.cost,
+				"cost_est", agents.cost_est));
+		out = fy_assoc(gb, out, "cost_all", cost + agents.cost);
+	}
+	if (cost_est > 0.0)
+		out = fy_assoc(gb, out, "cost_est", cost_est);
+	if (switches > 0) {
+		out = fy_assoc(gb, out, "switches", (long long)switches);
+		out = fy_assoc(gb, out, "switch_cost", switch_cost);
+	}
 
 	return out;
 }
@@ -1000,7 +1131,7 @@ static int fyai_emit_stats_markdown(struct fyai_ctx *ctx, fy_generic stats)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct fyai_stats_args *args = &cfg->cmd.args.stats;
-	fy_generic arena;
+	fy_generic arena, agents;
 	char *md;
 	size_t mdlen;
 	FILE *mf;
@@ -1025,6 +1156,23 @@ static int fyai_emit_stats_markdown(struct fyai_ctx *ctx, fy_generic stats)
 		fy_get(stats, "reasoning", 0LL));
 	fprintf(mf, "| Total tokens | %lld |\n", fy_get(stats, "total", 0LL));
 	fprintf(mf, "| Cost | $%.6f |\n", fy_get(stats, "cost", 0.0));
+	if (fy_get(stats, "cost_est", 0.0) > 0.0)
+		fprintf(mf, "| Cost estimated from prices | $%.6f |\n",
+			fy_get(stats, "cost_est", 0.0));
+	agents = fy_get(stats, "agents");
+	if (!fy_is_invalid(agents)) {
+		fprintf(mf, "| Sub-agents | %lld (%lld calls, %lld tokens) |\n",
+			fy_get(agents, "count", 0LL), fy_get(agents, "calls", 0LL),
+			fy_get(agents, "total", 0LL));
+		fprintf(mf, "| Sub-agent cost | $%.6f |\n",
+			fy_get(agents, "cost", 0.0));
+		fprintf(mf, "| Cost with sub-agents | $%.6f |\n",
+			fy_get(stats, "cost_all", 0.0));
+	}
+	if (fy_get(stats, "switches", 0LL) > 0)
+		fprintf(mf, "| Model changes | %lld (cache miss ~$%.6f) |\n",
+			fy_get(stats, "switches", 0LL),
+			fy_get(stats, "switch_cost", 0.0));
 
 	arena = fy_get(stats, "arena");
 	if (!fy_is_invalid(arena)) {
@@ -1349,7 +1497,7 @@ static bool fyai_tool_result_is_error(const char *text)
 }
 
 static void fyai_emit_patch(struct fyai_ctx *ctx, FILE *mf, const char *patch,
-			    struct fyai_md_blocks *blocks);
+			    struct fyai_md_blocks *blocks, bool titles_only);
 
 /* One rendered file operation. */
 struct patch_op_view {
@@ -1761,6 +1909,7 @@ out:
 struct patch_emit_ctx {
 	FILE *mf;
 	struct fyai_md_blocks *blocks;
+	bool titles_only;
 };
 
 /* Emit one file operation into the tool-call Markdown. */
@@ -1771,7 +1920,7 @@ static int patch_emit_op(void *user, struct patch_op_view *op)
 	size_t block_start;
 
 	fprintf(mf, "%s\n\n", op->title ? op->title : "**patch**");
-	if (!op->body.len)
+	if (!op->body.len || ctx->titles_only)
 		return 0;
 	block_start = (size_t)ftell(mf);
 	fprintf(mf, "```%s\n", op->lang ? op->lang : "");
@@ -1791,9 +1940,9 @@ static int patch_emit_op(void *user, struct patch_op_view *op)
  * view does.
  */
 static void fyai_emit_patch(struct fyai_ctx *ctx, FILE *mf, const char *patch,
-			    struct fyai_md_blocks *blocks)
+			    struct fyai_md_blocks *blocks, bool titles_only)
 {
-	struct patch_emit_ctx emit_ctx = { .mf = mf, .blocks = blocks };
+	struct patch_emit_ctx emit_ctx = { .mf = mf, .blocks = blocks, .titles_only = titles_only };
 
 	(void)patch_walk(ctx, patch, &emit_ctx, patch_emit_op);
 }
@@ -1848,122 +1997,134 @@ void fyai_print_login_url(struct fyai_ctx *ctx, const char *lead,
 				      strlen(plain));
 }
 
-void fyai_emit_tool_call(struct fyai_ctx *ctx, FILE *mf,
-			struct fy_generic_builder *gb,
-				const char *name, fy_generic args,
-				int preview_lines, struct fyai_md_blocks *blocks)
+void fyai_tool_head_shell(struct fyai_ctx *ctx, FILE *mf,
+			  struct fy_generic_builder *gb, fy_generic args,
+			  int preview_lines, struct fyai_md_blocks *blocks)
 {
 	size_t block_start;
-	const char *path;
-	const char *cmd;
-	const char *c;
-	fy_generic gpath;
+	const char *cmd, *c;
 	fy_generic gc;
+
+	(void)ctx;
+	(void)gb;
+	(void)preview_lines;
+	cmd = fy_get(args, "command", "");
+	/*
+	 * The model describes the purpose of the command. Show this
+	 * description in brackets before the command. A delegation
+	 * shows its sub-agent name in the same position.
+	 */
+	gc = fy_get(args, "description");
+	c = fy_castp(&gc, "");
+	fprintf(mf, "**shell**");
+	if (*c)
+		fprintf(mf, " [%s]", c);
+	fprintf(mf, "\n\n");
+	block_start = (size_t)ftell(mf);
+	fprintf(mf, "```sh\n%s\n```\n", cmd);
+	(void)md_blocks_push(blocks, block_start, (size_t)ftell(mf), "sh");
+	fprintf(mf, "\n");
+}
+
+void fyai_tool_head_read_file(struct fyai_ctx *ctx, FILE *mf,
+			      struct fy_generic_builder *gb, fy_generic args,
+			      int preview_lines, struct fyai_md_blocks *blocks)
+{
+	fy_generic gpath = fy_get(args, "path");
+
+	(void)ctx;
+	(void)gb;
+	(void)preview_lines;
+	(void)blocks;
+	fprintf(mf, "**read** `%s`\n\n", fy_castp(&gpath, ""));
+}
+
+void fyai_tool_head_write_file(struct fyai_ctx *ctx, FILE *mf,
+			       struct fy_generic_builder *gb, fy_generic args,
+			       int preview_lines, struct fyai_md_blocks *blocks)
+{
+	const char *path, *c;
+	fy_generic gpath, gc;
 	char *lang;
+
+	(void)ctx;
+	(void)gb;
+	/*
+	 * Hold the path/content generics in locals and read them with
+	 * fy_castp: a short (inline) string lives in the fy_generic word,
+	 * so a pointer from fy_cast on the fy_get temporary would dangle
+	 * once that temporary dies - and these are used past that point.
+	 */
+	gpath = fy_get(args, "path");
+	gc = fy_get(args, "content");
+	path = fy_castp(&gpath, "");
+	c = fy_castp(&gc, "");
+	fprintf(mf, "**write** `%s` (%zu byte%s)\n\n",
+		path, strlen(c), strlen(c) == 1 ? "" : "s");
+	if (*c) {
+		lang = markdown_lang_for_path(path);
+		fyai_emit_tool_result_blocks(mf, c, preview_lines, lang,
+					     blocks);
+		free(lang);
+	}
+}
+
+void fyai_tool_head_apply_patch(struct fyai_ctx *ctx, FILE *mf,
+				struct fy_generic_builder *gb, fy_generic args,
+				int preview_lines, struct fyai_md_blocks *blocks)
+{
+	const char *c;
+	fy_generic gc;
+
+	(void)gb;
+	gc = fy_get(args, "patch");
+	c = fy_castp(&gc, "");
+	/* The diff of the group of calls shows the change: name the files only. */
+	if (*c && preview_lines && ctx && ctx->tool_diff_tracking)
+		fyai_emit_patch(ctx, mf, c, blocks, true);
+	else if (*c && preview_lines < 0)
+		fyai_emit_patch(ctx, mf, c, blocks, false);
+	else if (*c && preview_lines > 0)
+		fyai_emit_tool_result_blocks(mf, c, preview_lines,
+					     "diff", blocks);
+	else
+		fprintf(mf, "**patch**\n\n");
+}
+
+static void tool_head_web_search(struct fyai_ctx *ctx, FILE *mf,
+				 struct fy_generic_builder *gb, fy_generic args,
+				 int preview_lines, struct fyai_md_blocks *blocks)
+{
+	fy_generic gc = fy_get(args, "query");
+	const char *c = fy_castp(&gc, "");
+
+	(void)ctx;
+	(void)gb;
+	(void)preview_lines;
+	(void)blocks;
+	if (*c)
+		fprintf(mf, "**web search** `%s`\n\n", c);
+	else
+		fprintf(mf, "**web search**\n\n");
+}
+
+/* The provider runs a hosted tool: the program only presents its call. */
+const struct fyai_tool_def fyai_display_defs[] = {
+	{ .name = "web_search", .head = tool_head_web_search,
+	  .flags = FYAI_TOOL_HOSTED },
+};
+const size_t fyai_display_defs_count = ARRAY_SIZE(fyai_display_defs);
+
+void fyai_emit_tool_call(struct fyai_ctx *ctx, FILE *mf,
+			 struct fy_generic_builder *gb,
+			 const char *name, fy_generic args,
+			 int preview_lines, struct fyai_md_blocks *blocks)
+{
+	const struct fyai_tool_def *def = fyai_tool_find(name);
 	char *s;
 
-	if (fy_equal(name, "shell")) {
-		cmd = fy_get(args, "command", "");
-		/*
-		 * The model describes the purpose of the command. Show this
-		 * description in brackets before the command. A delegation
-		 * shows its sub-agent name in the same position.
-		 */
-		gc = fy_get(args, "description");
-		c = fy_castp(&gc, "");
-		fprintf(mf, "**shell**");
-		if (*c)
-			fprintf(mf, " [%s]", c);
-		fprintf(mf, "\n\n");
-		block_start = (size_t)ftell(mf);
-		fprintf(mf, "```sh\n%s\n```\n", cmd);
-		(void)md_blocks_push(blocks, block_start, (size_t)ftell(mf),
-				     "sh");
-		fprintf(mf, "\n");
-		return;
-	}
-	if (fy_equal(name, "read_file")) {
-		fprintf(mf, "**read** `%s`\n\n", fy_cast(
-			fy_get(args, "path", ""), ""));
-		return;
-	}
-	if (fy_equal(name, "write_file")) {
-		/*
-		 * Hold the path/content generics in locals and read them with
-		 * fy_castp: a short (inline) string lives in the fy_generic word,
-		 * so a pointer from fy_cast on the fy_get temporary would dangle
-		 * once that temporary dies - and these are used past that point.
-		 */
-		gpath = fy_get(args, "path");
-		gc = fy_get(args, "content");
-		path = fy_castp(&gpath, "");
-		c = fy_castp(&gc, "");
-		fprintf(mf, "**write** `%s` (%zu byte%s)\n\n",
-			path, strlen(c), strlen(c) == 1 ? "" : "s");
-		if (*c) {
-			lang = markdown_lang_for_path(path);
-			fyai_emit_tool_result_blocks(mf, c, preview_lines, lang,
-						     blocks);
-			free(lang);
-		}
-		return;
-	}
-	if (fy_equal(name, "apply_patch")) {
-		gc = fy_get(args, "patch");
-		c = fy_castp(&gc, "");
-		if (*c && preview_lines < 0)
-			fyai_emit_patch(ctx, mf, c, blocks);
-		else if (*c && preview_lines > 0)
-			fyai_emit_tool_result_blocks(mf, c, preview_lines,
-						     "diff", blocks);
-		else
-			fprintf(mf, "**patch**\n\n");
-		return;
-	}
-	if (fy_equal(name, "agent")) {
-		gpath = fy_get(args, "name");
-		gc = fy_get(args, "description");
-		path = fy_castp(&gpath, "");
-		c = fy_castp(&gc, "");
-		if (*path)
-			fprintf(mf, "**agent** [%s] %s\n\n", path,
-				*c ? c : "delegated task");
-		else
-			fprintf(mf, "**agent** %s\n\n",
-				*c ? c : "delegated task");
-		return;
-	}
-	if (fy_equal(name, "ask_user")) {
-		fprintf(mf, "**❓ %s**\n\n",
-			fy_cast(fy_get(args, "question", ""), ""));
-		return;
-	}
-	if (fy_equal(name, "time")) {
-		fprintf(mf, "**time**\n\n");
-		return;
-	}
-	if (fy_equal(name, "web_search")) {
-		gc = fy_get(args, "query");
-		c = fy_castp(&gc, "");
-		if (*c)
-			fprintf(mf, "**web search** `%s`\n\n", c);
-		else
-			fprintf(mf, "**web search**\n\n");
-		return;
-	}
-	if (fy_equal(name, "wait")) {
-		/* What the wait is for, when the model said, and its name
-		 * when it is one that fires on its own. */
-		gc = fy_get(args, "reason");
-		c = fy_castp(&gc, "");
-		gpath = fy_get(args, "name");
-		path = fy_castp(&gpath, "");
-		fprintf(mf, "**wait**");
-		if (*path)
-			fprintf(mf, " [%s]", path);
-		if (*c)
-			fprintf(mf, " %s", c);
-		fprintf(mf, "\n\n");
+	if (def && def->head) {
+		def->head(ctx, mf, gb, args, preview_lines, blocks);
 		return;
 	}
 	/* Unknown tool: fall back to name + JSON arguments. */
@@ -2113,6 +2274,11 @@ static void fyai_emit_tool_result_blocks(FILE *mf, const char *text,
 	 */
 	if (!preview_lines)
 		return;
+	/* Markdown that the tool wrote for the user is the body as it is. */
+	if (lang && !strcmp(lang, FYAI_RESULT_MARKDOWN)) {
+		fprintf(mf, "%s\n\n", text);
+		return;
+	}
 	limit = preview_lines > 0 ? (size_t)preview_lines : SIZE_MAX;
 	total = 0;
 	shown = 0;
@@ -2167,7 +2333,8 @@ int fyai_tool_preview_lines(const struct fyai_cfg *cfg, const char *name)
 		return 0;
 	if (!strcmp(name, "agent"))
 		return 0;
-	if (!strcmp(name, "apply_patch"))
+	/* A diff is read as a whole, as a patch is. */
+	if (!strcmp(name, "apply_patch") || !strcmp(name, "diff"))
 		return -1;
 	return cfg->tool_preview_lines;
 }
@@ -2494,6 +2661,13 @@ static void fyai_print_tool_separator(struct fyai_sink *sink,
 					 cfg->tool_separator);
 }
 
+void fyai_render_tool_markdown(struct fyai_sink *sink, struct fyai_cfg *cfg,
+			       const char *md, size_t len)
+{
+	fyai_print_tool_separator(sink, cfg);
+	(void)fyai_print_markdown_body(sink, cfg, md, len);
+}
+
 void fyai_render_tool_result(struct fyai_sink *sink, struct fyai_cfg *cfg,
 			     fy_generic content,
 			     const char *lang, int preview_lines)
@@ -2503,6 +2677,10 @@ void fyai_render_tool_result(struct fyai_sink *sink, struct fyai_cfg *cfg,
 
 	if (!preview_lines)
 		return;
+	if (lang && !strcmp(lang, FYAI_RESULT_MARKDOWN) && fy_is_string(content)) {
+		fyai_render_tool_markdown(sink, cfg, s, strlen(s));
+		return;
+	}
 	max_lines = preview_lines < 0 ? 0 : (size_t)preview_lines;
 	fyai_print_tool_separator(sink, cfg);
 	if (fy_is_string(content)) {
@@ -2524,6 +2702,8 @@ struct fyai_tool_view {
 	fy_generic args;
 	int preview_lines;
 	char *lang;
+	/* What the user is shown: the result, or the Markdown a tool made. */
+	fy_generic shown;
 };
 
 static void fyai_tool_view_cleanup(struct fyai_tool_view *tv)
@@ -2547,8 +2727,10 @@ static int fyai_tool_view_init(struct fyai_ctx *ctx, struct fyai_tool_view *tv,
 	const char *args_text;
 	const char *resolved;
 	const char *res_str;
+	const struct fyai_tool_def *def;
 	fy_generic gcmd;
 	fy_generic gpath;
+	char *text;
 
 	memset(tv, 0, sizeof(*tv));
 	tv->ctx = ctx;
@@ -2594,6 +2776,19 @@ static int fyai_tool_view_init(struct fyai_ctx *ctx, struct fyai_tool_view *tv,
 		gpath = fy_get(tv->args, "path");
 		tv->lang = markdown_lang_for_path(fy_castp(&gpath, ""));
 	}
+	tv->shown = tool_result;
+	/* A tool that writes its result for the user shows that instead. */
+	def = fyai_tool_find(tv->name);
+	if (def && def->format_result && fy_is_string(tool_result) && *res_str &&
+	    !fyai_tool_result_is_error(res_str)) {
+		text = def->format_result(ctx, gb, tv->args, res_str);
+		if (text) {
+			tv->shown = fy_value(gb, text);
+			free(tv->lang);
+			tv->lang = strdup(FYAI_RESULT_MARKDOWN);
+			free(text);
+		}
+	}
 	return 0;
 }
 
@@ -2637,7 +2832,7 @@ static void fyai_render_tool_exchange_common(struct fyai_ctx *ctx,
 		free(body.data);
 	}
 	/* The shared renderer draws the result frameless and row-bounded. */
-	fyai_render_tool_result(ctx->sink, cfg, tool_result, tv.lang,
+	fyai_render_tool_result(ctx->sink, cfg, tv.shown, tv.lang,
 				tv.preview_lines);
 	free(cause);
 	fyai_tool_view_cleanup(&tv);
@@ -2750,6 +2945,66 @@ err:
 		fclose(mf);
 err_closed:
 	fyai_md_blocks_free(&blocks);
+	free(md);
+	return -1;
+}
+
+int fyai_present_tool_diff(struct fyai_ctx *ctx, const char *diff)
+{
+	struct fyai_cfg *cfg;
+	size_t start, length;
+	char *md = NULL;
+	size_t mdlen = 0;
+	bool isolated = false;
+	FILE *mf;
+	int rc, lines;
+
+	/* A stored turn has no open output document. */
+	if (!ctx || !ctx->display_output || fy_str_empty(diff))
+		return 0;
+	cfg = ctx->cfg;
+	length = strlen(diff);
+	rc = fyai_output_start_block(ctx);
+	fyai_error_check(ctx, !rc, err, "could not separate the tool diff from the calls");
+	isolated = fyai_output_renders_live(ctx);
+	rc = isolated ? fyai_output_checkpoint(ctx) : 0;
+	fyai_error_check(ctx, !rc, err, "could not checkpoint output before the tool diff");
+
+	/* Draw it as the replay draws it: one fenced block of the language diff. */
+	lines = fyai_tool_preview_lines(cfg, "diff");
+	rc = fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT, FYAI_FLOW_TOOL_TEXT);
+	fyai_error_check(ctx, !rc, err_resume, "could not fence the tool diff");
+	fyai_print_tool_separator(ctx->sink, cfg);
+	fyai_print_fenced(ctx->sink, cfg, diff, length, "diff", fy_invalid,
+			  lines < 0 ? 0 : (size_t)lines);
+
+	/* Store the source that was drawn, with the separator outside the fragment. */
+	start = strlen(fyai_output_markdown(ctx, NULL));
+	mf = open_memstream(&md, &mdlen);
+	fyai_error_check(ctx, mf, err_resume, "could not format the tool diff");
+	fputs(diff, mf);
+	if (diff[length - 1] != '\n')
+		fputc('\n', mf);
+	fyai_error_check(ctx, !fflush(mf), err_closed, "could not format the tool diff");
+	length = (size_t)ftell(mf);
+	fputc('\n', mf);
+	fyai_error_check(ctx, !fclose(mf), err_closed, "could not finish the tool diff");
+	mf = NULL;
+	rc = fyai_output_append_recorded(ctx, md, mdlen);
+	fyai_error_check(ctx, !rc, err_resume, "could not record the tool diff");
+	rc = fyai_output_add_fragment(ctx, "tool_text", start, start + length, "diff", "diff");
+	fyai_error_check(ctx, !rc, err_resume, "could not record the tool diff fragment");
+	free(md);
+	rc = isolated ? fyai_output_resume(ctx) : 0;
+	fyai_error_check(ctx, !rc, err, "could not resume output after the tool diff");
+	return 0;
+err_closed:
+	if (mf)
+		fclose(mf);
+err_resume:
+	if (isolated)
+		(void)fyai_output_resume(ctx);
+err:
 	free(md);
 	return -1;
 }
@@ -2880,8 +3135,8 @@ int fyai_record_tool_exchange(struct fyai_ctx *ctx, fy_generic tool_call,
 	start = strlen(fyai_output_markdown(ctx, NULL));
 	mf = open_memstream(&md, &mdlen);
 	fyai_error_check(ctx, mf, err, "could not format tool result output");
-	if (fy_is_string(tool_result))
-		fyai_emit_tool_result(mf, fy_castp(&tool_result, ""), -1, tv.lang);
+	if (fy_is_string(tv.shown))
+		fyai_emit_tool_result(mf, fy_castp(&tv.shown, ""), -1, tv.lang);
 	else
 		fyai_emit_shell_output(mf, tool_result, -1);
 	fyai_error_check(ctx, !fclose(mf), err_closed,
@@ -3097,8 +3352,7 @@ static bool stored_call_is_session(struct fyai_ctx *ctx, fy_generic call)
 	n = fy_castp(&name, "");
 	if (fy_str_empty(n))
 		return false;
-	if (!strcmp(n, "shell_input") || !strcmp(n, "shell_output") ||
-	    !strcmp(n, "shell_close"))
+	if (fyai_tool_has(n, FYAI_TOOL_SILENT))
 		return true;
 	if (strcmp(n, FYAI_TOOL_EXEC_WIRE_NAME) && strcmp(n, "shell"))
 		return false;
@@ -3419,8 +3673,8 @@ static int render_walk_unit(void *user, const struct fyai_fragment *f)
 		rc = fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT, f->unit);
 		fyai_error_check(ctx, !rc, out, "could not fence a tool screen");
 		fyai_print_tool_separator(ctx->sink, cfg);
-		fyai_print_fenced(ctx->sink, cfg, f->md, f->len, NULL,
-				  fy_invalid,
+		fyai_print_fenced(ctx->sink, cfg, f->md, f->len,
+				  *f->lang ? f->lang : NULL, fy_invalid,
 				  f->preview_lines < 0 ? 0 :
 				  (size_t)f->preview_lines);
 		return 0;
@@ -3429,6 +3683,11 @@ static int render_walk_unit(void *user, const struct fyai_fragment *f)
 				 "missing a stored tool result");
 		rc = fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT, f->unit);
 		fyai_error_check(ctx, !rc, out, "could not fence a tool result");
+		/* The stored source is the Markdown the tool wrote for the user. */
+		if (!strcmp(f->lang, FYAI_RESULT_MARKDOWN)) {
+			fyai_render_tool_markdown(ctx->sink, cfg, f->md, f->len);
+			return 0;
+		}
 		fyai_render_tool_result(ctx->sink, cfg, f->content, f->lang,
 					f->preview_lines);
 		return 0;
@@ -3501,12 +3760,22 @@ static void fyai_display_command_output(struct fyai_ctx *ctx,
 	fy_generic gtext = fy_get(output, "output");
 	const char *text = fy_castp(&gtext, "");
 	size_t len = strlen(text);
+	struct response_buffer washed = {0};
+	uint32_t bg;
 
 	(void)fyai_render_display_output(ctx, "user", line);
 	if (!len)
 		return;
 	(void)fyai_sink_unit(ctx->sink, FYAI_SINK_TRANSCRIPT, FYAI_FLOW_NOTICE);
-	(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT, text, len);
+	if (markdown_command_ground(ctx->cfg, &bg) &&
+	    !markdown_ground_rows(ctx->cfg, bg, text, len, &washed) &&
+	    washed.len)
+		(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT,
+				      washed.data, washed.len);
+	else
+		(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT, text,
+				      len);
+	free(washed.data);
 	if (text[len - 1] != '\n')
 		(void)fyai_sink_write(ctx->sink, FYAI_SINK_TRANSCRIPT, "\n", 1);
 }
@@ -4116,7 +4385,10 @@ static int measure_walk_unit(void *user, const struct fyai_fragment *f)
 
 	/* Include the preview and the row that reports the omission. */
 	cap = f->preview_lines > 0 ? (size_t)f->preview_lines + 1 : 0;
-	if (f->unit == FYAI_FLOW_TOOL_RESULT)
+	if (f->unit == FYAI_FLOW_TOOL_RESULT &&
+	    !strcmp(f->lang, FYAI_RESULT_MARKDOWN))
+		w->rows += measure_rows(w->m, f->md, f->len);
+	else if (f->unit == FYAI_FLOW_TOOL_RESULT)
 		w->rows += fyai_display_result_rows(f->content,
 						    f->preview_lines);
 	else if (f->unit == FYAI_FLOW_TOOL_HEAD || !cap)
@@ -4568,7 +4840,7 @@ fy_generic fyai_list_reflog_data(struct fyai_ctx *ctx,
 	struct fyai_branch b;
 	fy_generic out, entry;
 	const char *kind, *name;
-	char ref[256];
+	char ref[256], brief[13];
 	long long idx;
 
 	out = fy_seq_empty;
@@ -4595,6 +4867,9 @@ fy_generic fyai_list_reflog_data(struct fyai_ctx *ctx,
 		 * correct and is what fyai_resolve_ref() accepts back.
 		 */
 		snprintf(ref, sizeof(ref), "%s@{%lld}", name, idx);
+		/* The start of the root is enough to tell two states apart. */
+		snprintf(brief, sizeof(brief), "%.12s",
+			 fy_get(fy_get(entry, "project", fy_invalid), "root", ""));
 
 		out = fy_append(gb, out,
 			fy_mapping(gb,
@@ -4606,7 +4881,8 @@ fy_generic fyai_list_reflog_data(struct fyai_ctx *ctx,
 					fy_get(b.config, "model", "-")),
 				   "kind", fy_value(gb, kind),
 				   "from", fy_value(gb,
-					fy_get(entry, "from", ""))));
+					fy_get(entry, "from", "")),
+				   "project", fy_value(gb, brief)));
 		/* Validate the next link before following it. */
 		if (!fyai_branch_entry_contained(ctx->durable_allocator,
 						 b.prev, 1))
@@ -4817,8 +5093,22 @@ static void fyai_bubble_fence(struct fyai_ctx *ctx, const char *on,
 }
 
 /* Draw a user card through the live or transcript path. */
+static void fyai_print_card(struct fyai_ctx *ctx, const char *line, bool live);
+
+/*
+ * Draw a user card. An event, which is a line for the model in brackets, is
+ * drawn as the user should read it: see fyai_event_pretty().
+ */
 static void fyai_print_user_turn(struct fyai_ctx *ctx, const char *line,
 				 bool live)
+{
+	char *pretty = fyai_event_pretty(line);
+
+	fyai_print_card(ctx, pretty ? pretty : line, live);
+	free(pretty);
+}
+
+static void fyai_print_card(struct fyai_ctx *ctx, const char *line, bool live)
 {
 	struct fyai_cfg *cfg = ctx->cfg;
 	struct response_buffer rb = {0};

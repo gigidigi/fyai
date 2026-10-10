@@ -5,12 +5,11 @@
 #include "fyai.h"
 
 /*
- * Keys a tile does not keep. The focus keys move the keyboard between tiles
- * and back to the prompt; escape and the interrupt character are the
- * program's, and leave a view this program draws itself.
+ * Escape and the interrupt character are the program's, and leave a view this
+ * program draws itself. The keys that move the keyboard between tiles and back
+ * to the prompt are keys of the surface mode of the terminal library, bound in
+ * ui_keys_configure().
  */
-#define FYAI_FOCUS_NEXT_KEY 0x14	/* ^T */
-#define FYAI_FOCUS_PROMPT_KEY 0x1d	/* ^] */
 #define FYAI_KEY_ESC 0x1b
 #define FYAI_KEY_INTR 0x03
 
@@ -26,6 +25,13 @@ typedef void (*fyai_mcp_call_complete_fn)(
 /* Map the exec_command wire name to the internal shell tool name. */
 #define FYAI_TOOL_EXEC_WIRE_NAME "exec_command"
 const char *fyai_tool_name_canonical(const char *name);
+/*
+ * The state of the terminal session @name for a wait: NULL while it runs, a
+ * report in malloc'd text when it has ended, and *knownp false when there is
+ * no such session.
+ */
+char *fyai_shell_session_ended_text(struct fyai_ctx *ctx, const char *name,
+				    bool *knownp);
 
 void fyai_print_tool_call(struct fyai_ctx *ctx, fy_generic tool_call,
 			  bool execute);
@@ -48,6 +54,14 @@ fy_generic fyai_execute_tool_call(struct fyai_ctx *ctx, fy_generic tool_call,
 				  bool *okp);
 /* Return a short failure cause, or NULL. The caller owns the string. */
 char *fyai_tool_error_cause(fy_generic result);
+/*
+ * What a tool call can do to the files of the project: nothing, as a read does
+ * (0); change them in a way that its own display shows, as a patch does (1); or
+ * run a program that can change anything, as a shell, a terminal session, a
+ * sub-agent or a tool of a server does (2).
+ */
+int fyai_tool_call_file_effect(struct fyai_ctx *ctx, fy_generic tool_call);
+
 bool fyai_tool_call_parallel_eligible(struct fyai_ctx *ctx,
 				      fy_generic tool_call);
 struct fyai_tool_job *fyai_tool_job_submit(struct fyai_ctx *ctx,
@@ -56,6 +70,12 @@ bool fyai_tool_job_done(const struct fyai_tool_job *job);
 /* Serve the control channel of an executed tool child. Does not return. */
 int fyai_tool_child_exec_serve(struct fyai_ctx *ctx);
 /* Repaint the title of the live agent tile that owns @branch. */
+/*
+ * The transport execution of the live sub-agent of this process that @name
+ * designates: its branch, or the name it was delegated under. 0 when there is
+ * none or the agent has no transport execution.
+ */
+uint64_t fyai_tool_agent_transport_exec(struct fyai_ctx *ctx, const char *name);
 void fyai_tool_agent_title_refresh(struct fyai_ctx *ctx, const char *branch);
 bool fyai_tools_active(const struct fyai_ctx *ctx);
 /*
@@ -121,8 +141,16 @@ int fyai_tools_kill(struct fyai_ctx *ctx, const char *name,
 		    const char **actionp);
 /* Return the pane and keyboard focus to the prompt. */
 void fyai_tools_unzoom(struct fyai_ctx *ctx);
+/* Give the keys to the prompt: the action of Ctrl-] on a surface. */
+void fyai_tools_keys_to_prompt(struct fyai_ctx *ctx);
 /* Start a user-owned TTY shell in the work pane. */
 int fyai_tools_bang(struct fyai_ctx *ctx, const char *command);
+/*
+ * Confine this process as the tool sandbox confines a tool call. Call it in a
+ * child that runs a program, after the child enters its view. Returns 0, or -1
+ * with the cause raised.
+ */
+int fyai_tools_confine(struct fyai_ctx *ctx);
 
 /* Told that a program the user runs through fyai ended: its exit code, or
  * the signal that ended it. */

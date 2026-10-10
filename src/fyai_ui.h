@@ -3,9 +3,12 @@
 #define FYAI_UI_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
 struct fyai_ctx;
+struct fyai_cfg;
+struct response_buffer;
 struct markdown_update;
 struct fytim_workband;
 struct fytim_surface;
@@ -70,9 +73,11 @@ void fyai_ui_repaint(struct fyai_ctx *ctx);
 char *fyai_ui_input_copy(struct fyai_ctx *ctx);
 void fyai_ui_input_set(struct fyai_ctx *ctx, const char *text);
 
-/* Called once with the answer to a question, or with NULL when the user gave
- * none. The answer is valid for the call. */
-typedef void (*fyai_ui_ask_fn)(void *user, const char *answer);
+/* Called once with the replies to the questions, or with NULL when the user
+ * gave none. The replies are valid for the call. */
+struct fyai_ask_reply;
+typedef void (*fyai_ui_ask_fn)(void *user, const struct fyai_ask_reply *replies,
+			       size_t n);
 /* Whether the input area can put a question to the user: the page renderer
  * draws it. */
 bool fyai_ui_ask_available(struct fyai_ctx *ctx);
@@ -103,14 +108,13 @@ const struct fyai_page *fyai_ui_page(struct fyai_ctx *ctx);
 struct fyai_page_action;
 void fyai_ui_page_actions(const struct fyai_page_action **actions, size_t *n);
 /*
- * Put @question to the user in the input area, after the questions before it.
- * @from names the sub-agent that asks, or is NULL, and the @n @options are
- * offered. @done is called once, from the event loop, with @user. Returns 0,
- * or -1 after it reported why the question cannot be put.
+ * Put @questions, a sequence normalized by fyai_ask_normalize(), to the user in
+ * the input area, after the questions before them. @from names the sub-agent
+ * that asks, or is NULL. @done is called once, from the event loop, with
+ * @user. Returns 0, or -1 after it reported why they cannot be put.
  */
-int fyai_ui_ask(struct fyai_ctx *ctx, const char *question, const char *from,
-		const char *const *options, size_t n, fyai_ui_ask_fn done,
-		void *user);
+int fyai_ui_ask(struct fyai_ctx *ctx, fy_generic questions, const char *from,
+		fyai_ui_ask_fn done, void *user);
 /* Take back the questions of @user without an answer: nobody waits for them. */
 void fyai_ui_ask_withdraw(struct fyai_ctx *ctx, void *user);
 /* An interrupt reached the session (Escape, or SIGINT from ^C). Discards a
@@ -126,7 +130,7 @@ bool fyai_ui_interrupt(struct fyai_ctx *ctx);
 void fyai_ui_signal(struct fyai_ctx *ctx, int signo);
 /*
  * Set the header and the status of the input area. @top is the rendered
- * header that the band stack draws. @top_source is its Markdown, with the
+ * header row. @top_source is its Markdown, with the
  * values escaped and in the colours of the palette, which the page draws as
  * UI Markdown.
  */
@@ -137,6 +141,63 @@ int fyai_ui_update_prompt_style(struct fyai_ctx *ctx);
 int fyai_ui_external_begin(struct fyai_ctx *ctx);
 int fyai_ui_external_end(struct fyai_ctx *ctx);
 /* Create an independent text tile in the work pane. */
+/*
+ * Whether the live output of a shell or agent call goes into the transcript at
+ * the position of the call: display/tool_display is inline on a fullscreen
+ * page.
+ */
+bool fyai_ui_tools_inline(const struct fyai_ctx *ctx);
+/*
+ * Render a band into the transcript block of @key, as
+ * fyai_ui_shell_workband_update() renders a tile when @command is set, else
+ * as fyai_ui_workband_update(). @commit drops the block and presents the
+ * whole band in the transcript. Returns 0, or -1.
+ */
+int fyai_ui_inline_update(struct fyai_ctx *ctx, uintptr_t key, bool commit,
+			  const char *title, const char *command,
+			  const char *body, size_t len,
+			  const char *first_margin);
+/*
+ * Draw the @screen of a terminal session, @len bytes of rows that already
+ * carry the indent of tool output, in the transcript block of @key under the
+ * head of a call, with the @command row of a shell call when it is not NULL:
+ * the last @rows rows of it, with frame @frame of the mark of a call that
+ * runs. @done presents the whole of it in the transcript with the mark
+ * of the outcome @ok, and drops the block. Returns 0, or -1.
+ */
+int fyai_ui_inline_terminal(struct fyai_ctx *ctx, uintptr_t key,
+			    const char *title, const char *command,
+			    const char *screen, size_t len, int rows,
+			    size_t frame, bool done, bool ok);
+/*
+ * Give the keys to the transcript block of @key, which has no surface: the
+ * canvas of the page takes them, @cb gets what is typed, and a fullscreen
+ * view scrolls to the block. A @key of 0 gives the keys back to the prompt.
+ * Returns 0, or -1 when the block is not shown.
+ */
+int fyai_ui_inline_keys(struct fyai_ctx *ctx, uintptr_t key,
+			fyai_ui_keys_fn cb, void *user);
+/* The place of the transcript block of @key in the transcript, from 0, or -1
+ * when it is not shown. */
+int fyai_ui_inline_index(struct fyai_ctx *ctx, uintptr_t key);
+/*
+ * The place on the screen, in the last frame, of the first row of the
+ * transcript block of @key, or of the tile @sf: row and column into *@rowp
+ * and *@colp. A block scrolled out of the view has a row outside it. False
+ * when the page has no such place.
+ */
+bool fyai_ui_inline_pos(struct fyai_ctx *ctx, uintptr_t key, int *rowp,
+			int *colp);
+bool fyai_ui_tile_pos(struct fyai_ctx *ctx, struct fytim_surface *sf,
+		      int *rowp, int *colp);
+/* The transcript block that holds the keys, or 0. */
+uintptr_t fyai_ui_inline_focused(const struct fyai_ctx *ctx);
+/* @margin with the focus edge in its first column, in @buf, or @margin when
+ * it does not start with a blank. */
+const char *fyai_ui_inline_margin(struct fyai_ctx *ctx, const char *margin,
+				  char *buf, size_t size);
+/* Drop the transcript block of @key without a commit. */
+void fyai_ui_inline_drop(struct fyai_ctx *ctx, uintptr_t key);
 struct fytim_workband *fyai_ui_work_tile_create(struct fyai_ctx *ctx);
 void fyai_ui_work_tile_destroy(struct fyai_ctx *ctx,
 			       struct fytim_workband *band, bool commit);
@@ -191,8 +252,6 @@ int fyai_ui_surface_granted_cols(struct fyai_ctx *ctx,
 void fyai_ui_surface_chrome(const struct fytim_surface *sf,
 			    const char **marginp, int *colsp, uint32_t *bgp,
 			    int *mixp);
-/* Chrome at the left of every row of @sf. */
-int fyai_ui_surface_set_margin(struct fytim_surface *sf, const char *text);
 /* Blank the grid: the tile is no longer drawing its program. */
 int fyai_ui_surface_clear(struct fytim_surface *sf);
 /* Limit grid height; zero accepts all granted rows. */
@@ -207,9 +266,21 @@ void fyai_ui_surface_set_view(struct fytim_surface *sf, int present);
 int fyai_ui_surface_set_max_rows(struct fytim_surface *sf, int rows);
 /* Show or hide the surface's emulated program cursor. */
 int fyai_ui_surface_cursor_visible(struct fytim_surface *sf, bool visible);
-/* Update keyboard-focus chrome. */
-void fyai_ui_surface_focus(struct fyai_ctx *ctx, struct fytim_surface *sf,
-			   bool focused);
+/*
+ * The keyboard-focus look, from the theme: the ground of a tile that holds the
+ * keys into *@bgp (true when none is configured and the margin is reversed
+ * instead), the session margin with its first column replaced by the edge
+ * marker, and the hint row of the status. Tile chrome applies them with
+ * fyai_chrome_focus().
+ */
+bool fyai_ui_focus_ground(const struct fyai_ctx *ctx, bool focused,
+			  uint32_t *bgp);
+const char *fyai_ui_focus_margin(struct fyai_ctx *ctx, char *buf, size_t size);
+void fyai_ui_set_hint(struct fyai_ctx *ctx, const char *hint);
+/* The SGR pair of the palette @role, else of the theme element @element (an
+ * enum fymd_style_element). Both NULL when the element is not styled. */
+void fyai_ui_theme_pair(struct fyai_ctx *ctx, const char *role, int element,
+			const char **onp, const char **offp);
 int fyai_ui_surface_set_title(struct fytim_surface *sf, const char *top,
 			      const char *bottom);
 /* Copy what changed in @view onto @sf. Returns 1 when it published. */
@@ -227,28 +298,15 @@ enum fyai_ui_mark {
 	FYAI_UI_MARK_FAILED
 };
 
-/* Set the marked title and optional command chrome for @sf. */
-/*
- * fyai_ui_surface_set_head_frame() with @right, fyai chrome such as an
- * elapsed time, at the right edge of the title row when the build renders UI
- * Markdown, and after the title otherwise.
- */
-int fyai_ui_surface_set_head_right(struct fyai_ctx *ctx,
-				   struct fytim_surface *sf,
-				   const char *title, const char *right,
-				   const char *command, const char *cause,
-				   enum fyai_ui_mark mark, size_t frame,
-				   unsigned int *interval_msp);
-int fyai_ui_surface_set_head(struct fyai_ctx *ctx, struct fytim_surface *sf,
-			     const char *title, const char *command,
-			     const char *cause, enum fyai_ui_mark mark);
-/* Set one animation frame and return its interval through @interval_msp. */
-int fyai_ui_surface_set_head_frame(struct fyai_ctx *ctx,
-				   struct fytim_surface *sf,
-				   const char *title, const char *command,
-				   const char *cause,
-				   enum fyai_ui_mark mark, size_t frame,
-				   unsigned int *interval_msp);
+/* The mark of the state @mark at animation @frame, padded to the gutter
+ * width; the interval of its animation goes to @interval_msp. The caller frees
+ * it. */
+char *fyai_ui_indicator(struct fyai_ctx *ctx, enum fyai_ui_mark mark,
+			size_t frame, unsigned int *interval_msp);
+/* Append the command row of a tile head to @out. */
+int fyai_ui_append_shell_command(struct fyai_cfg *cfg,
+				 struct response_buffer *out,
+				 const char *command);
 
 /* Keep the last screen: it goes into the transcript and @sf is retired. */
 void fyai_ui_surface_commit(struct fyai_ctx *ctx, struct fytim_surface *sf);

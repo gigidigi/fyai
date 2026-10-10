@@ -42,6 +42,7 @@ FYAI_TEST_ENTRY(page, palette_margin_keeps_width, page_palette_margin_keeps_widt
 FYAI_TEST_ENTRY(page, status_drops_first, page_status_drops_first)
 FYAI_TEST_ENTRY(page, blank_activity_is_not_code, page_blank_activity_is_not_code)
 FYAI_TEST_ENTRY(page, cap_stands_over_the_pane, page_cap_stands_over_the_pane)
+FYAI_TEST_ENTRY(page, todo_stands_over_the_prompt, page_todo_stands_over_the_prompt)
 FYAI_TEST_ENTRY(page, prompt_card_takes_the_rules, page_prompt_card_takes_the_rules)
 FYAI_TEST_ENTRY(page, chrome_keeps_the_margins, page_chrome_keeps_the_margins)
 FYAI_TEST_ENTRY(page, fit_gives_the_chrome_its_rows, page_fit_gives_the_chrome_its_rows)
@@ -109,6 +110,9 @@ static const struct fyai_page_action page_golden_actions[] = {
 	{ "ask.accept", page_golden_noop },
 	{ "ask.dismiss", page_golden_noop },
 	{ "ask.choose", page_golden_noop },
+	{ "ask.toggle", page_golden_noop },
+	{ "ask.back", page_golden_noop },
+	{ "ask.forward", page_golden_noop },
 	{ "popup.close", page_golden_noop },
 	{ "popup.scroll", page_golden_noop },
 };
@@ -117,7 +121,17 @@ static void page_golden_state(unsigned i, struct fyai_page_state *st)
 {
 	static const char *const modes[] = { NULL, "ask", "ask_text" };
 	static const char *const froms[] = { NULL, "main/agent:x" };
-	static const char *const options[] = { "Yes <b>", "No", "Other" };
+	static const struct fyai_page_ask_option options[] = {
+		{ "Yes <b>", "means <i>yes</i>", false },
+		{ "No", "", true },
+		{ "Other", "something else", false },
+		{ "Last", "", false },
+	};
+	static const struct fyai_page_ask_review review[] = {
+		{ "Scope <b>", "Small, Medium" },
+		{ "Style", "own <answer>" },
+	};
+	static struct fyai_page_ask ask;
 	static const char *const lines[] = { "row one", "row two" };
 	static const char *const hints[] = { NULL, "HINT <b>x</b>", "  " };
 	static const char *const statuses[] = { NULL, "  STATUS\nline" };
@@ -128,6 +142,9 @@ static void page_golden_state(unsigned i, struct fyai_page_state *st)
 	static const char *const caps[] = { NULL, "CAP <fy-fill/>" };
 	static const char *const sources[] = {
 		NULL, "<fy-grid rows=\"3\" cols=\"*\">\n</fy-grid>\n\n",
+	};
+	static const char *const todos[] = {
+		NULL, "- [>] First <b>task</b>\n- [ ] Second task\n",
 	};
 
 	memset(st, 0, sizeof(*st));
@@ -155,14 +172,33 @@ static void page_golden_state(unsigned i, struct fyai_page_state *st)
 	st->transcript_rows = st->fullscreen ? 20 : 0;
 	st->note_lines = lines;
 	st->note_nlines = (int)page_golden_pick(i, 16, 3);
+	st->todo_source = todos[page_golden_pick(i, 29, 2)];
+	st->todo_rows = st->todo_source ? 2 : 0;
+	st->todo_shown = st->todo_source != NULL;
 	st->input_mode = modes[page_golden_pick(i, 17, 3)];
 	if (st->input_mode) {
-		st->ask_question = "Proceed <now>?";
-		st->ask_from = froms[page_golden_pick(i, 18, 2)];
-		st->ask_options = options;
-		st->ask_noptions = page_golden_pick(i, 19, 4);
-		st->ask_selected = page_golden_pick(i, 20, 3);
-		st->ask_waiting = (int)page_golden_pick(i, 21, 3);
+		memset(&ask, 0, sizeof(ask));
+		ask.header = "Scope <h>";
+		ask.question = "Proceed <now>?";
+		ask.from = froms[page_golden_pick(i, 18, 2)];
+		ask.options = options;
+		ask.noptions = page_golden_pick(i, 19, 4);
+		ask.selected = page_golden_pick(i, 20, 3);
+		ask.waiting = (int)page_golden_pick(i, 21, 3);
+		ask.multi = page_golden_pick(i, 23, 2);
+		ask.count = 1 + page_golden_pick(i, 24, 3);
+		ask.index = page_golden_pick(i, 25, ask.count);
+		if (ask.count > 1 && page_golden_pick(i, 26, 2)) {
+			ask.review = true;
+			ask.lines = review;
+			ask.nlines = 1 + page_golden_pick(i, 27, 2);
+		}
+		if (!ask.multi && !ask.review && page_golden_pick(i, 28, 3)) {
+			ask.preview = lines;
+			ask.npreview = 2;
+			ask.preview_title = "No <b>";
+		}
+		st->ask = &ask;
 	}
 	/* The popup covers the whole page: one case in four. */
 	if (st->fullscreen && !page_golden_pick(i, 22, 4)) {
@@ -508,6 +544,51 @@ static int page_cap_stands_over_the_pane_run(void)
 	return 0;
 }
 
+/* The todo panel stands above the prompt with the work pane, and only then. */
+static int page_todo_stands_over_the_prompt_run(void)
+{
+	struct response_buffer out = {0};
+	struct fyai_page_state st = page_state();
+	const char *p;
+	int rc;
+
+	st.todo_source = "- [>] First task\n- [ ] Second task\n";
+	st.todo_rows = 2;
+	st.todo_shown = true;
+	rc = fyai_page_source(&st, &out);
+	FYAI_TCHECK(!rc);
+	FYAI_TCHECK(strstr(out.data, "<fy-drop order=\"0\">") != NULL);
+	p = after(out.data, "<fy-role name=\"chrome\">Todos</fy-role>");
+	p = after(p, "- [>] First task");
+	FYAI_TCHECK(p != NULL);
+	free(out.data);
+
+	/* hidden, nothing is drawn */
+	out = (struct response_buffer){0};
+	st.todo_shown = false;
+	rc = fyai_page_source(&st, &out);
+	FYAI_TCHECK(!rc);
+	FYAI_TCHECK(!strstr(out.data, "First task"));
+	free(out.data);
+
+	/* the panel counts as chrome rows, so the fit grants it first */
+	st = page_state();
+	st.todo_source = "- [>] First task\n";
+	st.todo_rows = 2;
+	st.todo_shown = true;
+	{
+		struct fyai_page_state plain = page_state();
+		FYAI_TCHECK(fyai_page_chrome_rows(&st) ==
+			    fyai_page_chrome_rows(&plain) + 4);
+	}
+	fyai_page_fit(&st, 20);
+	FYAI_TCHECK(st.todo_shown);
+	st.todo_rows = 20;
+	fyai_page_fit(&st, 20);
+	FYAI_TCHECK(!st.todo_shown);
+	return 0;
+}
+
 /* A prompt on a card is one slot two rows taller, with no rules. */
 static int page_prompt_card_takes_the_rules_run(void)
 {
@@ -756,6 +837,11 @@ int page_view_follows_the_presentation(void)
 	return page_view_follows_the_presentation_run();
 }
 
+int page_todo_stands_over_the_prompt(void)
+{
+	return page_todo_stands_over_the_prompt_run();
+}
+
 int page_prompt_card_takes_the_rules(void)
 {
 	return page_prompt_card_takes_the_rules_run();
@@ -781,15 +867,19 @@ int page_cap_stands_over_the_pane(void)
  * nothing. */
 static int page_review_marks_each_row_run(void)
 {
-	static const char *const opts[] = { "Yes", "No" };
+	static const struct fyai_page_ask_option opts[] = {
+		{ "Yes", "", false }, { "No", "", false },
+	};
+	static const struct fyai_page_ask ask = {
+		.header = "Go", .question = "Proceed?", .options = opts,
+		.noptions = 2, .count = 1,
+	};
 	struct response_buffer out = {0};
 	struct fyai_page_state st = page_state();
 	int rc;
 
 	st.input_mode = "ask";
-	st.ask_question = "Proceed?";
-	st.ask_options = opts;
-	st.ask_noptions = 2;
+	st.ask = &ask;
 	st.pane_rows = 2;
 	st.actions = page_golden_actions;
 	st.nactions = sizeof(page_golden_actions) /
@@ -1228,6 +1318,9 @@ static const struct fyai_page_action page_test_ask_actions[] = {
 	{ "ask.prev", page_test_ask_noop },
 	{ "ask.next", page_test_ask_noop },
 	{ "ask.choose", page_test_ask_noop },
+	{ "ask.toggle", page_test_ask_noop },
+	{ "ask.back", page_test_ask_noop },
+	{ "ask.forward", page_test_ask_noop },
 	{ "ask.accept", page_test_ask_noop },
 	{ "ask.dismiss", page_test_ask_noop },
 	{ "popup.close", page_test_ask_noop },
@@ -1238,7 +1331,16 @@ static const struct fyai_page_action page_test_ask_actions[] = {
  * draws them, so a page with a question fits as one without. */
 static int page_chrome_counts_a_question_run(void)
 {
-	static const char *const options[] = { "yes", "no", "maybe" };
+	static const struct fyai_page_ask_option options[] = {
+		{ "yes", "", false },
+		{ "no", "the other way", false },
+		{ "maybe", "", false },
+	};
+	static const struct fyai_page_ask ask = {
+		.header = "Go", .question = "Proceed?",
+		.from = "main/agent:asker", .options = options,
+		.noptions = 3, .selected = 1, .count = 1,
+	};
 	struct fyai_page_state plain = page_state(), asked;
 	struct fymd_renderer *r;
 	int plain_rows, asked_rows;
@@ -1249,11 +1351,7 @@ static int page_chrome_counts_a_question_run(void)
 			 sizeof(page_test_ask_actions[0]);
 	asked = plain;
 	asked.input_mode = "ask";
-	asked.ask_question = "Proceed?";
-	asked.ask_from = "main/agent:asker";
-	asked.ask_options = options;
-	asked.ask_noptions = 3;
-	asked.ask_selected = 1;
+	asked.ask = &ask;
 
 	out = page_render(&plain, 0, &r);
 	plain_rows = rows_of(out);
@@ -1270,7 +1368,7 @@ static int page_chrome_counts_a_question_run(void)
 	FYAI_TCHECK(asked_rows - plain_rows ==
 		    fyai_page_chrome_rows(&asked) - fyai_page_chrome_rows(&plain));
 	FYAI_TCHECK(fyai_page_chrome_rows(&asked) - fyai_page_chrome_rows(&plain) ==
-		    2 + 1 + 3);
+		    2 + 1 + 3 + 1);
 	return 0;
 }
 

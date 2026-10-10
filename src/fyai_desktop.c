@@ -13,6 +13,7 @@
 
 #include "commands.h"
 #include "fyai.h"
+#include "fyai_ask.h"
 #include "fyai_cmd.h"
 #include "fyai_desktop.h"
 #include "fyai_display.h"
@@ -86,39 +87,71 @@ void fyai_desktop_emit_tool(struct fyai_ctx *ctx, fy_generic call,
 			   "ok", ok ? fy_true : fy_false));
 }
 
-fy_generic fyai_desktop_ask_user(struct fyai_ctx *ctx, fy_generic args)
+fy_generic fyai_desktop_ask_user(struct fyai_ctx *ctx, fy_generic questions)
 {
 	struct jsonrpc_request *req;
 	struct fy_generic_builder *gb;
-	fy_generic answer = fy_invalid;
-	fy_generic result;
+	struct fyai_ask_reply replies[FYAI_ASK_QUESTIONS_MAX] = { 0 };
+	fy_generic question, option, options, labels, result, answer, label;
+	size_t n = 0, i;
+	int rc;
 
 	gb = fyai_ctx_transient_gb(ctx);
 	if (!gb)
 		return fy_invalid;
 	if (!ctx->desktop_rpc)
 		return fy_value(gb, "tool error: desktop question channel unavailable");
-	req = jsonrpc_request_submit(ctx->desktop_rpc, "user/ask", args,
-				     jsonrpc_conn_next_id(ctx->desktop_rpc),
-				     false, NULL, NULL);
-	if (!req)
-		return fy_value(gb, "tool error: the question could not be asked");
-	while (!jsonrpc_request_done(req) && !ctx->desktop_cancel_requested &&
-	       !jsonrpc_conn_closed(ctx->desktop_rpc))
-		if (fyai_event_loop_step(fyai_ctx_loop(ctx), -1) < 0)
+	fy_foreach(question, questions) {
+		options = fy_get(question, "options", fy_invalid);
+		labels = fy_sequence(gb);
+		fy_foreach(option, options)
+			labels = fy_append(gb, labels,
+					   fy_get(option, "label", fy_invalid));
+		req = jsonrpc_request_submit(ctx->desktop_rpc, "user/ask",
+			fy_mapping(gb, "question",
+				   fy_get(question, "question", fy_invalid),
+				   "options", labels),
+			jsonrpc_conn_next_id(ctx->desktop_rpc), false, NULL, NULL);
+		if (!req)
 			break;
-	if (!jsonrpc_request_done(req))
-		jsonrpc_request_cancel(req);
-	if (jsonrpc_request_ok(req)) {
-		result = jsonrpc_request_result(req);
-		answer = fy_get(result, "answer", fy_invalid);
-		if (fy_is_string(answer))
-			answer = fy_value(gb, fy_castp(&answer, ""));
+		while (!jsonrpc_request_done(req) &&
+		       !ctx->desktop_cancel_requested &&
+		       !jsonrpc_conn_closed(ctx->desktop_rpc))
+			if (fyai_event_loop_step(fyai_ctx_loop(ctx), -1) < 0)
+				break;
+		if (!jsonrpc_request_done(req))
+			jsonrpc_request_cancel(req);
+		answer = fy_invalid;
+		if (jsonrpc_request_ok(req)) {
+			result = jsonrpc_request_result(req);
+			answer = fy_get(result, "answer", fy_invalid);
+		}
+		if (!fy_is_string(answer) || fy_empty(answer)) {
+			jsonrpc_request_destroy(req);
+			break;
+		}
+		/* The desktop sends a clicked option's label, not its number. */
+		for (i = 0; i < fy_len(options); i++) {
+			label = fy_get(fy_get_at(options, i), "label",
+				       fy_invalid);
+			if (!strcmp(fy_castp(&answer, ""),
+				    fy_castp(&label, ""))) {
+				replies[n].selected = 1u << i;
+				break;
+			}
+		}
+		rc = i == fy_len(options) ?
+			fyai_ask_reply_from_line(question,
+					 fy_castp(&answer, ""), &replies[n]) : 0;
+		jsonrpc_request_destroy(req);
+		if (rc || !fyai_ask_reply_given(&replies[n]))
+			break;
+		n++;
 	}
-	jsonrpc_request_destroy(req);
-	if (!fy_is_string(answer) || fy_empty(answer))
-		return fy_value(gb, "tool note: the user did not provide an answer");
-	return answer;
+	result = fyai_ask_result(gb, questions,
+				 n == fy_len(questions) ? replies : NULL, n);
+	fyai_ask_replies_free(replies, FYAI_ASK_QUESTIONS_MAX);
+	return result;
 }
 
 static int desktop_history_turn(void *userdata, fy_generic turn)

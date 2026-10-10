@@ -81,6 +81,20 @@ int fyai_config_set_generic(struct fyai_ctx *ctx, const char *key,
 int fyai_config_delete(struct fyai_ctx *ctx, const char *key);
 int fyai_apply_config_ops(struct fyai_ctx *ctx);
 int fyai_config_import(struct fyai_ctx *ctx, const char *path);
+/*
+ * Store an empty configuration on the branch, so every key takes the default
+ * of the schema, and drop the settings of this session. Returns 0, or -1 with
+ * a diagnostic.
+ */
+int fyai_config_reset(struct fyai_ctx *ctx);
+/*
+ * Store the configuration that the branch had @n changes ago. The ref log is
+ * walked back, and each entry whose configuration differs from the one after
+ * it is a change: an entry that moved only the head is not. The undo is a
+ * change itself, so a second undo of 1 returns to where the first started.
+ * *@foundp receives the changes found. Returns 0, or -1 with a diagnostic.
+ */
+int fyai_config_undo(struct fyai_ctx *ctx, long long n, long long *foundp);
 int fyai_config_export(struct fyai_ctx *ctx, const char *path);
 
 struct fyai_config_edit_request;
@@ -178,6 +192,9 @@ char *fyai_discover_project_root(void);
  * clears api_url/provider (and api_key unless explicit).
  */
 int fyai_config_resolve_model(struct fyai_cfg *cfg);
+/* The conventional key variable of a provider, such as OPENAI_API_KEY. */
+const char *fyai_config_provider_env_key(struct fy_generic_builder *gb,
+					 const char *name);
 
 /* Reject/downgrade options with no Messages-API mapping; no-op otherwise. */
 int fyai_config_messages_gate(struct fyai_cfg *cfg);
@@ -192,6 +209,12 @@ void fyai_config_cleanup(struct fyai_cfg *cfg);
  * loads. With none, the picker selects in the session.
  */
 int fyai_config_select_resume(struct fyai_cfg *cfg);
+
+/*
+ * Select the lockdown sandbox profile for this invocation only, as
+ * `sandbox_profile: lockdown` does. Nothing is stored.
+ */
+void fyai_config_sandbox_lockdown(struct fyai_cfg *cfg);
 
 /*
  * Set @key to @value in the session layer of the configuration: this session

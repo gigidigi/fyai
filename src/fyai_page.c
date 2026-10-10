@@ -27,12 +27,8 @@
 #include "fyai_page.h"
 #include "fyai_schema.h"
 #include "fyai_terminal.h"
+#include "fyai_chrome.h"
 #include "fyai_workpane.h"
-
-bool fyai_page_requested(const struct fyai_cfg *cfg)
-{
-	return cfg && cfg->renderer && !strcmp(cfg->renderer, "page");
-}
 
 const struct fyai_page_action *
 fyai_page_action_find(const struct fyai_page_action *actions, size_t n,
@@ -83,6 +79,9 @@ struct fyai_page {
 		bool act;
 		int row, col, width, height;
 	} last_regions[FYTIM_PAGE_REGIONS_MAX];
+	/* The tail of the last frame, which the canvas draws and the library
+	 * is not given; a height of 0 for none. */
+	int last_tail_row, last_tail_col, last_tail_height;
 };
 
 /*
@@ -186,6 +185,21 @@ static fy_generic page_escaped(struct fy_generic_builder *gb, const char *text)
 	return v;
 }
 
+/* The rows a question takes: its line, who asks, each option with its
+ * description, and the hint. The review takes a line for each answer. */
+static int page_ask_rows(const struct fyai_page_ask *ask)
+{
+	int rows;
+	size_t i;
+
+	if (ask->review)
+		return 2 + (int)ask->nlines;
+	rows = 2 + !fy_str_empty(ask->from);
+	for (i = 0; i < ask->noptions; i++)
+		rows += 1 + !fy_str_empty(ask->options[i].description);
+	return rows + (ask->npreview ? ask->npreview + 1 : 0);
+}
+
 int fyai_page_chrome_rows(const struct fyai_page_state *st)
 {
 	int rows = 0;
@@ -205,15 +219,16 @@ int fyai_page_chrome_rows(const struct fyai_page_state *st)
 		rows++;
 	if (st->pane_rows > 0)
 		rows++;
-	/* A question: its row, who asks, each option, and the hint. */
-	if (st->ask_question)
-		rows += 2 + !fy_str_empty(st->ask_from) + (int)st->ask_noptions;
-	return rows + st->note_nlines;
+	if (st->ask)
+		rows += page_ask_rows(st->ask);
+	/* The todo panel stands above the prompt with the work pane. */
+	rows += st->note_nlines;
+	return rows + (st->todo_shown ? st->todo_rows + 2 : 0);
 }
 
 void fyai_page_fit(struct fyai_page_state *st, int height)
 {
-	int left;
+	int left, todo_rows;
 
 	if (!st || height <= 0)
 		return;
@@ -221,9 +236,19 @@ void fyai_page_fit(struct fyai_page_state *st, int height)
 	if (st->fullscreen && st->popup_title) {
 		st->popup_rows = height > 1 ? height - 1 : 0;
 		st->pane_rows = 0;
+		st->todo_rows = 0;
+		st->todo_shown = false;
 		st->tail_rows = 0;
 		st->transcript_rows = 0;
 		return;
+	}
+	/* Keep the input visible when the branch list exceeds its space. */
+	if (st->todo_shown) {
+		todo_rows = st->todo_rows + 2;
+		st->todo_shown = false;
+		left = height - fyai_page_chrome_rows(st) - st->pane_rows;
+		if (todo_rows <= left)
+			st->todo_shown = true;
 	}
 	left = height - fyai_page_chrome_rows(st);
 	/* The work outranks the tail, which shows its last rows. */
@@ -594,6 +619,79 @@ static const char *page_str(const char *s)
 	return s ? s : "";
 }
 
+static const char *page_ask_hint(const struct fyai_page_ask *ask)
+{
+	if (ask->review)
+		return "Enter sends the answers \u00b7 \u2190 revises \u00b7 Esc cancels";
+	if (ask->multi && ask->count > 1)
+		return "Space toggles \u00b7 Enter confirms \u00b7 \u2190 back \u00b7 or type an answer";
+	if (ask->multi)
+		return "Space toggles \u00b7 Enter confirms \u00b7 or type an answer";
+	if (ask->count > 1)
+		return "\u2190 back \u00b7 or type an answer";
+	return "or type an answer";
+}
+
+/* The question of the input area, as the document names it. */
+static fy_generic page_ask_generic(struct fy_generic_builder *gb,
+				   const struct fyai_page_ask *ask)
+{
+	fy_generic options = fy_seq_empty, lines = fy_seq_empty;
+	const struct fyai_page_ask_option *o;
+	char box[8], progress[32];
+	size_t i;
+
+	if (!ask)
+		return fy_mapping(gb, "question", "", "header", "", "from", "",
+			"from_agent", false, "options", options,
+			"lines", lines, "hint", "", "progress", "",
+			"progress_shown", false, "review", false,
+			"preview_shown", false, "preview_rows", 0,
+			"preview_title", "", "bar", "",
+			"question_shown", false, "waiting", 0,
+			"waiting_shown", false);
+	for (i = 0; i < ask->noptions; i++) {
+		o = &ask->options[i];
+		snprintf(box, sizeof(box), "%s", !ask->multi ? "" :
+			 o->checked ? "[x] " : "[ ] ");
+		options = fy_append(gb, options, fy_mapping(gb,
+			"text", page_str(o->label),
+			"box", box,
+			"description", page_str(o->description),
+			"has_description", (_Bool)!fy_str_empty(o->description),
+			"selected_description", (_Bool)(i == ask->selected &&
+				!fy_str_empty(o->description)),
+			"other_description", (_Bool)(i != ask->selected &&
+				!fy_str_empty(o->description)),
+			"selected", (_Bool)(i == ask->selected),
+			"other", (_Bool)(i != ask->selected)));
+	}
+	for (i = 0; i < ask->nlines; i++)
+		lines = fy_append(gb, lines, fy_mapping(gb,
+			"header", page_str(ask->lines[i].header),
+			"answer", page_str(ask->lines[i].answer)));
+	snprintf(progress, sizeof(progress), "%zu of %zu", ask->index + 1,
+		 ask->count);
+	return fy_mapping(gb,
+		"question", page_str(ask->question),
+		"header", page_str(ask->header),
+		"from", page_str(ask->from),
+		"from_agent", (_Bool)!fy_str_empty(ask->from),
+		"options", options,
+		"lines", lines,
+		"hint", page_ask_hint(ask),
+		"progress", progress,
+		"progress_shown", (_Bool)(ask->count > 1 && !ask->review),
+		"review", ask->review,
+		"preview_shown", (_Bool)(ask->npreview > 0),
+		"preview_rows", ask->npreview,
+		"preview_title", page_str(ask->preview_title),
+		"bar", ask->bar ? ask->bar : "\xe2\x96\x8c",
+		"question_shown", (_Bool)!ask->review,
+		"waiting", ask->waiting,
+		"waiting_shown", (_Bool)(ask->waiting > 0));
+}
+
 /*
  * The state of @st that the document names. Every flag is decided here: the
  * document has no expressions.
@@ -605,25 +703,12 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 	bool grid = !fy_str_empty(st->pane_source);
 	bool hint = page_text_visible(st->hint);
 	bool side = st->pane_side && grid;
-	fy_generic options = fy_seq_empty;
-	size_t i;
-
-	for (i = 0; st->ask_question && i < st->ask_noptions; i++)
-		options = fy_append(gb, options, fy_mapping(gb,
-			"text", page_str(st->ask_options[i]),
-			"selected", (bool)(i == st->ask_selected),
-			"other", (bool)(i != st->ask_selected)));
+	fy_generic ask = page_ask_generic(gb, st->ask);
 
 	return fy_mapping(gb,
 		"input", fy_mapping(gb, "mode",
 				    st->input_mode ? st->input_mode : "prompt"),
-		"ask", fy_mapping(gb,
-			"question", page_str(st->ask_question),
-			"from", page_str(st->ask_from),
-			"from_agent", (bool)!fy_str_empty(st->ask_from),
-			"options", options,
-			"waiting", st->ask_waiting,
-			"waiting_shown", (bool)(st->ask_waiting > 0)),
+		"ask", ask,
 		"screen", fy_mapping(gb, "mode",
 				     st->fullscreen ? "fullscreen" : "inline"),
 		"tail", fy_mapping(gb,
@@ -636,6 +721,11 @@ fy_generic fyai_page_state_generic(struct fy_generic_builder *gb,
 			"mode", st->popup_title ? "open" : "closed",
 			"title", page_str(st->popup_title),
 			"rows", st->popup_rows),
+		"todo", fy_mapping(gb,
+			"shown", (bool)st->todo_shown,
+			"below", (bool)(st->todo_shown && st->pane_below),
+			"source", page_str(st->todo_source),
+			"rows", st->todo_rows),
 		"note", fy_mapping(gb,
 			"shown", (bool)(st->note_nlines > 0),
 			"rows", st->note_nlines),
@@ -908,8 +998,9 @@ static int page_doc_act(struct page_doc_ctx *c, fy_generic act,
 {
 	struct response_buffer arg = {0}, text = {0};
 	const char *action = fy_get(act, "action", "");
+	const char *role;
 	fy_generic v;
-	char tag[FYTIM_PAGE_ID_MAX + 32];
+	char tag[FYTIM_PAGE_ID_MAX + 96];
 	int rc = -1;
 
 	if (!fyai_page_action_find(c->actions, c->nactions, action,
@@ -929,8 +1020,17 @@ static int page_doc_act(struct page_doc_ctx *c, fy_generic act,
 		page_doc_fail(c, "the id of an act of '%s' is too long", action);
 		goto out;
 	}
-	rc = snprintf(tag, sizeof(tag), "<fy-act id=\"%s%s%s\">", action,
-		      arg.data ? ":" : "", arg.data ? arg.data : "");
+	role = fy_get(act, "role", "");
+	if (*role && !page_id_chars(role)) {
+		page_doc_fail(c, "the role of an act of '%s' is not a name",
+			      action);
+		goto out;
+	}
+	/* role="NAME" styles the label with a role of the theme, in place of
+	 * the underline of the action style. */
+	rc = snprintf(tag, sizeof(tag), "<fy-act id=\"%s%s%s\"%s%s%s>", action,
+		      arg.data ? ":" : "", arg.data ? arg.data : "",
+		      *role ? " role=\"" : "", role, *role ? "\"" : "");
 	fyai_error_check(c->ctx, rc >= 0 && (size_t)rc < sizeof(tag), err_out,
 			 "cannot format the page action '%s'", action);
 	v = fy_get(act, "text", fy_invalid);
@@ -1618,6 +1718,37 @@ const char *fyai_page_document_path(const struct fyai_page *pg)
 	return pg ? pg->doc_path : NULL;
 }
 
+bool fyai_page_region(const struct fyai_page *pg, const char *id, int *rowp,
+		      int *colp, int *heightp)
+{
+	size_t i;
+
+	if (pg && id && !strcmp(id, "tail")) {
+		if (pg->last_tail_height < 1)
+			return false;
+		*rowp = pg->last_tail_row;
+		*colp = pg->last_tail_col;
+		if (heightp)
+			*heightp = pg->last_tail_height;
+		return true;
+	}
+	for (i = 0; pg && id && i < pg->last_nregions; i++) {
+		if (pg->last_regions[i].act || strcmp(pg->last_regions[i].id, id))
+			continue;
+		*rowp = pg->last_regions[i].row;
+		*colp = pg->last_regions[i].col;
+		if (heightp)
+			*heightp = pg->last_regions[i].height;
+		return true;
+	}
+	return false;
+}
+
+struct fytim_surface *fyai_page_canvas(const struct fyai_page *pg)
+{
+	return pg ? pg->canvas : NULL;
+}
+
 void fyai_page_destroy(struct fyai_page *pg)
 {
 	if (!pg)
@@ -1697,11 +1828,17 @@ static struct fyai_page_tile *page_tile_of(const struct fyai_page_state *st,
 }
 
 /* The columns of the margin of @hd in a region @width wide. */
+static struct fyai_chrome_frame page_tile_frame(const struct fyai_page_tile *t,
+						int width)
+{
+	return fyai_chrome_frame(t->items,
+				 fy_str_empty(t->margin) ? 0 : t->margin_cols,
+				 width);
+}
+
 static int page_tile_margin(const struct fyai_page_tile *hd, int width)
 {
-	if (fy_str_empty(hd->margin) || hd->margin_cols < 1)
-		return 0;
-	return hd->margin_cols < width ? hd->margin_cols : width;
+	return page_tile_frame(hd, width).margin;
 }
 
 /*
@@ -1798,12 +1935,6 @@ static const char *page_control_sgr(const struct fyai_page_state *st)
 	return st->control_chrome;
 }
 
-/* Return the column reserved for a scroll bar, if one fits. */
-static int page_bar_cols(bool bar, int width)
-{
-	return bar && width >= 2 ? 1 : 0;
-}
-
 /*
  * Add actions for the scroll bar in the last column of @r. The end cells
  * scroll one row; cells above or below the midpoint scroll one page.
@@ -1818,7 +1949,9 @@ static int page_bar_acts(struct fyai_page *pg, const struct fyai_page_tile *t,
 	if (t->present != FYAI_WORKPANE_PRESENT_FULL &&
 	    t->present != FYAI_WORKPANE_PRESENT_OUTPUT)
 		return 0;
-	if (!page_bar_cols(true, r->width - page_tile_margin(t, r->width)))
+	if (!page_tile_frame(t, r->width).bar)
+		return 0;
+	if (t->band && !t->overflow)
 		return 0;
 	rows = t->granted_rows;
 	for (row = 0; row < rows && *np < FYTIM_PAGE_REGIONS_MAX; row++) {
@@ -1836,7 +1969,7 @@ static int page_bar_acts(struct fyai_page *pg, const struct fyai_page_tile *t,
 				 t->slot);
 		regions[*np].id = pg->act_ids[*np];
 		regions[*np].kind = FYTIM_PAGE_ACT;
-		regions[*np].row = (int)r->row + row;
+		regions[*np].row = (int)r->row + t->bar_top + row;
 		regions[*np].col = r->col + r->width - 1;
 		regions[*np].width = 1;
 		regions[*np].height = 1;
@@ -1864,6 +1997,7 @@ static int page_screen_draw(struct fyai_page *pg, struct fyai_page_tile *t,
 	struct fyai_ctx *ctx = t->ctx ? t->ctx : pg->ctx;
 	const struct fytim_cell *src;
 	struct fytim_cell *dst;
+	struct fyai_chrome_frame frame;
 	const char *margin = NULL;
 	int grid_rows = 0, grid_cols = 0, crow = 0, ccol = 0;
 	int rows, first, row, y, x, mc, bc, n, rc;
@@ -1872,8 +2006,9 @@ static int page_screen_draw(struct fyai_page *pg, struct fyai_page_tile *t,
 	rows = t->content_rows < r->height ? t->content_rows : r->height;
 	if (rows < 1)
 		rows = 1;
-	mc = page_tile_margin(t, r->width);
-	bc = page_bar_cols(bar != NULL, r->width - mc);
+	frame = page_tile_frame(t, r->width);
+	mc = frame.margin;
+	bc = bar ? frame.bar : 0;
 	t->granted_rows = rows;
 	t->granted_cols = r->width - mc - bc;
 	if (t->present == FYAI_WORKPANE_PRESENT_HEAD ||
@@ -1998,10 +2133,15 @@ err_out:
  * always does. Sets the grant of @t and returns 0, or -1.
  */
 static int page_text_draw(struct fyai_page *pg, struct fyai_page_tile *t,
-			  const struct fymd_region *r, const char *chrome)
+			  const struct fymd_region *r, const char *chrome,
+			  const char *control)
 {
 	const char *content, *top, *bottom, *p, *nl, *base;
-	int lines = 0, rows, top_rows, bottom_rows, max, y, skip, n, i;
+	struct fyai_chrome_frame frame;
+	struct response_buffer bar = {0};
+	enum fyai_chrome_bar_part part;
+	const char *style;
+	int lines = 0, rows, top_rows, bottom_rows, max, y, skip, n, i, rc;
 
 	content = fytim_workband_content(t->band, &lines);
 	top = fytim_workband_top(t->band);
@@ -2022,8 +2162,12 @@ static int page_text_draw(struct fyai_page *pg, struct fyai_page_tile *t,
 		else
 			rows--;
 	}
+	/* The column of the scroll bar is taken from the rows of text, so they
+	 * are made at the width that is left. */
+	frame = fyai_chrome_frame(t->items, 0, r->width);
 	t->granted_rows = rows;
-	t->granted_cols = r->width;
+	t->granted_cols = frame.body;
+	t->overflow = frame.bar && lines > rows;
 	y = (int)r->row;
 
 	if (top_rows > 0 && !*top) {
@@ -2049,9 +2193,12 @@ static int page_text_draw(struct fyai_page *pg, struct fyai_page_tile *t,
 		}
 	}
 	y += top_rows;
+	t->bar_top = top_rows;
 
 	if (rows > 0 && content && *content) {
 		skip = lines - rows;
+		if (t->scrolled && t->scroll_top < skip)
+			skip = t->scroll_top < 0 ? 0 : t->scroll_top;
 		for (p = content; skip > 0 && p; skip--) {
 			p = strchr(p, '\n');
 			if (p)
@@ -2060,11 +2207,34 @@ static int page_text_draw(struct fyai_page *pg, struct fyai_page_tile *t,
 		if (p) {
 			n = page_cells_text(pg, pg->cells, pg->cells_rows,
 					    pg->cells_cols, y, r->col,
-					    r->width, rows, p, strlen(p));
+					    frame.body, rows, p, strlen(p));
 			if (n < 0)
 				return -1;
 		}
 	}
+	if (t->overflow) {
+		skip = lines - rows;
+		if (t->scrolled && t->scroll_top < skip)
+			skip = t->scroll_top < 0 ? 0 : t->scroll_top;
+		for (i = 0; i < rows; i++) {
+			part = fyai_chrome_bar_part(lines, skip, rows, rows,
+						    true, i);
+			style = part == FYAI_CHROME_BAR_TRACK ? chrome : control;
+			rc = response_buffer_append(&bar,
+				fy_sprintfa("%s%s\x1b[0m\n", style ? style : "",
+					    fyai_chrome_bar_glyph(part)));
+			fyai_error_check(pg->ctx, !rc, bar_err,
+					 "cannot write the scroll bar of tile %u",
+					 t->slot);
+		}
+		n = page_cells_text(pg, pg->cells, pg->cells_rows,
+				    pg->cells_cols, y, r->col + r->width - 1,
+				    1, rows, bar.data, bar.len);
+		fyai_error_check(pg->ctx, n >= 0, bar_err,
+				 "cannot draw the scroll bar of tile %u", t->slot);
+	}
+	free(bar.data);
+	bar.data = NULL;
 	y += rows;
 
 	if (bottom_rows > 0 && !*bottom)
@@ -2078,6 +2248,10 @@ static int page_text_draw(struct fyai_page *pg, struct fyai_page_tile *t,
 			return -1;
 	}
 	return 0;
+
+bar_err:
+	free(bar.data);
+	return -1;
 }
 
 /*
@@ -2169,28 +2343,54 @@ static int page_header_draw(struct fyai_page *pg,
 	return n < 0 ? -1 : 0;
 }
 
-/* The last rows of the transcript tail that fit its region @r. */
+/*
+ * The last rows of the transcript tail that fit its region @r, and under them
+ * the rows of the calls that the transcript draws at their place. When they
+ * do not all fit, the last rows stay.
+ */
 static int page_tail_draw(struct fyai_page *pg, struct fytim *ft,
+			  const struct fyai_page_state *st,
 			  const struct fymd_region *r)
 {
-	const char *content, *p;
-	int lines = 0, rows, skip, n;
+	const char *content, *p = NULL;
+	int lines = 0, rows, skip, tail, n, i, y;
 
+	if (r->height < 1)
+		return 0;
 	content = fytim_tail_content(ft, &lines);
-	if (!content || !*content || lines < 1 || r->height < 1)
-		return 0;
-	rows = lines < (int)r->height ? lines : (int)r->height;
-	for (p = content, skip = lines - rows; skip > 0 && p; skip--) {
-		p = strchr(p, '\n');
-		if (p)
-			p++;
+	if (!content || !*content || lines < 1)
+		lines = 0;
+	rows = lines + st->block_nlines;
+	if (rows > (int)r->height)
+		rows = (int)r->height;
+	skip = lines + st->block_nlines - rows;
+	tail = lines - skip > 0 ? lines - skip : 0;
+	y = (int)r->row;
+	if (tail > 0) {
+		for (p = content, i = skip; i > 0 && p; i--) {
+			p = strchr(p, '\n');
+			if (p)
+				p++;
+		}
+		if (p) {
+			n = page_cells_text(pg, pg->cells, pg->cells_rows,
+					    pg->cells_cols, y, r->col, r->width,
+					    tail, p, strlen(p));
+			if (n < 0)
+				return -1;
+		}
+		y += tail;
 	}
-	if (!p)
-		return 0;
-	n = page_cells_text(pg, pg->cells, pg->cells_rows, pg->cells_cols,
-			    (int)r->row, r->col, r->width, rows, p,
-			    strlen(p));
-	return n < 0 ? -1 : 0;
+	for (i = skip > lines ? skip - lines : 0; i < st->block_nlines &&
+	     y < (int)(r->row + r->height); i++, y++) {
+		n = page_cells_text(pg, pg->cells, pg->cells_rows,
+				    pg->cells_cols, y, r->col, r->width, 1,
+				    st->block_lines[i],
+				    strlen(st->block_lines[i]));
+		if (n < 0)
+			return -1;
+	}
+	return 0;
 }
 
 static int page_canvas(struct fyai_page *pg, struct fytim *ft,
@@ -2262,7 +2462,7 @@ static int page_canvas(struct fyai_page *pg, struct fytim *ft,
 		if (fr[i].kind != FYMD_REGION_SLOT)
 			continue;
 		if (!strcmp(fr[i].id, "tail")) {
-			rc = page_tail_draw(pg, ft, &fr[i]);
+			rc = page_tail_draw(pg, ft, st, &fr[i]);
 			fyai_error_check(ctx, !rc, err_out,
 					 "cannot draw the tail into cells");
 		}
@@ -2285,6 +2485,13 @@ static int page_canvas(struct fyai_page *pg, struct fytim *ft,
 			fyai_error_check(ctx, !rc, err_out,
 					 "cannot draw the popup into cells");
 		}
+		if (!strcmp(fr[i].id, "preview") && st->ask &&
+		    st->ask->preview) {
+			rc = page_lines_draw(pg, st->ask->preview,
+					     st->ask->npreview, &fr[i]);
+			fyai_error_check(ctx, !rc, err_out,
+					 "cannot draw the preview into cells");
+		}
 		if (!strcmp(fr[i].id, "note") && st->note_lines) {
 			rc = page_lines_draw(pg, st->note_lines,
 					     st->note_nlines, &fr[i]);
@@ -2301,11 +2508,10 @@ static int page_canvas(struct fyai_page *pg, struct fytim *ft,
 		t = page_tile_of(st, fr[i].id, "screen");
 		if (t && t->surface) {
 			rc = page_screen_draw(pg, t, &fr[i], truecolor,
-					      st->tile_bar ?
 					      fy_sprintfa("\x1b[2m%s",
 							  st->band_chrome ?
-							  st->band_chrome : "") :
-					      NULL, page_control_sgr(st));
+							  st->band_chrome : ""),
+					      page_control_sgr(st));
 			fyai_error_check(ctx, !rc, err_out,
 					 "cannot draw the screen of tile %u into cells",
 					 t->slot);
@@ -2315,7 +2521,8 @@ static int page_canvas(struct fyai_page *pg, struct fytim *ft,
 			rc = page_text_draw(pg, t, &fr[i],
 					    fy_sprintfa("\x1b[2m%s",
 							st->band_chrome ?
-							st->band_chrome : ""));
+							st->band_chrome : ""),
+					    page_control_sgr(st));
 			fyai_error_check(ctx, !rc, err_out,
 					 "cannot draw the text of tile %u into cells",
 					 t->slot);
@@ -2454,13 +2661,18 @@ int fyai_page_publish(struct fyai_page *pg, struct fytim *ft,
 		fyai_error_check(ctx, !rc, err_out,
 				 "cannot build the rows of the page");
 	}
+	pg->last_tail_height = 0;
 	for (i = 0; i < count && n < FYTIM_PAGE_REGIONS_MAX; i++) {
 		/* A mark names an area of a review; it has no cells. */
 		if (fr[i].kind == FYMD_REGION_MARK)
 			continue;
 		/* The tail is drawn on the canvas, on its ground. */
-		if (fr[i].kind != FYMD_REGION_ACT && !strcmp(fr[i].id, "tail"))
+		if (fr[i].kind != FYMD_REGION_ACT && !strcmp(fr[i].id, "tail")) {
+			pg->last_tail_row = (int)fr[i].row;
+			pg->last_tail_col = fr[i].col;
+			pg->last_tail_height = (int)fr[i].height;
 			continue;
+		}
 		if (fr[i].kind != FYMD_REGION_ACT &&
 		    (!strncmp(fr[i].id, "tile:", 5) ||
 		     !strncmp(fr[i].id, "screen:", 7) ||
@@ -2504,9 +2716,14 @@ int fyai_page_publish(struct fyai_page *pg, struct fytim *ft,
 			fyai_error_check(ctx, !rc, err_out,
 					 "cannot build the actions of tile %u", t->slot);
 		}
-		t = fr[i].kind == FYMD_REGION_ACT || !st->tile_bar ? NULL :
+		t = fr[i].kind == FYMD_REGION_ACT ? NULL :
 		    page_tile_of(st, fr[i].id, "screen");
-		if (t && t->surface) {
+		if (!t && fr[i].kind != FYMD_REGION_ACT) {
+			t = page_tile_of(st, fr[i].id, "text");
+			if (t && !t->band)
+				t = NULL;
+		}
+		if (t && (t->surface || t->overflow)) {
 			rc = page_bar_acts(pg, t, &fr[i], regions, &n);
 			fyai_error_check(ctx, !rc, err_out,
 					 "cannot build the scroll bar of tile %u",

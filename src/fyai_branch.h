@@ -57,10 +57,12 @@ struct fyai_branch {
 	fy_generic op;		/* the operation that made this entry */
 	fy_generic from;	/* the previous name, on a rename */
 	fy_generic prev;	/* previous entry of this branch (its ref log) */
+	fy_generic project;	/* reference to the project state, if recorded */
 	fy_generic store;	/* the store mapping itself */
 	/* Members of the store. */
 	fy_generic config;	/* this branch's configuration document */
 	fy_generic catalog;	/* this branch's provider and model catalogue */
+	fy_generic todos;	/* this branch's todo list, a sequence */
 	fy_generic created;	/* first publication of the branch */
 	fy_generic cwd;		/* directory the branch started in */
 	fy_generic description;	/* free-text purpose of the branch */
@@ -106,6 +108,7 @@ const char *fyai_branch_cwd(const struct fyai_branch *b);
 #define FYAI_BRANCH_OP_DESCRIBE	"describe"
 #define FYAI_BRANCH_OP_REBASE	"rebase"
 #define FYAI_BRANCH_OP_MERGE	"merge"
+#define FYAI_BRANCH_OP_TODO	"todo"
 #define FYAI_BRANCH_OP_COMMAND	"command"
 
 /* Set the operation and previous name for the next publish. */
@@ -131,6 +134,9 @@ int fyai_branch_session_name(fy_generic branches, char *buf, size_t size);
 
 /* The marker that makes a branch component a sub-agent branch. */
 #define FYAI_BRANCH_AGENT_PREFIX "agent:"
+
+/* Whether a component of @name is a sub-agent marker: the name is in their namespace. */
+bool fyai_branch_name_has_agent(const char *name);
 
 
 /* Return true if @name is @parent or is below @parent. */

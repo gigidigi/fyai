@@ -14,6 +14,9 @@ Do not edit; run `ninja docs-commands` to write it again.
 | `-m`, `--model MODEL` | model, optionally as provider/model |
 | `-b`, `--branch BRANCH` | work on this branch (else $FYAI_BRANCH, else HEAD) |
 | `--root HANDLE` | read one exact state by root handle (read-only) |
+| `--view-project DIR` | use this project root in an internal view child |
+| `--view-scratch DIR` | use this scratch directory in an internal view child |
+| `--view-arena-fd FD` | use the arena behind this inherited descriptor in an internal view child |
 | `--set KEY=VALUE` | set a configuration key for this run and store it |
 | `--get KEY` | print a configuration key as one-line flow |
 | `--delete KEY` | delete a configuration key |
@@ -65,11 +68,48 @@ describe the command that creates a branch
 explain the reference syntax
 
 
+## fyai render
+
+render Markdown in the terminal
+
+**Usage:** `fyai render [FILE]`
+
+Read Markdown from a file, or from standard input when no file is
+given or the file is `-`, and write it with the renderer of fyai: the
+theme, the tables, the fenced code, and the `mermaid` diagrams of the
+display configuration. With `display/markdown` off, the source is
+written as it is.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `FILE` | the Markdown file (default standard input) |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    fyai render README.md
+
+show a file as the conversation shows an answer
+
+    fyai render - <<< '# Title'
+
+render Markdown from standard input
+
+
 ## fyai branch
 
 list, create, and manage branches
 
-**Usage:** `fyai branch {list|new|delete|rename|show|describe} ...`
+**Usage:** `fyai branch {delete|describe|list|new|rename|show} ...`
 
 A branch holds one conversation and the configuration that goes with
 it. See `help refs` for the reference syntax.
@@ -79,12 +119,12 @@ it. See `help refs` for the reference syntax.
 
 | Command | Description |
 | --- | --- |
+| `delete`, `rm` | delete a branch |
+| `describe` | set the description of a branch |
 | `list` | list the branches |
 | `new`, `create` | create a branch |
-| `delete`, `rm` | delete a branch |
 | `rename`, `mv` | rename a branch |
 | `show` | show the details of a branch |
-| `describe` | set the description of a branch |
 
 With no command, `list` runs.
 
@@ -468,12 +508,17 @@ Run a shell, or COMMAND, in a full-screen terminal that fyai draws.
 
 move the head of the branch to a reference
 
-**Usage:** `fyai reset REF`
+**Usage:** `fyai reset [--force] REF`
 
 **Aliases:** `rewind`
 
 Move the head of the current branch to REF. The previous head stays
-in the ref log as `<branch>@{1}`.
+in the ref log as `<branch>@{1}`. With view/track_project the project
+files also go back to the state that REF recorded. A path that changed
+since the state of the head was recorded is a conflict: nothing is
+changed and the reset fails. `--force` takes the recorded state over
+such paths, and records the project as it is first, so that a reset to
+`<branch>@{1}` undoes the reset.
 
 
 ### Arguments
@@ -486,6 +531,7 @@ in the ref log as `<branch>@{1}`.
 
 | Option | Description |
 | --- | --- |
+| `--force` | take the recorded project state over paths that changed; default false |
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
@@ -742,12 +788,20 @@ in the order in which they happened.
 
 ## fyai gc
 
-collect the garbage of the arena
+collect the garbage of the arena and of the project storage
 
-**Usage:** `fyai gc [--keep-reflogs N]`
+**Usage:** `fyai gc [--keep-reflogs N] [--tips] [--grace SECONDS]`
 
 Compact the arena. `--keep-reflogs N` also cuts the ref log to the
-last N entries.
+last N entries; `--tips` is `--keep-reflogs 1`: each branch keeps only
+its tip, with the project state and the views of the tip, and the
+older entries and everything only they reached go. Then remove, from the project storage (`.fyai` of a
+project), the manifests, the blobs and the view trees that no branch
+reaches: the project states of the ref log, the views that a branch
+stores, and the base of a delta manifest. A file younger than `--grace`
+seconds stays, because a capture that made it can still record it, and so
+does a storage that a command holds. A removed view or a ref-log entry
+that was cut frees its files at the next gc.
 
 
 ### Options
@@ -755,6 +809,8 @@ last N entries.
 | Option | Description |
 | --- | --- |
 | `--keep-reflogs N` | keep only the last N ref-log entries |
+| `--tips` | keep only the tip of each branch and the views it stores, and drop every ref log; default false |
+| `--grace SECONDS` | keep the files of the project storage that are younger than this many seconds; default 3600 |
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
@@ -789,29 +845,31 @@ that ref-log entry.
 
 control the trace logs
 
-**Usage:** `fyai log [TARGET] {show|start|stop|clear|view} ...`
+**Usage:** `fyai log [TARGET] {clear|show|start|stop|view} ...`
 
 **Aliases:** `logging`
 
 Show, start, stop, clear, or view the logs under .fyai/logs. TARGET is
-wire, stream, conversation, mcp, or all.
+wire, stream, conversation, mcp, transport, or all. The logs never hold a
+credential: the values of key headers, bearer tokens, and the key itself
+are whited out when they are written.
 
 
 ### Commands
 
 | Command | Description |
 | --- | --- |
+| `clear` | empty the log |
 | `show` | show which logs are on |
 | `start`, `on` | start logging |
 | `stop`, `off` | stop logging |
-| `clear` | empty the log |
 | `view` | view the log |
 
 ### Arguments
 
 | Argument | Description |
 | --- | --- |
-| `TARGET` | the log (wire, stream, conversation, mcp, all); default all |
+| `TARGET` | the log (wire, stream, conversation, mcp, transport, all); default all |
 
 With no command, `show` runs.
 
@@ -898,7 +956,7 @@ Open the log in a viewer.
 
 manage secrets without showing their values
 
-**Usage:** `fyai secret {status|set|delete} ...`
+**Usage:** `fyai secret {delete|set|status} ...`
 
 Manage logical secrets in the machine-local secret store. A provider
 API key is conventionally named `api-key/<provider>`. A value is read
@@ -910,9 +968,9 @@ never from the command line.
 
 | Command | Description |
 | --- | --- |
-| `status` | show the backend, or whether a secret exists |
-| `set` | store a secret |
 | `delete` | remove a secret |
+| `set` | store a secret |
+| `status` | show the backend, or whether a secret exists |
 
 With no command, `status` runs.
 
@@ -1011,7 +1069,7 @@ summary.
 
 inspect or change the configuration of the branch
 
-**Usage:** `fyai config {show|effective|get|set|delete|import|export|edit|validate|schema|describe} ...`
+**Usage:** `fyai config {delete|describe|edit|effective|export|get|import|reset|schema|set|show|undo|validate} ...`
 
 The configuration is a document stored with each branch. Paths are
 slash-separated keys, and values are YAML flow documents; see
@@ -1022,17 +1080,19 @@ slash-separated keys, and values are YAML flow documents; see
 
 | Command | Description |
 | --- | --- |
-| `show` | write the stored configuration |
-| `effective` | write the merged configuration |
-| `get` | write the value of a key |
-| `set` | set the value of a key |
 | `delete` | remove a key |
-| `import` | store a configuration file |
-| `export` | write the configuration to a file |
-| `edit` | edit the configuration in an editor |
-| `validate` | check the configuration against the schema |
-| `schema` | write the configuration schema |
 | `describe` | describe the keys of the configuration |
+| `edit` | edit the configuration in an editor |
+| `effective` | write the merged configuration |
+| `export` | write the configuration to a file |
+| `get` | write the value of a key |
+| `import` | store a configuration file |
+| `reset` | return to the built-in configuration |
+| `schema` | write the configuration schema |
+| `set` | set the value of a key |
+| `show` | write the stored configuration |
+| `undo` | return to an earlier configuration |
+| `validate` | check the configuration against the schema |
 
 With no command, `show` runs.
 
@@ -1167,6 +1227,50 @@ the configuration of the branch.
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
+## fyai config reset
+
+return to the built-in configuration
+
+**Usage:** `fyai config reset`
+
+Store an empty configuration on the branch, so every key takes
+its built-in default, and drop the settings that this session
+changed. The previous configuration stays in the ref log;
+`config undo` returns to it.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai config undo
+
+return to an earlier configuration
+
+**Usage:** `fyai config undo [N]`
+
+Store the configuration that the branch had N changes ago, 1 by
+default. A ref-log entry that moved only the conversation is not
+a change. The undo is a change itself: a second `config undo`
+returns to where the first started.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `N` | the configuration changes to go back; default 1 |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
 ## fyai config export
 
 write the configuration to a file
@@ -1261,11 +1365,461 @@ document.
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
+## fyai view
+
+create and enter separate project filesystem views
+
+**Usage:** `fyai view {apply|cp|create|diff|enter|list|ls|mount|remove|rm|show|sync|unmount|update} ...`
+
+Capture a project into immutable CAS objects and use a separate writable
+OverlayFS view. Commands in a view do not apply changes to the host.
+The initial Linux implementation materializes an ordinary-file baseline.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `apply` | apply the changes of a view to the project |
+| `cp` | copy files between the project and a view |
+| `create` | capture a project and create a named view |
+| `diff` | compare recorded filesystem view snapshots |
+| `enter` | enter a private filesystem view |
+| `list` | list the filesystem views of the active branch |
+| `ls` | list the files of a view |
+| `mount` | mount a view for read-only inspection |
+| `remove` | remove a named filesystem view |
+| `rm` | remove files in a view |
+| `show` | inspect a named filesystem view |
+| `sync` | force a filesystem view to persistent storage |
+| `unmount` | unmount the recorded inspection view |
+| `update` | replace a view with a fresh host snapshot |
+
+With no command, `list` runs.
+
+## fyai view create
+
+capture a project and create a named view
+
+**Usage:** `fyai view create [--durability POLICY] [--copy-git-objects] [--debug] [--quiet] [--verify] NAME [PROJECT]`
+
+Capture PROJECT, excluding its reserved .fyai directory, and record
+a named view on the active branch. Reject unsupported metadata and
+observed concurrent changes. No provider credential is required.
+The names that start with agent/ belong to the views of sub-agents;
+a view cannot be created there.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the separate view |
+| `PROJECT` | the project directory to capture; default . |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--durability POLICY` | select lazy persistence or a durable filesystem barrier; default from view/durability (lazy, durable) |
+| `--copy-git-objects` | copy Git object bytes instead of borrowing host inodes; default false |
+| `--debug` | show capture progress and the final summary; default false |
+| `--quiet` | suppress debug progress and the summary unless an output format is requested; default false |
+| `--verify` | independently verify copied bytes and hashes serially before publication; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view list
+
+list the filesystem views of the active branch
+
+**Usage:** `fyai view list [--full]`
+
+List view names, projects, and states; use --full for stored details.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--full` | show complete stored view records; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view show
+
+inspect a named filesystem view
+
+**Usage:** `fyai view show NAME`
+
+Show a view's baseline and latest recorded result identity.
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the view to inspect |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view update
+
+replace a view with a fresh host snapshot
+
+**Usage:** `fyai view update [--durability POLICY] [--copy-git-objects] [--debug] [--quiet] [--verify] NAME`
+
+Capture the host project again and replace the named view with a fresh
+baseline and empty upper. Discard the view's changes without changing
+the host project. Refuse the update while the view is in use.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the view to replace |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--durability POLICY` | select lazy persistence or a durable filesystem barrier; update inherits the view policy (lazy, durable) |
+| `--copy-git-objects` | copy Git object bytes instead of borrowing host inodes; default false |
+| `--debug` | show capture progress and the final summary; default false |
+| `--quiet` | suppress debug progress and the summary unless an output format is requested; default false |
+| `--verify` | independently verify copied bytes and hashes serially before publication; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view diff
+
+compare recorded filesystem view snapshots
+
+**Usage:** `fyai view diff [-u] [--stat] NAME [OTHER]`
+
+Compare NAME's baseline and recorded result, or the recorded results
+of NAME and OTHER. Name a view as NAME:PATH to compare only that path
+and what is beneath it, in the way that `view ls`, `view cp` and
+`view rm` name a path. The path need not exist on both sides: a file
+that was added or removed is selected too. NAME and OTHER can also be a reference such as
+HEAD~1 or main@{2}: it stands for the project state that its ref-log
+entry recorded (see view/track_project). A reference alone is compared
+with the head of the branch. Skip .git and .fyai. Show a unified patch, including
+binary changes, or a changed-path list with --stat. Output formats
+return structured content and metadata changes with the patch.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the view or reference to compare |
+| `OTHER` | compare against the recorded result of this view or reference |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-u`, `--unified` | write unified rows, coloured on a terminal; default false |
+| `--stat` | list changed paths instead of emitting a unified patch; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view apply
+
+apply the changes of a view to the project
+
+**Usage:** `fyai view apply [--dry-run] [--base BASE] NAME [PATH...]`
+
+Take the changes that NAME recorded, from its baseline to its result,
+and write them into the project. NAME can be a reference such as
+main@{2}, which stands for the project state that its ref-log entry
+recorded; the change is then from BASE, or from the head of the
+branch, to that state. Name BASE before NAME. A path that the project still has
+as the baseline had it takes the result. A path that already equals
+the result is left as it is. A path that the project and the view
+changed differently is a conflict: it is reported and not changed.
+Name paths to apply only those and what is beneath them. Skip .git
+and .fyai. A written file gets the time of the write. The view stays
+unchanged; update it to compare again.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the view or reference whose changes to apply |
+| `PATH` | the paths to apply, relative to the project; omit to apply every change |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--dry-run` | report what would change and write nothing; default false |
+| `--base BASE` | the view or reference that the change starts from |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view remove
+
+remove a named filesystem view
+
+**Usage:** `fyai view remove NAME`
+
+Remove the named view from the active branch. Keep CAS objects and
+cached runtime files for retained history and garbage collection.
+Refuse removal while a command is using the view or it is mounted.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the filesystem view to remove |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view ls
+
+list the files of a view
+
+**Usage:** `fyai view ls [-a] NAME[:PATH]...`
+
+List what a view holds, from the result that it recorded: nothing is
+mounted. Name a path as NAME:PATH, in the way that scp names a file of a
+host. A directory lists its entries by name, in the order of ls, and a
+file lists itself; NAME, NAME:/ and NAME:. are the root of the view. As
+ls does, a name that starts with a dot is left out unless --all is given,
+which also lists . and .. . A path that the view does not have is an
+error.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME[:PATH]` | the views and paths to list, as NAME or NAME:PATH |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-a`, `--all` | list the names that start with a dot, and . and ..; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    fyai view ls session:src
+
+list the directory src of the view session
+
+    fyai view ls -a session:/
+
+list the root of the view session, the names with a dot included
+
+
+## fyai view rm
+
+remove files in a view
+
+**Usage:** `fyai view rm [-f] NAME:PATH...`
+
+Remove paths, and what they hold, in a view. Name each as NAME:PATH. The
+view records the result, so `view apply` removes the same paths from the
+project. The project is not changed. A path that the view does not have
+is an error, unless --force. The names .git and .fyai are never removed.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME:PATH` | the paths to remove, each as NAME:PATH |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-f`, `--force` | ignore a path that the view does not have; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    fyai view rm session:build session:doc/old.md
+
+remove a directory and a file of the view session
+
+
+## fyai view cp
+
+copy files between the project and a view
+
+**Usage:** `fyai view cp SOURCE... DESTINATION...`
+
+Copy paths between the project and a view. Name the view side as NAME:PATH,
+in the way that scp names a file of a host; the other side is a path of the
+project, whatever the current directory is. The sources are all of the
+project, or all of one view, and the destination is the other. A directory
+is copied with what it holds, and a path that exists is replaced. A
+destination that ends in a slash, or is . (the top of the project or of the
+view), is a directory that takes the sources by their names; any other
+destination is the new name of one source. Copying
+into a view records the result there, and the project is not changed.
+Copying to the project replaces its files with no check of what they
+held; `view apply` is the copy that compares them. Regular files,
+directories and symbolic links are copied, and the names .git and .fyai
+are not. A path that begins with a view name and a colon, but is a path
+of the project, is written with a leading ./
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `SOURCE... DESTINATION` | the sources, then the destination |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    fyai view cp src/main.c session:src/
+
+put the file of the project in the directory src of the view
+
+    fyai view cp session:src/main.c src/main.c
+
+replace the file of the project with the one of the view
+
+    fyai view cp session:notes.txt .
+
+copy the file of the view to the top of the project
+
+
+## fyai view sync
+
+force a filesystem view to persistent storage
+
+**Usage:** `fyai view sync NAME`
+
+Flush the view's CAS objects and backing files before recording that
+its current snapshot is synchronized. Keep its configured durability
+policy. Refuse synchronization while a command is using the view.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the filesystem view to synchronize |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view mount
+
+mount a view for read-only inspection
+
+**Usage:** `fyai view mount NAME PATH`
+
+Mount the named view at an empty directory for inspection and comparison.
+The read-only mount persists in the current mount namespace until unmount.
+Mount privileges are required; rootless inspection can use an explicitly
+started unshare -Urnm sh session. Unmount before entering or updating.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the view to inspect |
+| `PATH` | an empty mount directory, created when absent |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view unmount
+
+unmount the recorded inspection view
+
+**Usage:** `fyai view unmount NAME`
+
+Verify the recorded namespace, mount IDs, and source before releasing
+the inspection mount. Busy mounts are retained. Run in the namespace
+that owns the mount and unmount before leaving a rootless inspection shell.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the mounted view to release |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai view enter
+
+enter a private filesystem view
+
+**Usage:** `fyai view enter [--verify] [--lockdown] NAME [COMMAND...]`
+
+Mount the named view in private namespaces and start a shell in its project
+directory, or execute the remaining command arguments directly. Standard
+input, output, and error are inherited on the CLI. In a session, open
+the command or shell in a terminal tile. Record the result in CAS on exit.
+The host project stays separate. This operation requires Linux user
+namespaces, OverlayFS, and Landlock.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the view to enter |
+| `COMMAND` | the command and arguments to execute; omit to start a shell |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--verify` | independently verify copied bytes and hashes serially before publication; default false |
+| `--lockdown` | confine the command as a tool of a session under /session lockdown, for this run only; default false |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
 ## fyai sandbox
 
 show or set the stored sandbox policy
 
-**Usage:** `fyai sandbox {show|on|off|edit} ...`
+**Usage:** `fyai sandbox {edit|off|on|show} ...`
 
 Show or change the `sandbox` key of the configuration. `on` stores a
 policy that denies secrets and ~/.ssh and allows port 443; `edit`
@@ -1277,10 +1831,10 @@ of the session instead.
 
 | Command | Description |
 | --- | --- |
-| `show`, `get` | write the stored sandbox value |
-| `on`, `enable` | store the default sandbox policy |
-| `off`, `disable` | store no sandbox |
 | `edit` | edit the configuration in an editor |
+| `off`, `disable` | store no sandbox |
+| `on`, `enable` | store the default sandbox policy |
+| `show`, `get` | write the stored sandbox value |
 
 With no command, `show` runs.
 
@@ -1356,7 +1910,7 @@ Edit the configuration with $VISUAL or $EDITOR.
 
 inspect or change the model catalogue of the branch
 
-**Usage:** `fyai catalog {show|list|tools|get|set|delete|import|export|edit|validate|schema|reset|update} ...`
+**Usage:** `fyai catalog {delete|edit|export|get|import|list|reset|schema|set|show|tools|update|validate} ...`
 
 The catalogue lists the providers, their endpoints, and the models
 they offer. Each branch owns its catalogue. A path is slash-separated;
@@ -1368,19 +1922,19 @@ an item of a list is named by its name, such as
 
 | Command | Description |
 | --- | --- |
-| `show` | summarize the catalogue |
-| `list` | list the models or the providers |
-| `tools` | list the tools of a coding agent |
-| `get` | write the value at a path |
-| `set` | set the value at a path |
 | `delete` | remove the value at a path |
-| `import` | store a catalogue file |
-| `export` | write the catalogue to a file |
 | `edit` | edit the catalogue in an editor |
-| `validate` | check the catalogue against the schema |
-| `schema` | write the catalogue schema |
+| `export` | write the catalogue to a file |
+| `get` | write the value at a path |
+| `import` | store a catalogue file |
+| `list` | list the models or the providers |
 | `reset` | return to the embedded catalogue |
+| `schema` | write the catalogue schema |
+| `set` | set the value at a path |
+| `show` | summarize the catalogue |
+| `tools` | list the tools of a coding agent |
 | `update` | update the catalogue from the providers |
+| `validate` | check the catalogue against the schema |
 
 With no command, `show` runs.
 
@@ -1692,7 +2246,7 @@ write the messages as JSON Lines
 
 manage the subscription login of a provider
 
-**Usage:** `fyai auth [PROVIDER] {status|info|usage|login|logout} ...`
+**Usage:** `fyai auth [PROVIDER] {accounts|info|login|logout|status|usage} ...`
 
 Manage the machine-local ChatGPT subscription credentials. PROVIDER
 names the subscription provider; only `openai` is supported.
@@ -1702,11 +2256,12 @@ names the subscription provider; only `openai` is supported.
 
 | Command | Description |
 | --- | --- |
-| `status` | show the login and the health of the credentials |
+| `accounts` | list saved ChatGPT registrations |
 | `info` | show the subscription and the account |
-| `usage` | show the live limits and credits |
 | `login` | sign in to the subscription |
 | `logout` | sign out and remove the credentials |
+| `status` | show the login and the health of the credentials |
+| `usage` | show recorded usage and subscription settings |
 
 ### Arguments
 
@@ -1750,11 +2305,11 @@ Show the details of the subscription and the account.
 
 ## fyai auth usage
 
-show the live limits and credits
+show recorded usage and subscription settings
 
 **Usage:** `fyai auth usage`
 
-Fetch and show the live limits and credits of the subscription.
+Show selected-conversation token totals and the ChatGPT settings link for account limits and credit permissions.
 
 ### Options
 
@@ -1767,21 +2322,39 @@ Fetch and show the live limits and credits of the subscription.
 
 sign in to the subscription
 
-**Usage:** `fyai auth login [--device-code] [--no-browser] [--manual]`
+**Usage:** `fyai auth login [--device-code] [--account CLIENT_ID] [--new-account] [--no-browser] [--manual]`
 
-Sign in with the browser and a loopback callback. `--device-code`
-uses the device-code flow, `--no-browser` writes the URL and does
-not start a browser, and `--manual` reads a pasted redirect URL,
-for a browser on another machine. `^C` or Escape cancels.
+Register fyai and authorize ChatGPT plan usage with a browser and
+a loopback callback. Reuse the active registration, select one with
+`--account`, or add one with `--new-account`. `--no-browser` writes
+the URL; `--manual` reads a complete pasted redirect URL. Device-code
+registration is not supported. `^C` or Escape cancels.
 
 
 ### Options
 
 | Option | Description |
 | --- | --- |
-| `--device-code` | use the headless device-code flow |
+| `--device-code` | reject the unsupported legacy device-code flow |
+| `--account CLIENT_ID` | reuse the issued client ID of a saved account |
+| `--new-account` | register another ChatGPT account or workspace |
 | `--no-browser` | write the URL and start no browser |
-| `--manual` | paste the redirect URL back |
+| `--manual` | paste the complete redirect URL back without a local browser |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai auth accounts
+
+list saved ChatGPT registrations
+
+**Usage:** `fyai auth accounts`
+
+List saved accounts and workspace registrations without tokens.
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
@@ -1792,7 +2365,7 @@ sign out and remove the credentials
 **Usage:** `fyai auth logout`
 
 Revoke the login when the provider allows it, and remove the local
-credentials.
+tokens. Keep the client registration and host ID for later sign-in.
 
 
 ### Options
@@ -1936,6 +2509,58 @@ load as display/page does.
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
+## fyai todo
+
+show or clear the todo list of the branch
+
+**Usage:** `fyai todo {clear|show} ...`
+
+The todo list is branch state, as the configuration is: `todo_write`
+replaces it, `todo` shows it, and `todo clear` drops it. A sub-agent
+branch inherits a copy of the list of its parent.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `clear` | drop the todo list |
+| `show`, `list` | show the todo list |
+
+With no command, `show` runs.
+
+## fyai todo show
+
+show the todo list
+
+**Usage:** `fyai todo show`
+
+**Aliases:** `list`
+
+Show the todo list of the branch.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai todo clear
+
+drop the todo list
+
+**Usage:** `fyai todo clear`
+
+Drop the todo list of the branch.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
 ## fyai desktop
 
 serve a local desktop session
@@ -1981,6 +2606,31 @@ initialize, agent/run, and shutdown. See doc/agent-protocol.md.
 | Option | Description |
 | --- | --- |
 | `--rpc` | serve the sub-agent control protocol |
+| `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
+| `-h`, `--help` | show this help |
+
+## fyai transport
+
+serve model requests for isolated agents
+
+**Usage:** `fyai transport --control-fd FD [--arena DIR]`
+
+Run the credential transport. It holds the provider credentials and sends
+the requests of agents that hold none. A supervisor starts it, and it
+takes its orders on a control channel: a socket that it inherits on
+descriptor `--control-fd`, framed as one JSON message for each datagram.
+The protocol is in doc/agent-transport-isolation-sdd.md. It ends when the
+channel closes. It sets itself not dumpable, closes every other
+descriptor, and leaves the terminal session. A person does not normally run
+it.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--control-fd FD` | the descriptor of the control channel |
+| `--arena DIR` | the arena whose logs directory receives the transport log |
 | `--output FORMAT` | write the result as markdown, json, or yaml; see `help output` |
 | `-h`, `--help` | show this help |
 
@@ -2046,7 +2696,7 @@ explain the reference syntax
 
 list, create, and manage branches
 
-**Usage:** `/branch {list|new|delete|rename|show|describe|switch|attach|detach} ...`
+**Usage:** `/branch {attach|delete|describe|detach|list|new|rename|show|switch} ...`
 
 A branch holds one conversation and the configuration that goes with
 it. See `help refs` for the reference syntax.
@@ -2056,15 +2706,15 @@ it. See `help refs` for the reference syntax.
 
 | Command | Description |
 | --- | --- |
+| `attach` | show the screen of a live sub-agent |
+| `delete`, `rm` | delete a branch |
+| `describe` | set the description of a branch |
+| `detach` | leave the screen of a sub-agent |
 | `list` | list the branches |
 | `new`, `create` | create a branch |
-| `delete`, `rm` | delete a branch |
 | `rename`, `mv` | rename a branch |
 | `show` | show the details of a branch |
-| `describe` | set the description of a branch |
 | `switch` | switch the session to a branch |
-| `attach` | show the screen of a live sub-agent |
-| `detach` | leave the screen of a sub-agent |
 
 With no command, `list` runs.
 
@@ -2340,12 +2990,17 @@ one provider.
 
 move the head of the branch to a reference
 
-**Usage:** `/reset REF`
+**Usage:** `/reset [--force] REF`
 
 **Aliases:** `rewind`
 
 Move the head of the current branch to REF. The previous head stays
-in the ref log as `<branch>@{1}`.
+in the ref log as `<branch>@{1}`. With view/track_project the project
+files also go back to the state that REF recorded. A path that changed
+since the state of the head was recorded is a conflict: nothing is
+changed and the reset fails. `--force` takes the recorded state over
+such paths, and records the project as it is first, so that a reset to
+`<branch>@{1}` undoes the reset.
 
 
 ### Arguments
@@ -2358,6 +3013,7 @@ in the ref log as `<branch>@{1}`.
 
 | Option | Description |
 | --- | --- |
+| `--force` | take the recorded project state over paths that changed; default false |
 | `-h`, `--help` | show this help |
 
 ### Examples
@@ -2494,29 +3150,31 @@ and `HEAD`: the change that the last operation made.
 
 control the trace logs
 
-**Usage:** `/log [TARGET] {show|start|stop|clear|view} ...`
+**Usage:** `/log [TARGET] {clear|show|start|stop|view} ...`
 
 **Aliases:** `logging`
 
 Show, start, stop, clear, or view the logs under .fyai/logs. TARGET is
-wire, stream, conversation, mcp, or all.
+wire, stream, conversation, mcp, transport, or all. The logs never hold a
+credential: the values of key headers, bearer tokens, and the key itself
+are whited out when they are written.
 
 
 ### Commands
 
 | Command | Description |
 | --- | --- |
+| `clear` | empty the log |
 | `show` | show which logs are on |
 | `start`, `on` | start logging |
 | `stop`, `off` | stop logging |
-| `clear` | empty the log |
 | `view` | view the log |
 
 ### Arguments
 
 | Argument | Description |
 | --- | --- |
-| `TARGET` | the log (wire, stream, conversation, mcp, all); default all |
+| `TARGET` | the log (wire, stream, conversation, mcp, transport, all); default all |
 
 With no command, `show` runs.
 
@@ -2598,7 +3256,7 @@ Open the log in a viewer.
 
 manage secrets without showing their values
 
-**Usage:** `/secret {status|set|delete} ...`
+**Usage:** `/secret {delete|set|status} ...`
 
 Manage logical secrets in the machine-local secret store. A provider
 API key is conventionally named `api-key/<provider>`. A value is read
@@ -2610,9 +3268,9 @@ never from the command line.
 
 | Command | Description |
 | --- | --- |
-| `status` | show the backend, or whether a secret exists |
-| `set` | store a secret |
 | `delete` | remove a secret |
+| `set` | store a secret |
+| `status` | show the backend, or whether a secret exists |
 
 With no command, `status` runs.
 
@@ -2706,7 +3364,7 @@ summary.
 
 inspect or change the configuration of the branch
 
-**Usage:** `/config {show|effective|get|set|delete|import|export|edit|validate|schema|describe} ...`
+**Usage:** `/config {delete|describe|edit|effective|export|get|import|reset|schema|set|show|undo|validate} ...`
 
 The configuration is a document stored with each branch. Paths are
 slash-separated keys, and values are YAML flow documents; see
@@ -2717,17 +3375,19 @@ slash-separated keys, and values are YAML flow documents; see
 
 | Command | Description |
 | --- | --- |
-| `show` | write the stored configuration |
-| `effective` | write the merged configuration |
-| `get` | write the value of a key |
-| `set` | set the value of a key |
 | `delete` | remove a key |
-| `import` | store a configuration file |
-| `export` | write the configuration to a file |
-| `edit` | edit the configuration in an editor |
-| `validate` | check the configuration against the schema |
-| `schema` | write the configuration schema |
 | `describe` | describe the keys of the configuration |
+| `edit` | edit the configuration in an editor |
+| `effective` | write the merged configuration |
+| `export` | write the configuration to a file |
+| `get` | write the value of a key |
+| `import` | store a configuration file |
+| `reset` | return to the built-in configuration |
+| `schema` | write the configuration schema |
+| `set` | set the value of a key |
+| `show` | write the stored configuration |
+| `undo` | return to an earlier configuration |
+| `validate` | check the configuration against the schema |
 
 With no command, `show` runs.
 
@@ -2856,6 +3516,48 @@ the configuration of the branch.
 | --- | --- |
 | `-h`, `--help` | show this help |
 
+## /config reset
+
+return to the built-in configuration
+
+**Usage:** `/config reset`
+
+Store an empty configuration on the branch, so every key takes
+its built-in default, and drop the settings that this session
+changed. The previous configuration stays in the ref log;
+`config undo` returns to it.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /config undo
+
+return to an earlier configuration
+
+**Usage:** `/config undo [N]`
+
+Store the configuration that the branch had N changes ago, 1 by
+default. A ref-log entry that moved only the conversation is not
+a change. The undo is a change itself: a second `config undo`
+returns to where the first started.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `N` | the configuration changes to go back; default 1 |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
 ## /config export
 
 write the configuration to a file
@@ -2945,11 +3647,447 @@ document.
 | --- | --- |
 | `-h`, `--help` | show this help |
 
+## /view
+
+create and enter separate project filesystem views
+
+**Usage:** `/view {apply|cp|create|diff|enter|list|ls|mount|remove|rm|show|sync|unmount|update} ...`
+
+Capture a project into immutable CAS objects and use a separate writable
+OverlayFS view. Commands in a view do not apply changes to the host.
+The initial Linux implementation materializes an ordinary-file baseline.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `apply` | apply the changes of a view to the project |
+| `cp` | copy files between the project and a view |
+| `create` | capture a project and create a named view |
+| `diff` | compare recorded filesystem view snapshots |
+| `enter` | enter a private filesystem view |
+| `list` | list the filesystem views of the active branch |
+| `ls` | list the files of a view |
+| `mount` | mount a view for read-only inspection |
+| `remove` | remove a named filesystem view |
+| `rm` | remove files in a view |
+| `show` | inspect a named filesystem view |
+| `sync` | force a filesystem view to persistent storage |
+| `unmount` | unmount the recorded inspection view |
+| `update` | replace a view with a fresh host snapshot |
+
+With no command, `list` runs.
+
+## /view create
+
+capture a project and create a named view
+
+**Usage:** `/view create [--durability POLICY] [--copy-git-objects] [--debug] [--quiet] [--verify] NAME [PROJECT]`
+
+Capture PROJECT, excluding its reserved .fyai directory, and record
+a named view on the active branch. Reject unsupported metadata and
+observed concurrent changes. No provider credential is required.
+The names that start with agent/ belong to the views of sub-agents;
+a view cannot be created there.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the separate view |
+| `PROJECT` | the project directory to capture; default . |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--durability POLICY` | select lazy persistence or a durable filesystem barrier; default from view/durability (lazy, durable) |
+| `--copy-git-objects` | copy Git object bytes instead of borrowing host inodes; default false |
+| `--debug` | show capture progress and the final summary; default false |
+| `--quiet` | suppress debug progress and the summary unless an output format is requested; default false |
+| `--verify` | independently verify copied bytes and hashes serially before publication; default false |
+| `-h`, `--help` | show this help |
+
+## /view list
+
+list the filesystem views of the active branch
+
+**Usage:** `/view list [--full]`
+
+List view names, projects, and states; use --full for stored details.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--full` | show complete stored view records; default false |
+| `-h`, `--help` | show this help |
+
+## /view show
+
+inspect a named filesystem view
+
+**Usage:** `/view show NAME`
+
+Show a view's baseline and latest recorded result identity.
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the view to inspect |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /view update
+
+replace a view with a fresh host snapshot
+
+**Usage:** `/view update [--durability POLICY] [--copy-git-objects] [--debug] [--quiet] [--verify] NAME`
+
+Capture the host project again and replace the named view with a fresh
+baseline and empty upper. Discard the view's changes without changing
+the host project. Refuse the update while the view is in use.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the view to replace |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--durability POLICY` | select lazy persistence or a durable filesystem barrier; update inherits the view policy (lazy, durable) |
+| `--copy-git-objects` | copy Git object bytes instead of borrowing host inodes; default false |
+| `--debug` | show capture progress and the final summary; default false |
+| `--quiet` | suppress debug progress and the summary unless an output format is requested; default false |
+| `--verify` | independently verify copied bytes and hashes serially before publication; default false |
+| `-h`, `--help` | show this help |
+
+## /view diff
+
+compare recorded filesystem view snapshots
+
+**Usage:** `/view diff [-u] [--stat] NAME [OTHER]`
+
+Compare NAME's baseline and recorded result, or the recorded results
+of NAME and OTHER. Name a view as NAME:PATH to compare only that path
+and what is beneath it, in the way that `view ls`, `view cp` and
+`view rm` name a path. The path need not exist on both sides: a file
+that was added or removed is selected too. NAME and OTHER can also be a reference such as
+HEAD~1 or main@{2}: it stands for the project state that its ref-log
+entry recorded (see view/track_project). A reference alone is compared
+with the head of the branch. Skip .git and .fyai. Show a unified patch, including
+binary changes, or a changed-path list with --stat. Output formats
+return structured content and metadata changes with the patch.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the view or reference to compare |
+| `OTHER` | compare against the recorded result of this view or reference |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-u`, `--unified` | write unified rows, coloured on a terminal; default false |
+| `--stat` | list changed paths instead of emitting a unified patch; default false |
+| `-h`, `--help` | show this help |
+
+## /view apply
+
+apply the changes of a view to the project
+
+**Usage:** `/view apply [--dry-run] [--base BASE] NAME [PATH...]`
+
+Take the changes that NAME recorded, from its baseline to its result,
+and write them into the project. NAME can be a reference such as
+main@{2}, which stands for the project state that its ref-log entry
+recorded; the change is then from BASE, or from the head of the
+branch, to that state. Name BASE before NAME. A path that the project still has
+as the baseline had it takes the result. A path that already equals
+the result is left as it is. A path that the project and the view
+changed differently is a conflict: it is reported and not changed.
+Name paths to apply only those and what is beneath them. Skip .git
+and .fyai. A written file gets the time of the write. The view stays
+unchanged; update it to compare again.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the view or reference whose changes to apply |
+| `PATH` | the paths to apply, relative to the project; omit to apply every change |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--dry-run` | report what would change and write nothing; default false |
+| `--base BASE` | the view or reference that the change starts from |
+| `-h`, `--help` | show this help |
+
+## /view remove
+
+remove a named filesystem view
+
+**Usage:** `/view remove NAME`
+
+Remove the named view from the active branch. Keep CAS objects and
+cached runtime files for retained history and garbage collection.
+Refuse removal while a command is using the view or it is mounted.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the filesystem view to remove |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /view ls
+
+list the files of a view
+
+**Usage:** `/view ls [-a] NAME[:PATH]...`
+
+List what a view holds, from the result that it recorded: nothing is
+mounted. Name a path as NAME:PATH, in the way that scp names a file of a
+host. A directory lists its entries by name, in the order of ls, and a
+file lists itself; NAME, NAME:/ and NAME:. are the root of the view. As
+ls does, a name that starts with a dot is left out unless --all is given,
+which also lists . and .. . A path that the view does not have is an
+error.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME[:PATH]` | the views and paths to list, as NAME or NAME:PATH |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-a`, `--all` | list the names that start with a dot, and . and ..; default false |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    /view ls session:src
+
+list the directory src of the view session
+
+    /view ls -a session:/
+
+list the root of the view session, the names with a dot included
+
+
+## /view rm
+
+remove files in a view
+
+**Usage:** `/view rm [-f] NAME:PATH...`
+
+Remove paths, and what they hold, in a view. Name each as NAME:PATH. The
+view records the result, so `view apply` removes the same paths from the
+project. The project is not changed. A path that the view does not have
+is an error, unless --force. The names .git and .fyai are never removed.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME:PATH` | the paths to remove, each as NAME:PATH |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-f`, `--force` | ignore a path that the view does not have; default false |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    /view rm session:build session:doc/old.md
+
+remove a directory and a file of the view session
+
+
+## /view cp
+
+copy files between the project and a view
+
+**Usage:** `/view cp SOURCE... DESTINATION...`
+
+Copy paths between the project and a view. Name the view side as NAME:PATH,
+in the way that scp names a file of a host; the other side is a path of the
+project, whatever the current directory is. The sources are all of the
+project, or all of one view, and the destination is the other. A directory
+is copied with what it holds, and a path that exists is replaced. A
+destination that ends in a slash, or is . (the top of the project or of the
+view), is a directory that takes the sources by their names; any other
+destination is the new name of one source. Copying
+into a view records the result there, and the project is not changed.
+Copying to the project replaces its files with no check of what they
+held; `view apply` is the copy that compares them. Regular files,
+directories and symbolic links are copied, and the names .git and .fyai
+are not. A path that begins with a view name and a colon, but is a path
+of the project, is written with a leading ./
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `SOURCE... DESTINATION` | the sources, then the destination |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+### Examples
+
+    /view cp src/main.c session:src/
+
+put the file of the project in the directory src of the view
+
+    /view cp session:src/main.c src/main.c
+
+replace the file of the project with the one of the view
+
+    /view cp session:notes.txt .
+
+copy the file of the view to the top of the project
+
+
+## /view sync
+
+force a filesystem view to persistent storage
+
+**Usage:** `/view sync NAME`
+
+Flush the view's CAS objects and backing files before recording that
+its current snapshot is synchronized. Keep its configured durability
+policy. Refuse synchronization while a command is using the view.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the filesystem view to synchronize |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /view mount
+
+mount a view for read-only inspection
+
+**Usage:** `/view mount NAME PATH`
+
+Mount the named view at an empty directory for inspection and comparison.
+The read-only mount persists in the current mount namespace until unmount.
+Mount privileges are required; rootless inspection can use an explicitly
+started unshare -Urnm sh session. Unmount before entering or updating.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the view to inspect |
+| `PATH` | an empty mount directory, created when absent |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /view unmount
+
+unmount the recorded inspection view
+
+**Usage:** `/view unmount NAME`
+
+Verify the recorded namespace, mount IDs, and source before releasing
+the inspection mount. Busy mounts are retained. Run in the namespace
+that owns the mount and unmount before leaving a rootless inspection shell.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the mounted view to release |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /view enter
+
+enter a private filesystem view
+
+**Usage:** `/view enter [--verify] [--lockdown] NAME [COMMAND...]`
+
+Mount the named view in private namespaces and start a shell in its project
+directory, or execute the remaining command arguments directly. Standard
+input, output, and error are inherited on the CLI. In a session, open
+the command or shell in a terminal tile. Record the result in CAS on exit.
+The host project stays separate. This operation requires Linux user
+namespaces, OverlayFS, and Landlock.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `NAME` | the name of the view to enter |
+| `COMMAND` | the command and arguments to execute; omit to start a shell |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--verify` | independently verify copied bytes and hashes serially before publication; default false |
+| `--lockdown` | confine the command as a tool of a session under /session lockdown, for this run only; default false |
+| `-h`, `--help` | show this help |
+
 ## /catalog
 
 inspect or change the model catalogue of the branch
 
-**Usage:** `/catalog {show|list|tools|get|set|delete|import|export|edit|validate|schema|reset|update} ...`
+**Usage:** `/catalog {delete|edit|export|get|import|list|reset|schema|set|show|tools|update|validate} ...`
 
 The catalogue lists the providers, their endpoints, and the models
 they offer. Each branch owns its catalogue. A path is slash-separated;
@@ -2961,19 +4099,19 @@ an item of a list is named by its name, such as
 
 | Command | Description |
 | --- | --- |
-| `show` | summarize the catalogue |
-| `list` | list the models or the providers |
-| `tools` | list the tools of a coding agent |
-| `get` | write the value at a path |
-| `set` | set the value at a path |
 | `delete` | remove the value at a path |
-| `import` | store a catalogue file |
-| `export` | write the catalogue to a file |
 | `edit` | edit the catalogue in an editor |
-| `validate` | check the catalogue against the schema |
-| `schema` | write the catalogue schema |
+| `export` | write the catalogue to a file |
+| `get` | write the value at a path |
+| `import` | store a catalogue file |
+| `list` | list the models or the providers |
 | `reset` | return to the embedded catalogue |
+| `schema` | write the catalogue schema |
+| `set` | set the value at a path |
+| `show` | summarize the catalogue |
+| `tools` | list the tools of a coding agent |
 | `update` | update the catalogue from the providers |
+| `validate` | check the catalogue against the schema |
 
 With no command, `show` runs.
 
@@ -3270,7 +4408,7 @@ write the messages as JSON Lines
 
 manage the subscription login of a provider
 
-**Usage:** `/auth [PROVIDER] {status|info|usage|login|logout} ...`
+**Usage:** `/auth [PROVIDER] {accounts|info|login|logout|status|usage} ...`
 
 Manage the machine-local ChatGPT subscription credentials. PROVIDER
 names the subscription provider; only `openai` is supported.
@@ -3280,11 +4418,12 @@ names the subscription provider; only `openai` is supported.
 
 | Command | Description |
 | --- | --- |
-| `status` | show the login and the health of the credentials |
+| `accounts` | list saved ChatGPT registrations |
 | `info` | show the subscription and the account |
-| `usage` | show the live limits and credits |
 | `login` | sign in to the subscription |
 | `logout` | sign out and remove the credentials |
+| `status` | show the login and the health of the credentials |
+| `usage` | show recorded usage and subscription settings |
 
 ### Arguments
 
@@ -3326,11 +4465,11 @@ Show the details of the subscription and the account.
 
 ## /auth usage
 
-show the live limits and credits
+show recorded usage and subscription settings
 
 **Usage:** `/auth usage`
 
-Fetch and show the live limits and credits of the subscription.
+Show selected-conversation token totals and the ChatGPT settings link for account limits and credit permissions.
 
 ### Options
 
@@ -3342,20 +4481,38 @@ Fetch and show the live limits and credits of the subscription.
 
 sign in to the subscription
 
-**Usage:** `/auth login [--device-code] [--no-browser]`
+**Usage:** `/auth login [--device-code] [--account CLIENT_ID] [--new-account] [--no-browser] [--manual]`
 
-Sign in with the browser and a loopback callback. `--device-code`
-uses the device-code flow, `--no-browser` writes the URL and does
-not start a browser, and `--manual` reads a pasted redirect URL,
-for a browser on another machine. `^C` or Escape cancels.
+Register fyai and authorize ChatGPT plan usage with a browser and
+a loopback callback. Reuse the active registration, select one with
+`--account`, or add one with `--new-account`. `--no-browser` writes
+the URL; `--manual` reads a complete pasted redirect URL. Device-code
+registration is not supported. `^C` or Escape cancels.
 
 
 ### Options
 
 | Option | Description |
 | --- | --- |
-| `--device-code` | use the headless device-code flow |
+| `--device-code` | reject the unsupported legacy device-code flow |
+| `--account CLIENT_ID` | reuse the issued client ID of a saved account |
+| `--new-account` | register another ChatGPT account or workspace |
 | `--no-browser` | write the URL and start no browser |
+| `--manual` | paste the complete redirect URL back without a local browser |
+| `-h`, `--help` | show this help |
+
+## /auth accounts
+
+list saved ChatGPT registrations
+
+**Usage:** `/auth accounts`
+
+List saved accounts and workspace registrations without tokens.
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `-h`, `--help` | show this help |
 
 ## /auth logout
@@ -3365,7 +4522,7 @@ sign out and remove the credentials
 **Usage:** `/auth logout`
 
 Revoke the login when the provider allows it, and remove the local
-credentials.
+tokens. Keep the client registration and host ID for later sign-in.
 
 
 ### Options
@@ -3378,7 +4535,7 @@ credentials.
 
 inspect and control the MCP servers
 
-**Usage:** `/mcp {status|login|logout|on|off} ...`
+**Usage:** `/mcp {login|logout|off|on|status} ...`
 
 In a session, show the MCP servers, sign in to or out of one, or turn
 them all on or off. A verb imports the OAuth client of a server.
@@ -3388,11 +4545,11 @@ them all on or off. A verb imports the OAuth client of a server.
 
 | Command | Description |
 | --- | --- |
-| `status`, `show` | show the MCP servers and their state |
 | `login` | sign in to an MCP server |
 | `logout` | sign out of an MCP server |
-| `on` | turn the MCP servers on |
 | `off` | turn the MCP servers off |
+| `on` | turn the MCP servers on |
+| `status`, `show` | show the MCP servers and their state |
 
 With no command, `status` runs.
 
@@ -3572,7 +4729,7 @@ shows every tile again.
 
 show and review the page of the screen
 
-**Usage:** `/page {show|review} ...`
+**Usage:** `/page {review|show} ...`
 
 Show the page that draws the screen, or paint and name its areas to
 see which part of the page document draws which rows.
@@ -3582,8 +4739,8 @@ see which part of the page document draws which rows.
 
 | Command | Description |
 | --- | --- |
-| `show` | show the page of the screen and its state |
 | `review` | paint and name the areas of the screen |
+| `show` | show the page of the screen and its state |
 
 With no command, `show` runs.
 
@@ -3638,6 +4795,82 @@ List the live shell sessions and sub-agents of the work pane.
 | --- | --- |
 | `-h`, `--help` | show this help |
 
+## /todo
+
+show or clear the todo list of the branch
+
+**Usage:** `/todo {clear|show} ...`
+
+The todo list is branch state, as the configuration is: `todo_write`
+replaces it, `todo` shows it, and `todo clear` drops it. A sub-agent
+branch inherits a copy of the list of its parent.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `clear` | drop the todo list |
+| `show`, `list` | show the todo list |
+
+With no command, `show` runs.
+
+## /todo show
+
+show the todo list
+
+**Usage:** `/todo show`
+
+**Aliases:** `list`
+
+Show the todo list of the branch.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /todo clear
+
+drop the todo list
+
+**Usage:** `/todo clear`
+
+Drop the todo list of the branch.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /undo
+
+take back the changes of a group of tool calls
+
+**Usage:** `/undo [N]`
+
+Take the project back from what the newest group of tool calls left to what it
+had before them. A group is a response of the model whose calls ran a program,
+and whose changes were shown as a diff (see view/tool_diff). A path that still
+has what the group left takes what it had; a path that you or another call
+changed since is a conflict and stays as it is. Give N to take back the Nth
+newest group; the groups of the session are kept, the newest sixteen.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `N` | which group to take back, 1 for the newest; default 1 |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
 ## /kill
 
 stop a shell session or sub-agent
@@ -3672,13 +4905,33 @@ Show the model, the provider, the login, and the token use of the session.
 | --- | --- |
 | `-h`, `--help` | show this help |
 
+## /profiles
+
+list the egress profiles of the credential transport
+
+**Usage:** `/profiles [--agent AGENT]`
+
+List the egress profiles of the credential transport and whether the
+agent may use each one. The agent is the session itself, or with
+`--agent` a sub-agent that it started, by the name it was delegated
+under, its branch, or its transport execution number. A credential
+source is named, never its value.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--agent AGENT` | list for this sub-agent instead of the session |
+| `-h`, `--help` | show this help |
+
 ## /usage
 
-show the live limits and credits
+show recorded usage and subscription settings
 
 **Usage:** `/usage`
 
-Fetch and show the live limits and credits of the subscription.
+Show selected-conversation token totals and the ChatGPT settings link for account limits and credit permissions.
 
 ### Options
 
@@ -3730,6 +4983,171 @@ restart the current session
 **Usage:** `/reload`
 
 Commit the current branch and restart fyai on it. Live shells and sub-agents must finish or close first. A transient session and a pinned root cannot be reloaded.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /session
+
+set the isolation of this session and move work between it and the project
+
+**Usage:** `/session {lockdown|new|pull|push|status|yolo} ...`
+
+The isolation of the session. With no subcommand, show the state.
+`lockdown` takes the strongest isolation that this host can enforce, and
+`yolo` takes it all off. A session that runs in a view moves work between
+its view and the project: `push` writes its changes into the project, and
+`pull` replaces the view with the project as it is now.
+
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `lockdown` | take the strongest isolation that this host can enforce |
+| `new` | start a new session with an empty conversation |
+| `pull` | take the project as it is now into the session |
+| `push` | apply the changes of the session to the project |
+| `status` | show the isolation of this session |
+| `yolo` | take off the isolation of the session |
+
+With no command, `status` runs.
+
+**See also:** `/help view`, `/help reload`
+
+## /session new
+
+start a new session with an empty conversation
+
+**Usage:** `/session new`
+
+Start a new `session/` branch with the configuration of the current
+branch and no conversation, and continue on it. The branch that the
+session leaves is not changed: `resume` returns to it. `clear` empties
+the current branch instead. The background work of the session ends.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /session push
+
+apply the changes of the session to the project
+
+**Usage:** `/session push [--dry-run] [PATH...]`
+
+Write the changes of a session that runs in a view into the project, as
+`view apply` does: a path that the project still has as the view began
+with it takes the result, a path that already equals the result is left
+alone, and a path that the project and the session changed differently
+is a conflict, reported and not changed. Name paths to apply only those.
+The session keeps running on its view. The view cannot reach the project,
+so the supervisor of the session, which stays outside it, does the work.
+
+
+### Arguments
+
+| Argument | Description |
+| --- | --- |
+| `PATH` | the paths to apply, relative to the project; omit to apply every change |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--dry-run` | report what would change and write nothing; default false |
+| `-h`, `--help` | show this help |
+
+## /session pull
+
+take the project as it is now into the session
+
+**Usage:** `/session pull [--discard]`
+
+Replace the view of the session with a fresh capture of the project, and
+start the session again on it, on the same branch. The replacement drops
+the changes of the view, so a session that has some is not replaced:
+push them first, or give `--discard`. A restart ends the shells and
+sub-agents of the session, so they must finish first.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--discard` | drop the changes of the view instead of refusing; default false |
+| `-h`, `--help` | show this help |
+
+## /session status
+
+show the isolation of this session
+
+**Usage:** `/session status`
+
+Show the credential transport, the sandbox, the views of sub-agents and
+the view that the session itself runs in, and whether a restart is still
+to apply what is stored.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /session lockdown
+
+take the strongest isolation that this host can enforce
+
+**Usage:** `/session lockdown`
+
+Set the isolation keys together: `agent/transport_isolation: auto`, so
+the provider credentials stay in a separate process; the lockdown
+sandbox profile, `sandbox_profile: lockdown`, which confines the tools
+by `sandbox_lockdown` whatever `sandbox` says, and by default denies
+`~/.ssh` and all network egress where the kernel can restrict it; and
+`view/isolate_session`, so the session runs in a view
+of the project, made from the project as it is now, where this host
+can make one. A sub-agent then shares the view of the session. The
+views of sub-agents (`agent/isolation`) are not touched: set that key
+yourself. Nothing changes when the transport cannot run here. The session restarts to
+start the transport and the view, as `/reload` does, so live shells
+and sub-agents must finish first. A change of the project that is
+made later is not in the view: `view update session` takes it.
+`/session yolo` goes the other way.
+
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `-h`, `--help` | show this help |
+
+## /session yolo
+
+take off the isolation of the session
+
+**Usage:** `/session yolo`
+
+Turn off the credential transport and the sandbox:
+`agent/transport_isolation: none`, `sandbox_profile: normal` and
+`sandbox: false`, and the view of
+the session, `view/isolate_session`, when it is on. The views of
+sub-agents (`agent/isolation`) are not touched.
+The keys are stored. A session that runs with the credential transport
+or in a view stays so until fyai starts again: the key lives in the
+transport, and a restart of the session could not give it back. Start
+fyai again with the key. The changes of a session in a view are not
+applied: `view apply session` writes them to the project. `/session
+lockdown` goes the other way, and restarts the session to start the
+transport.
+
 
 ### Options
 
