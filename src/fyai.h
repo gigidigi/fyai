@@ -103,6 +103,7 @@ static inline fy_generic fyai_generic_or_null(fy_generic v)
 #define DEFAULT_COMPLETION_MODE "tab"
 #define DEFAULT_CHORD_TIMEOUT_MS 1000
 #define DEFAULT_COMMAND_OUTPUT "transcript"
+#define DEFAULT_NOTICE_OUTPUT "transcript"
 #define DEFAULT_COMMAND_BG "theme"
 #define DEFAULT_COMMAND_BG_MIX 6
 #define DEFAULT_TOOL_DISPLAY "inline"
@@ -207,6 +208,8 @@ struct fyai_cfg {
 	bool shell_tool_supported;
 	/* The selected endpoint declares a provider-hosted web search tool. */
 	bool web_search_supported;
+	/* An unsupported-search notice is emitted once per invocation. */
+	bool web_search_notice_emitted;
 	/* The endpoint implements the OpenAI-specific /responses/compact route. */
 	bool response_compaction_supported;
 	bool model_explicit;
@@ -308,6 +311,7 @@ struct fyai_cfg {
 	const char *completion_mode;	/* tab | auto */
 	int chord_timeout_ms;		/* wait of a chord for its next key */
 	const char *command_output;	/* pane | transcript */
+	const char *notice_output;	/* pane | transcript */
 	const char *command_bg;		/* theme | none | #rrggbb */
 	int command_bg_mix;		/* percent of the theme colour */
 	const char *tool_display;	/* pane | inline */
@@ -666,6 +670,7 @@ struct fyai_ctx {
 	fy_generic tools_spec;
 	unsigned int tools_spec_generation;
 	bool tools_spec_agent_child;
+	bool tools_spec_agent_restricted;
 	fy_generic last_message;
 	fy_generic arena_config;	/* the active branch's config, or fy_invalid */
 	fy_generic arena_catalog;	/* catalogue of the branch, or fy_invalid */
@@ -898,6 +903,22 @@ enum fyai_event_owner_kind {
 int fyai_event_inject_owned(struct fyai_ctx *ctx, char *text,
 			    enum fyai_event_owner_kind owner_kind,
 			    char *owner);
+/* Agent input keeps its sender separate from model-visible text. */
+struct fyai_event_input {
+	char *text;
+	char *from;
+	char *message_id;
+	char *reply_to;
+	long long execution;
+};
+int fyai_event_inject_agent(struct fyai_ctx *ctx, const char *text,
+			    const char *from, long long execution,
+			    const char *message_id, const char *reply_to);
+bool fyai_event_take_live_input(struct fyai_ctx *ctx,
+				struct fyai_event_input *input);
+void fyai_event_input_clear(struct fyai_event_input *input);
+fy_generic fyai_turn_append_event(struct fyai_ctx *ctx, fy_generic turn,
+				  const struct fyai_event_input *input);
 /* Take the oldest queued event, or NULL. The caller owns it. */
 char *fyai_event_take(struct fyai_ctx *ctx);
 bool fyai_event_queued(const struct fyai_ctx *ctx);

@@ -58,6 +58,7 @@ struct gc {
 	struct storage_roots *storages;
 	size_t count, capacity;
 	time_t cutoff;
+	bool no_grace;
 	struct fyai_view_gc_stats *stats;
 };
 
@@ -227,7 +228,8 @@ static bool gc_old(struct gc *gc, const struct stat *st)
 {
 	time_t newest = st->st_mtime > st->st_ctime ? st->st_mtime : st->st_ctime;
 
-	return newest <= gc->cutoff;
+	/* Runtime removal can change a hard-linked blob's ctime after the cutoff. */
+	return gc->no_grace || newest <= gc->cutoff;
 }
 
 static void gc_count(struct gc *gc, const struct stat *st, size_t *counter)
@@ -466,7 +468,7 @@ out:
 
 int fyai_view_gc(struct fyai_ctx *ctx, unsigned int grace, struct fyai_view_gc_stats *stats)
 {
-	struct gc gc = { .ctx = ctx, .stats = stats };
+	struct gc gc = { .ctx = ctx, .stats = stats, .no_grace = !grace };
 	fy_generic entry;
 	struct stat st;
 	const char *key;

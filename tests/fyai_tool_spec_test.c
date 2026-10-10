@@ -29,6 +29,7 @@ FYAI_TEST_ENTRY(tools, personas, tools_personas)
 FYAI_TEST_ENTRY(tools, cache, tools_cache)
 FYAI_TEST_ENTRY(tools, templates, tools_templates)
 FYAI_TEST_ENTRY(tools, registry, tools_registry)
+FYAI_TEST_ENTRY(tools, result_format, tools_result_format)
 
 static struct fyai_cfg test_cfg;
 static struct fyai_ctx test_ctx;
@@ -158,6 +159,7 @@ static void test_filtered(void)
 {
 	fy_generic tools, tool, fn, n;
 	bool has_ask_user = false;
+	bool has_ask_parent = false;
 	bool has_agent = false;
 
 	/* A plain context keeps all tools. */
@@ -167,28 +169,62 @@ static void test_filtered(void)
 		n = fy_get(fn, "name");
 		if (fy_equal(n, "ask_user"))
 			has_ask_user = true;
+		if (fy_equal(n, "ask_parent"))
+			has_ask_parent = true;
 		if (fy_equal(n, "agent"))
 			has_agent = true;
 	}
-	require(has_ask_user && has_agent,
-		"plain context must have ask_user and agent");
+	require(has_ask_user && !has_ask_parent && has_agent,
+		"root has ask_user, not ask_parent");
 
-	/* A sub-agent context removes agent and agent_input. */
+	/* A sub-agent context removes agent and parent agent controls. */
 	test_cfg.agent_child = true;
+	test_ctx.tool_rpc = (struct jsonrpc_conn *)1;
 	tools = make_tools_filtered(&test_ctx);
-	has_ask_user = has_agent = false;
+	has_ask_user = has_ask_parent = has_agent = false;
 	fy_foreach(tool, tools) {
 		fn = fy_get(tool, "function");
 		n = fy_get(fn, "name");
 		if (fy_equal(n, "ask_user"))
 			has_ask_user = true;
+		if (fy_equal(n, "ask_parent"))
+			has_ask_parent = true;
 		if (fy_equal(n, "agent"))
 			has_agent = true;
 	}
-	/* It cannot delegate or answer another sub-agent, but it can ask:
-	 * the question goes up to the parent, where the person is. */
-	require(has_ask_user && !has_agent,
-		"a sub-agent keeps ask_user and loses agent");
+	require(!has_ask_user && has_ask_parent && !has_agent,
+		"delegated agent has ask_parent, not ask_user");
+
+	/* An admitted agent can delegate recursively. */
+	test_ctx.agent_execution = 3;
+	tools = make_tools_filtered(&test_ctx);
+	has_ask_user = has_ask_parent = has_agent = false;
+	fy_foreach(tool, tools) {
+		n = fy_get(fy_get(tool, "function"), "name");
+		if (fy_equal(n, "ask_user"))
+			has_ask_user = true;
+		if (fy_equal(n, "ask_parent"))
+			has_ask_parent = true;
+		if (fy_equal(n, "agent"))
+			has_agent = true;
+	}
+	require(!has_ask_user && has_ask_parent && has_agent,
+		"recursive agent keeps delegation and ask_parent");
+
+	/* A user-resumed branch has no parent connection. */
+	test_ctx.tool_rpc = NULL;
+	test_ctx.agent_execution = 0;
+	tools = make_tools_filtered(&test_ctx);
+	has_ask_user = has_ask_parent = false;
+	fy_foreach(tool, tools) {
+		n = fy_get(fy_get(tool, "function"), "name");
+		if (fy_equal(n, "ask_user"))
+			has_ask_user = true;
+		if (fy_equal(n, "ask_parent"))
+			has_ask_parent = true;
+	}
+	require(has_ask_user && !has_ask_parent,
+		"user-resumed agent has ask_user again");
 }
 
 static void test_personas(void)
@@ -398,9 +434,10 @@ static void test_registry(void)
 	}
 
 	/* A call that reads the tables of the parent never runs in a job. */
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < 5; i++) {
 		static const char *const parent[] = {
-			"agent_input", "cancel", "shell_close", "time",
+			"agent_input", "agent_message", "cancel",
+			"shell_close", "time",
 		};
 
 		require(fyai_tool_has(parent[i], FYAI_TOOL_PARENT),
@@ -420,4 +457,51 @@ static void test_registry(void)
 int tools_registry(void)
 {
 	return tools_run(test_registry);
+}
+
+static void test_result_format(void)
+{
+	const struct fyai_tool_def *def;
+	fy_generic args;
+	char *text;
+
+	def = fyai_tool_find("list");
+	require(def && def->format_result, "list result formatter missing");
+	args = fy_mapping(test_ctx.gb, "kind", "agents");
+	text = def->format_result(&test_ctx, test_ctx.gb, args,
+		"{\"agents\":[{\"name\":\"beta\",\"state\":\"running\",\"view\":false}]}");
+	require(text && strstr(text, "| Name | State | View |") &&
+		strstr(text, "| beta | running | no |") &&
+		!strstr(text, "{\"agents\""), "list result is a table");
+	free(text);
+	text = def->format_result(&test_ctx, test_ctx.gb, args,
+		"{\"agents\":[]}");
+	require(text && strstr(text, "_none_"), "empty list has a readable note");
+	free(text);
+
+	def = fyai_tool_find("project_view");
+	require(def && def->format_result, "project_view result formatter missing");
+	args = fy_mapping(test_ctx.gb, "action", "apply");
+	text = def->format_result(&test_ctx, test_ctx.gb, args,
+		"{\"applied\":1,\"satisfied\":0,\"conflicts\":0,\"skipped\":0,"
+		"\"changes\":[{\"path\":\"a.c\",\"status\":\"changed\","
+		"\"action\":\"applied\",\"reason\":\"\",\"before\":{\"large\":\"hidden\"}}]}");
+	require(text && strstr(text, "1 applied") &&
+		strstr(text, "| Path | Status | Action | Reason |") &&
+		strstr(text, "| a.c | changed | applied |") &&
+		!strstr(text, "large"), "project_view result summarizes changes");
+	free(text);
+	args = fy_mapping(test_ctx.gb, "action", "changes");
+	text = def->format_result(&test_ctx, test_ctx.gb, args,
+		"{\"changes\":[{\"path\":\"b.c\",\"status\":\"added\","
+		"\"before\":{\"large\":\"hidden\"}}]}");
+	require(text && strstr(text, "| Path | Status |") &&
+		strstr(text, "| b.c | added |") && !strstr(text, "large"),
+		"project_view changes shows only useful columns");
+	free(text);
+}
+
+int tools_result_format(void)
+{
+	return tools_run(test_result_format);
 }
